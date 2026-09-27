@@ -23,8 +23,11 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
-test('config: owner order — mimo → deepseek-v4.1-flash → OpenRouter last (muse-spark dropped)', () => {
-  assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/deepseek/deepseek-v4-flash-0731']);
+test('config: Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail of three vendors', () => {
+  assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash',
+    'openrouter/deepseek/deepseek-v4-flash-0731', 'openrouter/google/gemini-2.5-flash-lite', 'openrouter/xiaomi/mimo-v2.6-flash']);
+  const firstOr = LADDER.findIndex(m => m.startsWith('openrouter/'));
+  assert.ok(LADDER.slice(firstOr).every(m => m.startsWith('openrouter/')), 'paid OpenRouter rungs only at the tail');
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -75,7 +78,7 @@ test('both keys limited → all Go rungs parked, OpenRouter answers, Go comes ba
   const store = memoryStore(2);
   const calls = [];
   const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
-  assert.equal(r.model, LADDER[LADDER.length - 1]);
+  assert.equal(r.model, LADDER.find(m => m.startsWith('openrouter/')));
   assert.equal(calls.filter(c => c.url.includes('opencode.ai')).length, 2, 'first Go rung once per key, rest parked');
   // next call goes straight to OpenRouter
   const calls2 = [];
@@ -101,7 +104,7 @@ test('503 / Bad Request on a Go rung does NOT burn a key', async () => {
 test('no Go keys → OpenRouter only; no keys → 503; unknown ladder → 404', async () => {
   const calls = [];
   const r = await run(msg, { env: { OPENROUTER_API_KEY: 'k' }, config, store: memoryStore(0), fetchImpl: fakeFetch({}, calls) });
-  assert.equal(r.model, LADDER[LADDER.length - 1]);
+  assert.equal(r.model, LADDER.find(m => m.startsWith('openrouter/')));
   assert.equal((await run(msg, { env: {}, config, store: memoryStore(0), fetchImpl: fakeFetch({}, []) })).status, 503);
   assert.equal((await run({ ...msg, model: 'nope' }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, []) })).status, 404);
 });
