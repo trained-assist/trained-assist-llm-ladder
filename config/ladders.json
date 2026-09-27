@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail deepseek-v4-flash-0731 → ling-3.0-flash → mimo-v2.6-flash (three vendors; muse-spark dropped 2026-09-27). free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'. doctor (owner 2026-09-28) = strongest tier for playbook 'doctor' steps when Claude/Codex are unavailable: Go MiMo-V2.6-Flash primary (tau2-bench airline 76.6% vs Kimi K2.7 Code 71.7%), then STRONGER Go models instead of cheaper ones (qwen3.8-max → qwen3.7-plus → deepseek-v4-pro), paid OpenRouter mimo last.",
+  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail deepseek-v4-flash-0731 → ling-3.0-flash → mimo-v2.6-flash (three vendors; muse-spark dropped 2026-09-27). free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'. doctor (owner 2026-09-28) = strongest tier for playbook 'doctor' steps when Claude/Codex are unavailable: Go MiMo-V2.6-Flash primary (tau2-bench airline 76.6% vs Kimi K2.7 Code 71.7%), then STRONGER Go models instead of cheaper ones (qwen3.7-plus → deepseek-v4-pro; qwen3.8-max dropped 2026-09-28 — owner: far too expensive), paid OpenRouter mimo last.",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -65,35 +65,30 @@
     "doctor": {
       "build": [
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/qwen3.8-max",
         "opencode-go/qwen3.7-plus",
         "opencode-go/deepseek-v4-pro",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/qwen3.8-max",
         "opencode-go/qwen3.7-plus",
         "opencode-go/deepseek-v4-pro",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/qwen3.8-max",
         "opencode-go/qwen3.7-plus",
         "opencode-go/deepseek-v4-pro",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/qwen3.8-max",
         "opencode-go/qwen3.7-plus",
         "opencode-go/deepseek-v4-pro",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/qwen3.8-max",
         "opencode-go/qwen3.7-plus",
         "opencode-go/deepseek-v4-pro",
         "openrouter/xiaomi/mimo-v2.6-flash"
