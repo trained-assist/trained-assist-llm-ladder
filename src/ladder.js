@@ -200,9 +200,15 @@ function attempt(env, model, body, keyIndex, opts) {
  *                  park(models, untilMs)
  * @returns {Promise<{ok:true, model, data?, content?, stream?, attempts} | {ok:false, status, error, attempts}>}
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS } = {}) {
-  const all = rungsFor(config, body && body.model);
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null } = {}) {
+  let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
+  // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
+  // through the worker without handing provider keys to the bench.
+  if (pinRung) {
+    if (!all.includes(pinRung)) return { ok: false, status: 400, error: `rung not in ladder: ${pinRung}`, attempts: [] };
+    all = [pinRung];
+  }
   const pool = readPool(env);
   const hasKey = m => (m.startsWith('opencode-go/') ? pool.length > 0 : !!env.OPENROUTER_API_KEY);
   const keyed = all.filter(hasKey);
@@ -212,7 +218,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const now = Date.now();
   const skipped = m => { const h = snap.health[m]; return !!h && (h.skipUntil === null || h.skipUntil > now); };
   // If health skips every keyed rung, try them all anyway — a stale skip must not black-hole it.
-  const live = keyed.filter(m => !skipped(m));
+  const live = pinRung ? keyed : keyed.filter(m => !skipped(m));
   const rungs = live.length ? live : keyed;
   let keyIndex = Math.min(snap.keys.active || 0, Math.max(0, pool.length - 1));
   let goParked = false;

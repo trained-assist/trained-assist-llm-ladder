@@ -212,3 +212,17 @@ test('provider rejects response_format (400) → same rung retried once without 
   assert.equal(r.model, FREE[0]);
   assert.deepEqual(seen, [true, false]);
 });
+
+test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung rejected', async () => {
+  const store = memoryStore(2);
+  store.state.health[LADDER[1]] = { failures: 3, firstFailureAt: Date.now(), skipUntil: Date.now() + 60000 };
+  const calls = [];
+  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls), pinRung: LADDER[1] });
+  assert.equal(r.model, LADDER[1]);
+  assert.equal(calls.length, 1);
+  const beh = { [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }) };
+  const r2 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []), pinRung: LADDER[1] });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.attempts.length, 1);
+  assert.equal((await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
+});

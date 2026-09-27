@@ -49,7 +49,8 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 
 Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
 `ladder_ttfb_ms` (streaming: first-token window, default 15000), `ladder_total_timeout_ms` (whole
-ladder). Streaming picks the rung before the first output token (text, reasoning or tool call);
+ladder), `ladder_rung` (benchmarks: pin one rung of the ladder — no failover; used by the
+continuous bench in trained-assist-free-models-benchmark). Streaming picks the rung before the first output token (text, reasoning or tool call);
 after it there is no failover.
 
 opencode provider (free ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
