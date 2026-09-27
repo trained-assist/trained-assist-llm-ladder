@@ -6,10 +6,11 @@
 //   GET  /v1/state               model health + key rotation snapshot (auth)
 //   POST /v1/chat/completions    body.model = ladder ("deepseek", "deepseek:review") (auth)
 //
-// Auth: `Authorization: Bearer <LADDER_TOKEN>`. Streaming is not supported — service calls are
-// short; the response is a normal chat.completion whose `model` is the rung that answered
-// (also in `x-ladder-model`). Optional body fields: ladder_timeout_ms (per rung),
-// ladder_total_timeout_ms (whole ladder).
+// Auth: `Authorization: Bearer <LADDER_TOKEN>`. Non-streaming → a normal chat.completion whose
+// `model` is the rung that answered (also in `x-ladder-model`). stream:true → SSE relayed from
+// the chosen rung (chosen before the first token; no failover after it) — how opencode uses the
+// `free-ladder` model. Tools pass through as is. Optional body fields: ladder_timeout_ms (per
+// rung, non-stream), ladder_ttfb_ms (stream: first-token window), ladder_total_timeout_ms.
 
 import { run, readPool, DEFAULT_LADDER } from './ladder.js';
 import config from '../config/ladders.json';
@@ -75,17 +76,24 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
     if (!body || !Array.isArray(body.messages) || !body.messages.length) return oaError(400, 'messages required', 'invalid_request_error');
-    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ...chat } = body;
+    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     const started = Date.now();
     const r = await run(chat, {
       env, config, store: store || makeStore(env), fetchImpl,
       timeoutMs: Math.min(Number(perRung) || 20000, 60000),
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
+      ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
     });
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, attempts: r.attempts }));
     if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts });
+    if (r.stream) {
+      return new Response(r.stream, { status: 200, headers: {
+        'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache',
+        'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeader,
+      } });
+    }
     const out = { ...r.data, model: r.model };
     return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeader });
   }

@@ -29,7 +29,7 @@ test('config: owner order — mimo → deepseek-v4.1-flash → muse-spark → Op
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
   const calls = [];
-  const r = await run({ ...msg, max_tokens: 5, stream: true }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
+  const r = await run({ ...msg, max_tokens: 5 }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
   assert.equal(r.ok, true);
   assert.equal(r.model, LADDER[0]);
   assert.match(calls[0].url, /opencode\.ai\/zen\/go\/v1\/chat\/completions$/);
@@ -131,4 +131,84 @@ test('state: per-model exponential backoff restarts for every model; key rotatio
   assert.equal(r.rotated, false);
   assert.equal(r.retryAt, 1000);
   assert.equal(snapshot(st, 2, 2000).keys.active, 1, 'healed keys: active stays usable');
+});
+
+// ── Streaming (opencode as a client of the free ladder) ────────────────────────────────────────
+const enc = new TextEncoder();
+function sseBody(events, { delayFirstMs = 0, endWithoutOutput = false } = {}) {
+  return new ReadableStream({
+    async start(c) {
+      if (delayFirstMs) await new Promise(r => setTimeout(r, delayFirstMs));
+      for (const e of events) c.enqueue(enc.encode(`data: ${typeof e === 'string' ? e : JSON.stringify(e)}\n\n`));
+      c.close();
+    },
+  });
+}
+const delta = (d) => ({ choices: [{ delta: d }] });
+function streamFetch(behaviour, calls) {
+  return async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url, model: body.model, body });
+    const b = (behaviour[body.model] || (() => ({ events: [delta({ role: 'assistant' }), delta({ content: 'hi' }), '[DONE]'] })))({ body, signal: init.signal });
+    if (b.status && b.status !== 200) return { ok: false, status: b.status, text: async () => b.error || '' };
+    // honour abort (ttfb timeout)
+    const bodyStream = sseBody(b.events, b);
+    return { ok: true, status: 200, body: bodyStream };
+  };
+}
+async function readAll(stream) {
+  const r = stream.getReader(); const dec = new TextDecoder(); let out = '';
+  for (;;) { const { value, done } = await r.read(); if (done) return out; out += dec.decode(value); }
+}
+const FREE = config.ladders.free.build;
+
+test('free-ladder alias resolves; stream answered by the first rung with output, bytes replayed intact', async () => {
+  const calls = [];
+  const r = await run({ model: 'free-ladder', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, FREE[0]);
+  assert.equal(calls[0].body.stream, true);
+  const text = await readAll(r.stream);
+  assert.match(text, /"role":"assistant"/, 'the buffered role frame is replayed');
+  assert.match(text, /"content":"hi"/);
+  assert.match(text, /\[DONE\]/);
+});
+
+test('stream: a rung that ends / errors before the first token fails over; role-only frame does not commit', async () => {
+  const beh = {
+    [short(FREE[0])]: () => ({ events: [delta({ role: 'assistant' })] }),                       // ends with no output
+    [short(FREE[1])]: () => ({ events: [{ error: { message: 'upstream overloaded' } }] }),       // in-stream error
+    [short(FREE[2])]: () => ({ status: 503, error: 'busy' }),
+  };
+  const calls = [];
+  const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch(beh, calls) });
+  assert.equal(r.model, FREE[3]);
+  assert.deepEqual(r.attempts.map(a => a.outcome), ['error', 'error', 'error', 'ok']);
+});
+
+test('stream: tool_calls delta counts as the first token (tools passed through)', async () => {
+  const tools = [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }];
+  const beh = { [short(FREE[0])]: ({ body }) => { assert.deepEqual(body.tools, tools); return { events: [delta({ tool_calls: [{ index: 0, function: { name: 'bash', arguments: '{}' } }] }), '[DONE]'] }; } };
+  const r = await run({ model: 'free', stream: true, tools, messages: [{ role: 'user', content: 'ls' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch(beh, []) });
+  assert.equal(r.model, FREE[0]);
+  assert.match(await readAll(r.stream), /tool_calls/);
+});
+
+test('non-stream: tool_calls with empty content is a valid answer', async () => {
+  const f = async (url, init) => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: null, tool_calls: [{ id: 't', type: 'function', function: { name: 'bash', arguments: '{}' } }] } }] }), text: async () => '' });
+  const r = await run({ model: 'free', messages: [{ role: 'user', content: 'ls' }], tools: [{ type: 'function', function: { name: 'bash' } }] }, { env, config, store: memoryStore(2), fetchImpl: f });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, FREE[0]);
+});
+
+test('provider rejects response_format (400) → same rung retried once without it', async () => {
+  const seen = [];
+  const f = async (url, init) => {
+    const body = JSON.parse(init.body); seen.push(!!body.response_format);
+    if (body.response_format) return { ok: false, status: 400, text: async () => 'response_format is not supported by this model' };
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }), text: async () => '' };
+  };
+  const r = await run({ model: 'free', response_format: { type: 'json_object' }, messages: [{ role: 'user', content: 'json' }] }, { env, config, store: memoryStore(2), fetchImpl: f });
+  assert.equal(r.model, FREE[0]);
+  assert.deepEqual(seen, [true, false]);
 });
