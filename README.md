@@ -13,8 +13,9 @@ Live: `https://llm-ladder.trainedassist.store`
 
 1. `opencode-go/mimo-v2.6-flash`
 2. `opencode-go/deepseek-v4.1-flash`
-3. `opencode-go/muse-spark-1.3-contributor`
-4. `openrouter/deepseek/deepseek-v4-flash-0731` — paid, **last** rung only
+3. `openrouter/deepseek/deepseek-v4-flash-0731` — paid, **last** rung only
+
+(`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 
 - **`free`** (alias `free-ladder`) — cheap/free rungs for agents that run on weak models
   (opencode as a client, pr-autofix): OpenCode Go cheap models first, OpenRouter `:free`

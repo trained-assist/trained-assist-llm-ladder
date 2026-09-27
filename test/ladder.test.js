@@ -23,8 +23,8 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
-test('config: owner order — mimo → deepseek-v4.1-flash → muse-spark → OpenRouter last', () => {
-  assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'opencode-go/muse-spark-1.3-contributor', 'openrouter/deepseek/deepseek-v4-flash-0731']);
+test('config: owner order — mimo → deepseek-v4.1-flash → OpenRouter last (muse-spark dropped)', () => {
+  assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/deepseek/deepseek-v4-flash-0731']);
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -75,7 +75,7 @@ test('both keys limited → all Go rungs parked, OpenRouter answers, Go comes ba
   const store = memoryStore(2);
   const calls = [];
   const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
-  assert.equal(r.model, LADDER[3]);
+  assert.equal(r.model, LADDER[LADDER.length - 1]);
   assert.equal(calls.filter(c => c.url.includes('opencode.ai')).length, 2, 'first Go rung once per key, rest parked');
   // next call goes straight to OpenRouter
   const calls2 = [];
@@ -101,7 +101,7 @@ test('503 / Bad Request on a Go rung does NOT burn a key', async () => {
 test('no Go keys → OpenRouter only; no keys → 503; unknown ladder → 404', async () => {
   const calls = [];
   const r = await run(msg, { env: { OPENROUTER_API_KEY: 'k' }, config, store: memoryStore(0), fetchImpl: fakeFetch({}, calls) });
-  assert.equal(r.model, LADDER[3]);
+  assert.equal(r.model, LADDER[LADDER.length - 1]);
   assert.equal((await run(msg, { env: {}, config, store: memoryStore(0), fetchImpl: fakeFetch({}, []) })).status, 503);
   assert.equal((await run({ ...msg, model: 'nope' }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, []) })).status, 404);
 });
