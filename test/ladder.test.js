@@ -229,3 +229,9 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
   assert.equal(r2.attempts.length, 1);
   assert.equal((await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
 });
+
+test('config: doctor = Go MiMo first, then stronger Go models, paid OpenRouter mimo last (owner 2026-09-28)', () => {
+  const expected = ['opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.8-max', 'opencode-go/qwen3.7-plus',
+    'opencode-go/deepseek-v4-pro', 'openrouter/xiaomi/mimo-v2.6-flash'];
+  for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
+});
