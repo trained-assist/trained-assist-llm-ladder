@@ -9,5 +9,5 @@
 - [реализовано] pr-autofix (фиксер) v1.6.0 ходит в `free-ladder`, своя копия лестницы удалена; потребители (trained-assist-agent, software-engineering-playbooks) передают org-секрет `LLM_LADDER_TOKEN`.
 - [реализовано] opencode как клиент `free-ladder` проверен вживую: tool call `read` + ответ, 15 с.
 - [реализовано] Из trained-assist-agent выпилены локальные копии: in-process лестница service-llm, `llm-gateway.js`, `infra/llm-edge` (домен llm.trainedassist.store снят).
-- [планируется] Бенчмарки (trained-assist-free-models-benchmark) гонять регулярно и по ним обновлять порядок ступеней.
+- [реализовано] Постоянный бенч: trained-assist-free-models-benchmark `scripts/ladder-bench.mjs`, каждые 6 ч, каждая ступень через `ladder_rung` + лестницы целиком → issue #3. [планируется] по нему обновлять порядок ступеней.
 - [планируется] OpenCode-раннер на VM читает здоровье моделей из этого сервиса (сейчас у него своё локальное).
