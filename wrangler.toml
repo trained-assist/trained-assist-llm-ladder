@@ -1,0 +1,23 @@
+name = "trained-assist-llm-ladder"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+routes = [
+  { pattern = "llm-ladder.trainedassist.store", custom_domain = true }
+]
+
+
+# Persistent Workers Logs (queryable in the dashboard) — every ladder call logs its attempts.
+[observability]
+enabled = true
+
+# One global LadderState instance: model health + Go key rotation, strongly consistent.
+[[durable_objects.bindings]]
+name = "LADDER_STATE"
+class_name = "LadderState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LadderState"]
+
+# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY

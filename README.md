@@ -1,0 +1,76 @@
+# trained-assist-llm-ladder
+
+OpenAI-compatible **model ladder** for small "service" LLM calls across trained-assist repos
+(answer buttons, formatting, classifiers, summaries, routing). Cloudflare Worker — no VM.
+
+Live: `https://llm-ladder.trainedassist.store`
+
+## Ladder
+
+`config/ladders.json` → `deepseek` (owner decision 2026-09-27), same for every role:
+
+1. `opencode-go/mimo-v2.6-flash`
+2. `opencode-go/deepseek-v4.1-flash`
+3. `opencode-go/muse-spark-1.3-contributor`
+4. `openrouter/deepseek/deepseek-v4-flash-0731` — paid, **last** rung only
+
+Rungs are tried top-down, non-streaming:
+
+- **Model health** — a failing rung is skipped for everyone: transient faults back off per model
+  (15s → 30s → 60s … cap 5 min, each model its own counter); quota/limit errors skip for the
+  classified TTL (`src/classify.js`).
+- **Two OpenCode Go keys** (`OPENCODE_GO_API_KEYS`) — a key-level fault (usage limit, 429,
+  rejected key) rotates to the spare key and retries the same rung. When both keys are parked,
+  every Go rung is skipped until the earliest key heals (15 min quota / 1 h rejected), so the
+  ladder serves OpenRouter and returns to Go by itself. 503 / Bad Request never burn a key.
+- **Guard** — empty content, or non-JSON when `response_format: json_object`, fails the rung.
+
+State lives in one global Durable Object (`LadderState`) — strongly consistent across callers.
+
+> Research / presentation / vision calls are NOT for this service — they stay on Gemini in their
+> callers (owner: «gemini для рисеча и для презентаций он прямо гуд»).
+
+## API
+
+All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
+
+| Method | Path | |
+|---|---|---|
+| GET | `/health` | liveness + ladder names |
+| GET | `/v1/models` | ladders as model ids (`deepseek`, `deepseek:review`, …) |
+| GET | `/v1/state` | model health + key rotation snapshot |
+| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `deepseek`) |
+
+Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
+`ladder_total_timeout_ms` (whole ladder). Response = the upstream `chat.completion` with `model`
+set to the rung that answered, plus headers `x-ladder-model` / `x-ladder-attempts`.
+Failure: `502 {error:{type:"ladder_error", attempts:[…]}}`.
+
+```bash
+curl -s https://llm-ladder.trainedassist.store/v1/chat/completions \
+  -H "Authorization: Bearer $LADDER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek","messages":[{"role":"user","content":"Верни JSON {\"ok\":true}"}],"response_format":{"type":"json_object"}}'
+```
+
+Clients: `trained-assist-agent` `src/service-llm.js` calls this service and falls back to the
+same ladder in-process when the service is unreachable.
+
+## Development
+
+```bash
+npm test            # node:test — ladder + state logic (no Workers runtime needed)
+npx wrangler dev    # local worker
+```
+
+Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`.
+Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
+`CF_ACCOUNT_ID`).
+
+## Claude Code Instructions
+
+- Keep the Worker dependency-free; logic stays in pure modules (`src/ladder.js`, `src/state.js`)
+  so node:test covers it — `src/index.js` / `src/state-do.js` are thin runtime adapters.
+- Changing the ladder = edit `config/ladders.json` + the test that pins the order, and log it in
+  `docs/requirements-log.md`.
+- Never add a rung that is more expensive than the ones above it without the owner's decision.
+- PRs only, never push to `main` directly.

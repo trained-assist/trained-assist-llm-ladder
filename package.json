@@ -1,0 +1,15 @@
+{
+  "name": "trained-assist-llm-ladder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenAI-compatible model ladder (OpenCode Go → OpenRouter last) for trained-assist service LLM calls — Cloudflare Worker",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.28.0"
+  }
+}
