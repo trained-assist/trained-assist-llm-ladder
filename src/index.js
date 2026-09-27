@@ -10,7 +10,8 @@
 // `model` is the rung that answered (also in `x-ladder-model`). stream:true → SSE relayed from
 // the chosen rung (chosen before the first token; no failover after it) — how opencode uses the
 // `free-ladder` model. Tools pass through as is. Optional body fields: ladder_timeout_ms (per
-// rung, non-stream), ladder_ttfb_ms (stream: first-token window), ladder_total_timeout_ms.
+// rung, non-stream), ladder_ttfb_ms (stream: first-token window), ladder_total_timeout_ms,
+// ladder_rung (benchmarks: pin one rung of the ladder, no failover).
 
 import { run, readPool, DEFAULT_LADDER } from './ladder.js';
 import config from '../config/ladders.json';
@@ -76,7 +77,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
     if (!body || !Array.isArray(body.messages) || !body.messages.length) return oaError(400, 'messages required', 'invalid_request_error');
-    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ...chat } = body;
+    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     const started = Date.now();
     const r = await run(chat, {
@@ -84,6 +85,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       timeoutMs: Math.min(Number(perRung) || 20000, 60000),
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
+      ...(pinRung ? { pinRung: String(pinRung) } : {}),
     });
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, attempts: r.attempts }));
