@@ -19,6 +19,11 @@ Live: `https://llm-ladder.trainedassist.store`
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 
+- **`doctor`** — strongest tier for playbook `doctor` steps when Claude/Codex are unavailable
+  (owner decision 2026-09-28): Go MiMo-V2.6-Flash primary (τ²-bench airline 76.6%, above Kimi K2.7
+  Code 71.7%), then *stronger* Go models instead of cheaper ones — `qwen3.8-max` → `qwen3.7-plus` →
+  `deepseek-v4-pro` — and paid OpenRouter `xiaomi/mimo-v2.6-flash` last.
+
 - **`free`** (alias `free-ladder`) — cheap/free rungs for agents that run on weak models
   (opencode as a client, pr-autofix): OpenCode Go cheap models first, OpenRouter `:free`
   fallback; order from the pr-autofix bench (2026-09-26). Streaming + tools supported.
