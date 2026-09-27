@@ -12,3 +12,4 @@
 - [реализовано] Из trained-assist-agent выпилены локальные копии: in-process лестница service-llm, `llm-gateway.js`, `infra/llm-edge` (домен llm.trainedassist.store снят).
 - [реализовано] Постоянный бенч: trained-assist-free-models-benchmark `scripts/ladder-bench.mjs`, каждые 6 ч, каждая ступень через `ladder_rung` + лестницы целиком → issue #3. [планируется] по нему обновлять порядок ступеней.
 - [планируется] OpenCode-раннер на VM читает здоровье моделей из этого сервиса (сейчас у него своё локальное).
+- [реализовано] Платный хвост OpenRouter из трёх вендоров (владелец 27.09: «на опенроутере тоже пару моделей, mimo и что-то ещё»): deepseek-v4-flash-0731 → gemini-2.5-flash-lite (~0.5 с) → mimo-v2.6-flash (8–11 с через OpenRouter, поэтому последняя).
