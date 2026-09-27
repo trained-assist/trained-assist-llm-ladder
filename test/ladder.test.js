@@ -25,7 +25,7 @@ const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
 test('config: Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail of three vendors', () => {
   assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash',
-    'openrouter/deepseek/deepseek-v4-flash-0731', 'openrouter/google/gemini-2.5-flash-lite', 'openrouter/xiaomi/mimo-v2.6-flash']);
+    'openrouter/deepseek/deepseek-v4-flash-0731', 'openrouter/inclusionai/ling-3.0-flash', 'openrouter/xiaomi/mimo-v2.6-flash']);
   const firstOr = LADDER.findIndex(m => m.startsWith('openrouter/'));
   assert.ok(LADDER.slice(firstOr).every(m => m.startsWith('openrouter/')), 'paid OpenRouter rungs only at the tail');
 });
