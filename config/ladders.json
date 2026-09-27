@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = mimo → deepseek-v4.1-flash → muse-spark → OpenRouter last.",
+  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = mimo → deepseek-v4.1-flash → muse-spark → OpenRouter last. free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'.",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -38,6 +38,28 @@
         "opencode-go/muse-spark-1.3-contributor",
         "openrouter/deepseek/deepseek-v4-flash-0731"
       ]
+    },
+    "free": {
+      "build": [
+        "opencode-go/deepseek-v4-flash",
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/qwen3.8-flash",
+        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/deepseek-flash",
+        "opencode-go/glm-5.3-flash",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/inclusionai/ling-3.0-flash-fin:free",
+        "openrouter/inclusionai/ling-3.0-flash-sante:free",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "openrouter/cohere/north-mini-code:free",
+        "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "openrouter/poolside/laguna-xs-2.1:free",
+        "openrouter/dots-studio/dots-3-note-preview:free"
+      ]
     }
+  },
+  "aliases": {
+    "free-ladder": "free",
+    "service": "deepseek"
   }
 }

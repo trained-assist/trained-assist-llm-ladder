@@ -5,16 +5,22 @@ OpenAI-compatible **model ladder** for small "service" LLM calls across trained-
 
 Live: `https://llm-ladder.trainedassist.store`
 
-## Ladder
+## Ladders
 
-`config/ladders.json` → `deepseek` (owner decision 2026-09-27), same for every role:
+`config/ladders.json`:
+
+- **`deepseek`** (alias `service`) — small service calls; owner decision 2026-09-27, same for every role:
 
 1. `opencode-go/mimo-v2.6-flash`
 2. `opencode-go/deepseek-v4.1-flash`
 3. `opencode-go/muse-spark-1.3-contributor`
 4. `openrouter/deepseek/deepseek-v4-flash-0731` — paid, **last** rung only
 
-Rungs are tried top-down, non-streaming:
+- **`free`** (alias `free-ladder`) — cheap/free rungs for agents that run on weak models
+  (opencode as a client, pr-autofix): OpenCode Go cheap models first, OpenRouter `:free`
+  fallback; order from the pr-autofix bench (2026-09-26). Streaming + tools supported.
+
+Rungs are tried top-down:
 
 - **Model health** — a failing rung is skipped for everyone: transient faults back off per model
   (15s → 30s → 60s … cap 5 min, each model its own counter); quota/limit errors skip for the
@@ -39,10 +45,15 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/health` | liveness + ladder names |
 | GET | `/v1/models` | ladders as model ids (`deepseek`, `deepseek:review`, …) |
 | GET | `/v1/state` | model health + key rotation snapshot |
-| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `deepseek`) |
+| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `deepseek`); `stream: true` → SSE; `tools` passed through |
 
 Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
-`ladder_total_timeout_ms` (whole ladder). Response = the upstream `chat.completion` with `model`
+`ladder_ttfb_ms` (streaming: first-token window, default 15000), `ladder_total_timeout_ms` (whole
+ladder). Streaming picks the rung before the first output token (text, reasoning or tool call);
+after it there is no failover.
+
+opencode provider (free ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
+`apiKey = <LADDER_TOKEN>`, model `free-ladder`. Response = the upstream `chat.completion` with `model`
 set to the rung that answered, plus headers `x-ladder-model` / `x-ladder-attempts`.
 Failure: `502 {error:{type:"ladder_error", attempts:[…]}}`.
 
