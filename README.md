@@ -63,8 +63,12 @@ curl -s https://llm-ladder.trainedassist.store/v1/chat/completions \
   -d '{"model":"deepseek","messages":[{"role":"user","content":"Верни JSON {\"ok\":true}"}],"response_format":{"type":"json_object"}}'
 ```
 
-Clients: `trained-assist-agent` `src/service-llm.js` calls this service and falls back to the
-same ladder in-process when the service is unreachable.
+Clients:
+
+- `trained-assist-agent` `src/service-llm.js` — all small service calls (`deepseek`); the only
+  implementation, no in-process copy.
+- `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder`), token via org secret `LLM_LADDER_TOKEN`.
+- opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free-ladder`.
 
 ## Development
 
