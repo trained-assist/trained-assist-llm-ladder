@@ -236,8 +236,10 @@ test('config: doctor = Go MiMo first, then stronger Go models, paid OpenRouter m
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
-test('config: research = cheapest 1M-context Gemini first, Go deepseek as insurance (owner 2026-09-28)', () => {
-  const expected = ['openrouter/google/gemini-2.5-flash-lite', 'openrouter/google/gemini-3.1-flash-lite', 'opencode-go/deepseek-v4.1-flash'];
-  for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.research[role], expected, role);
+test('config: research is split by role — Gemini reads (explore), Go MiMo thinks (owner 2026-09-28)', () => {
+  const reader = ['openrouter/google/gemini-2.5-flash-lite', 'openrouter/google/gemini-3.1-flash-lite', 'opencode-go/mimo-v2.6-flash'];
+  const thinker = ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/xiaomi/mimo-v2.6-flash'];
+  assert.deepEqual(config.ladders.research.explore, reader);
+  for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
 });
