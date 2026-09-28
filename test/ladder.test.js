@@ -235,3 +235,9 @@ test('config: doctor = Go MiMo first, then stronger Go models, paid OpenRouter m
     'opencode-go/deepseek-v4-pro', 'openrouter/xiaomi/mimo-v2.6-flash'];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
+
+test('config: research = cheapest 1M-context Gemini first, Go deepseek as insurance (owner 2026-09-28)', () => {
+  const expected = ['openrouter/google/gemini-2.5-flash-lite', 'openrouter/google/gemini-3.1-flash-lite', 'opencode-go/deepseek-v4.1-flash'];
+  for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.research[role], expected, role);
+  assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
+});

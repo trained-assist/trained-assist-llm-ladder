@@ -19,6 +19,10 @@ Live: `https://llm-ladder.trainedassist.store`
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 
+- **`research`** — Hermes / opencode researcher runs (owner 2026-09-28): 1M-context Gemini, cheapest
+  first — `google/gemini-2.5-flash-lite` → `google/gemini-3.1-flash-lite` → Go `deepseek-v4.1-flash`
+  as insurance. `gemini-2.5-flash` and `2.5-pro` are deliberately not in it (too expensive).
+
 - **`doctor`** — strongest tier for playbook `doctor` steps when Claude/Codex are unavailable
   (owner decision 2026-09-28): Go MiMo-V2.6-Flash primary (τ²-bench airline 76.6%, above Kimi K2.7
   Code 71.7%), then *stronger* Go models instead of cheaper ones — `qwen3.7-plus` → `deepseek-v4-pro`

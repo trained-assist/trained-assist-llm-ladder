@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail deepseek-v4-flash-0731 → ling-3.0-flash → mimo-v2.6-flash (three vendors; muse-spark dropped 2026-09-27). free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'. doctor (owner 2026-09-28) = strongest tier for playbook 'doctor' steps when Claude/Codex are unavailable: Go MiMo-V2.6-Flash primary (tau2-bench airline 76.6% vs Kimi K2.7 Code 71.7%), then STRONGER Go models instead of cheaper ones (qwen3.7-plus → deepseek-v4-pro; qwen3.8-max dropped 2026-09-28 — owner: far too expensive), paid OpenRouter mimo last.",
+  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail deepseek-v4-flash-0731 → ling-3.0-flash → mimo-v2.6-flash (three vendors; muse-spark dropped 2026-09-27). free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'. doctor (owner 2026-09-28) = strongest tier for playbook 'doctor' steps when Claude/Codex are unavailable: Go MiMo-V2.6-Flash primary (tau2-bench airline 76.6% vs Kimi K2.7 Code 71.7%), then STRONGER Go models instead of cheaper ones (qwen3.7-plus → deepseek-v4-pro; qwen3.8-max dropped 2026-09-28 — owner: far too expensive), paid OpenRouter mimo last. research (owner 2026-09-28) = Hermes/opencode researcher runs: 1M-context Gemini, cheapest first — gemini-2.5-flash-lite ($0.10/$0.40) → gemini-3.1-flash-lite ($0.25/$1.50) → Go deepseek-v4.1-flash as insurance. gemini-2.5-flash ($0.30/$2.50) and 2.5-pro ($1.25/$10) deliberately excluded (owner: too expensive).",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -92,6 +92,33 @@
         "opencode-go/qwen3.7-plus",
         "opencode-go/deepseek-v4-pro",
         "openrouter/xiaomi/mimo-v2.6-flash"
+      ]
+    },
+    "research": {
+      "build": [
+        "openrouter/google/gemini-2.5-flash-lite",
+        "openrouter/google/gemini-3.1-flash-lite",
+        "opencode-go/deepseek-v4.1-flash"
+      ],
+      "plan": [
+        "openrouter/google/gemini-2.5-flash-lite",
+        "openrouter/google/gemini-3.1-flash-lite",
+        "opencode-go/deepseek-v4.1-flash"
+      ],
+      "explore": [
+        "openrouter/google/gemini-2.5-flash-lite",
+        "openrouter/google/gemini-3.1-flash-lite",
+        "opencode-go/deepseek-v4.1-flash"
+      ],
+      "general": [
+        "openrouter/google/gemini-2.5-flash-lite",
+        "openrouter/google/gemini-3.1-flash-lite",
+        "opencode-go/deepseek-v4.1-flash"
+      ],
+      "review": [
+        "openrouter/google/gemini-2.5-flash-lite",
+        "openrouter/google/gemini-3.1-flash-lite",
+        "opencode-go/deepseek-v4.1-flash"
       ]
     }
   },
