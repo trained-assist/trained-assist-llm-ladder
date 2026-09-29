@@ -210,7 +210,7 @@ function attempt(env, model, body, keyIndex, opts) {
  *                 cache survives turn after turn. null/undefined → byte-for-byte today.
  *   store (async): snapshot(poolSize?, pinKey?) → { health, keys, pin }
  *                  recordFailure(model, {cls, retryAfterMs}, {pinRemove}),
- *                  recordSuccess(model, {pin}), rotateKey(poolSize, ttlMs), park(models, untilMs),
+ *                  recordSuccess(model, {pin}), rotateKey(poolSize, ttlMs, failedIndex), park(models, untilMs),
  *                  pinStats() → {count, byRung}
  * @returns {Promise<{ok:true, model, data?, content?, stream?, attempts, pin?} |
  *                   {ok:false, status, error, attempts, pin?}>}
@@ -300,7 +300,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     while (!r.ok && isGo && !goParked) {
       const fault = keyFaultOf(r.error);
       if (fault) {
-        const rot = await store.rotateKey(pool.length, fault.ttlMs);
+        const rot = await store.rotateKey(pool.length, fault.ttlMs, key);
         if (!rot.rotated) {
           await store.park(all.filter(m => m.startsWith('opencode-go/')), rot.retryAt);
           goParked = true;

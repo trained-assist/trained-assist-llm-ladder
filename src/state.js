@@ -51,14 +51,23 @@ export function park(state, models, untilMs, now = Date.now()) {
   return state;
 }
 
-// Park the active key for ttlMs and move to the next usable one.
-// → { rotated: true, fromIndex, toIndex } | { rotated: false, retryAt }
-export function rotateKey(state, poolSize, ttlMs, now = Date.now()) {
+// Park the key that FAILED (`failedIndex`, default: the active one) for ttlMs and move to the next
+// usable one. → { rotated: true, fromIndex, toIndex } | { rotated: false, retryAt }
+//
+// Concurrency (incident 2026-09-29): calls A and B both start on key 0; A hits the weekly limit and
+// rotates to key 1; B then hits the same limit on key 0. Parking "the active key" at that point
+// parked the HEALTHY key 1 for 6h and took Go down for the whole fleet with a working key in the
+// pool. The failed key is what gets parked; if another call already moved `active` onto a usable
+// key, that counts as rotated.
+export function rotateKey(state, poolSize, ttlMs, now = Date.now(), failedIndex = null) {
   const exhausted = state.keys.exhausted || {};
   for (const k of Object.keys(exhausted)) if (!(exhausted[k] > now)) delete exhausted[k];
-  const from = Math.min(state.keys.active || 0, Math.max(0, poolSize - 1));
+  const last = Math.max(0, poolSize - 1);
+  const active = Math.min(state.keys.active || 0, last);
+  const from = Number.isInteger(failedIndex) && failedIndex >= 0 && failedIndex <= last ? failedIndex : active;
   exhausted[from] = now + ttlMs;
   state.keys.exhausted = exhausted;
+  if (active !== from && !(exhausted[active] > now)) return { rotated: true, fromIndex: from, toIndex: active };
   for (let step = 1; step < poolSize; step++) {
     const i = (from + step) % poolSize;
     if (!(exhausted[i] > now)) {
@@ -69,6 +78,14 @@ export function rotateKey(state, poolSize, ttlMs, now = Date.now()) {
   let retryAt = Infinity;
   for (let i = 0; i < poolSize; i++) retryAt = Math.min(retryAt, exhausted[i] || now);
   return { rotated: false, retryAt: Number.isFinite(retryAt) ? retryAt : now + ttlMs };
+}
+
+// Ops lever: clear every Go key park and every Go rung skip (e.g. a key was parked by mistake or a
+// limit was lifted early). OpenRouter health and conversation pins are left alone.
+export function resetKeys(state) {
+  state.keys = { active: 0, exhausted: {} };
+  for (const m of Object.keys(state.health)) if (m.startsWith('opencode-go/')) delete state.health[m];
+  return state;
 }
 
 // Read view: expired key exhaustion cleared; the active key moved off a parked one if another is
@@ -143,7 +160,8 @@ export function memoryStore(poolSize = 0, initial = emptyState()) {
         if (v) state.pins[k] = v;
       }
     },
-    async rotateKey(size, ttlMs) { return rotateKey(state, size, ttlMs); },
+    async rotateKey(size, ttlMs, failedIndex) { return rotateKey(state, size, ttlMs, Date.now(), failedIndex); },
+    async resetKeys() { resetKeys(state); },
     async park(models, untilMs) { park(state, models, untilMs); },
     async pinStats() { return pinStats(state.pins); },
   };
