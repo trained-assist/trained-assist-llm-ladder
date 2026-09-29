@@ -87,7 +87,9 @@ Durable Object (src/state-do.js + src/state.js), response headers `x-ladder-mode
 - Pinned rung removed from `config/ladders.json` or the request switches ladder/role (`deepseek:review`
   vs `deepseek`) → pin is per `(K, ladder:role)`; a rung no longer in the ladder is ignored, step 1.
 - Both Go keys parked → hard failure, step 4; step 5 brings K back when a key heals.
-- Context overflow on the pinned rung → not a rung fault; returned as today, pin untouched.
+- Context overflow on the pinned rung → a context-class error is a hard failure of that rung for this
+  conversation: the error is returned as today, the pin is invalidated, and the next request picks a
+  rung fresh (step 1) — otherwise the conversation would be stuck on an undersized rung until TTL.
 - Concurrent requests of one K (subagents run in parallel) → each subagent has its own sessionID; the
   DO serializes updates, last writer wins, no crash.
 - DO unavailable → serve without a pin (fail-open), never fail the call because of the pin.
