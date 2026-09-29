@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { handle } from '../../src/handler.js';
-import { memoryStore } from '../src/state.js';
+import { memoryStore } from '../../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.deepseek.build;
@@ -42,7 +42,8 @@ function fakeUpstreams() {
     clearRungs() { for (const k of Object.keys(rules)) delete rules[k]; },
     fetch: async (url, init) => {
       const body = JSON.parse(init.body);
-      const r = rules[body.model] || { status: 200, content: 'ok' };
+      const rule = rules[body.model];
+      const r = typeof rule === 'function' ? rule() : (rule || { status: 200, content: 'ok' });
       if (r.status !== 200) return { ok: false, status: r.status, text: async () => r.error || '', json: async () => null };
       return {
         ok: true, status: 200,

@@ -6,7 +6,7 @@
 # RED by design until slices S3–S9 land: the scenario currently breaks at turn 1 (`pin=new` missing)
 # — that red is the sandbox working, not a test bug.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 out="$(mktemp)"
 if node --test test/sandbox/sticky-rung.sandbox.test.js >"$out" 2>&1; then

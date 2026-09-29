@@ -6,12 +6,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { run } from '../src/ladder.js';
+import { handle } from '../src/handler.js';
 import { memoryStore, pinFresh, pinDirty, pinStats, emptyState } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.deepseek.build;
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
+const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 const Kh = 'a'.repeat(64); // any sha256-shaped key
 
@@ -57,4 +59,154 @@ test('pinStats groups by rung and prunes expired entries', () => {
   };
   assert.deepEqual(pinStats(pins), { count: 2, byRung: { 'opencode-go/m': 2 } }, 'expired rung pruned, not counted');
   assert.equal(pins['c'.repeat(64)], undefined, 'expired entry pruned in place');
+});
+
+// ── shared fixtures for the run()-level slices ──────────────────────────────────────────────────
+function recFetch(behaviour, calls) {
+  return async (url, init) => {
+    const body = JSON.parse(init.body);
+    const auth = init.headers.Authorization;
+    calls.push({ url, model: body.model, auth, session: init.headers['x-opencode-session'], sid: init.headers['x-session-id'], body });
+    const r = (behaviour[body.model] || (() => ({ status: 200, content: 'ok' })))({ auth, body });
+    if (r === 'throw') throw new Error('network down');
+    const data = r.status === 200 ? { id: 'x', object: 'chat.completion', choices: [{ message: { role: 'assistant', content: r.content } }], usage: { prompt_tokens: 3 } } : null;
+    return { ok: r.status === 200, status: r.status, json: async () => data, text: async () => r.error || '' };
+  };
+}
+const R0 = LADDER[0]; // opencode-go/mimo-v2.6-flash
+const R1 = LADDER[1]; // opencode-go/deepseek-v4.1-flash
+const OR = LADDER.findLast(m => m.startsWith('openrouter/'));
+const OR_TWO = LADDER.filter(m => m.startsWith('openrouter/'))[1];
+
+// ── S4: routing order and statuses ─────────────────────────────────────────────────────────────
+test('S4: the pinned rung is tried FIRST and ignores the global skipUntil; a hit reports pin=hit', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
+  // R0 is in shared transient backoff — a fresh conversation would skip it entirely
+  store.state.health[R0] = { failures: 2, firstFailureAt: Date.now(), lastFailureAt: Date.now() - 1000, skipUntil: Date.now() + 60000, class: 'transient' };
+  const calls = [];
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, calls), conversation: Kh });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, R0, 'pinned rung is tried despite the shared skip');
+  assert.equal(r.pin, 'hit');
+  assert.equal(calls[0].model, short(R0));
+});
+
+test('S4: a stale pin (rung left the ladder) behaves as a new conversation and re-pins on success', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: 'openrouter/retired/model', lastUsedAt: Date.now() };
+  const calls = [];
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, calls), conversation: Kh });
+  assert.equal(r.model, R0, 'stale pin is ignored — fresh pick');
+  assert.equal(r.pin, 'new');
+  assert.equal(store.state.pins[Kh].rung, R0, 're-pinned to the rung that answered');
+});
+
+test('S4: without a pin key nothing pin-related happens (byte-for-byte today)', async () => {
+  const store = memoryStore(2);
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, []), conversation: null });
+  assert.equal(r.pin, null);
+  assert.equal(Object.keys(store.state.pins).length, 0, 'no pin written for unkeyed callers');
+});
+
+// ── S5: failure policy on a pinned rung ────────────────────────────────────────────────────────
+test('S5: transient error on a pinned OpenRouter rung → one same-rung retry, pin NOT moved', async () => {
+  const store = memoryStore(2);
+  // pin the first paid rung; park the Go rungs so R6 does not steal the pin's rung-first order
+  store.state.pins[Kh] = { rung: OR, lastUsedAt: Date.now() };
+  for (const m of LADDER) if (m.startsWith('opencode-go/')) store.state.health[m] = { failures: 2, firstFailureAt: Date.now(), lastFailureAt: Date.now() - 1000, skipUntil: Date.now() + 60000, class: 'transient' };
+  const beh = { [short(OR)]: (() => { let n = 0; return () => ({ status: ++n === 1 ? 500 : 200, error: 'boom', content: 'ok' }); })() };
+  const calls = [];
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch(beh, calls), conversation: Kh });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, OR, 'same rung answered the retry');
+  assert.equal(r.pin, 'hit', 'the pin never moved');
+  assert.equal(r.attempts.filter(a => a.outcome === 'pin-retry').length, 1, 'exactly one same-rung retry');
+  assert.equal(store.state.pins[Kh].rung, OR);
+});
+
+test('S5: hard failure of the pinned rung → ONE switch down, pin=moved to the answering rung', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
+  const beh = { [short(R0)]: () => ({ status: 500, error: 'boom' }) };
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch(beh, []), conversation: Kh });
+  assert.equal(r.model, R1, 'moved one rung down');
+  assert.equal(r.pin, 'moved');
+  assert.equal(store.state.pins[Kh].rung, R1, 're-pinned to the rung that answered');
+});
+
+test('S5: context overflow while stuck on the pinned rung retorts the error, invalidates the pin (⚫-1)', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
+  const beh = { [short(R0)]: () => ({ status: 400, error: 'This request exceeds the context window of the model' }) };
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch(beh, []), conversation: Kh });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 400, 'the overflow error is returned, not a retry loop');
+  assert.equal(r.pin, 'gone');
+  assert.equal(store.state.pins[Kh], undefined, 'pin invalidated');
+});
+
+// ── S6: return from the paid tail ─────────────────────────────────────────────────────────────
+test('S6: a pin parked on the paid tail does NOT hold a conversation when Go is healthy — Go first, re-pin', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: OR, lastUsedAt: Date.now() };
+  const calls = [];
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, calls), conversation: Kh });
+  assert.equal(r.model, R0, 'healthy Go answered before the pinned paid rung');
+  assert.equal(r.pin, 'moved');
+  assert.equal(store.state.pins[Kh].rung, R0, 'pin moved back to Go');
+  assert.equal(calls[0].model, short(R0));
+});
+
+test('S6: a pin on a Go rung is not moved off the Go tier', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
+  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, []), conversation: Kh });
+  assert.equal(r.model, R0);
+  assert.equal(r.pin, 'hit');
+});
+
+// ── S7: stable per-conversation session headers upstream ──────────────────────────────────────
+test('S7: keyed calls send the shared Kh — Go x-opencode-session, OpenRouter x-session-id; unkeyed keeps a random session', async () => {
+  const callsKeyed = [];
+  await run(msg, { env, config, store: memoryStore(2), fetchImpl: recFetch({}, callsKeyed), conversation: Kh });
+  await run(msg, { env, config, store: memoryStore(2), fetchImpl: recFetch({}, callsKeyed), conversation: Kh });
+  const goCalls = callsKeyed.filter(c => c.url.includes('opencode.ai'));
+  assert.ok(goCalls.length >= 2);
+  assert.ok(goCalls.every(c => c.session === `ladder-${Kh}`), 'stable session header — the Go-side cache can work');
+  const orCalls = callsKeyed.filter(c => c.url.includes('openrouter.ai'));
+  assert.ok(orCalls.every(c => c.sid === Kh), 'OpenRouter side carries the same stable id');
+
+  const callsUnkeyed = [];
+  await run(msg, { env, config, store: memoryStore(2), fetchImpl: recFetch({}, callsUnkeyed), conversation: null });
+  const u = callsUnkeyed.filter(c => c.url.includes('opencode.ai'));
+  assert.ok(u[0].session && u[0].session !== `ladder-${Kh}`, 'unkeyed calls keep a random session as before');
+});
+
+// ── S8: observability on the wire ─────────────────────────────────────────────────────────────
+test('S8: the x-ladder-attempts header carries pin= for keyed calls (and not for unkeyed)', async () => {
+  const store = memoryStore(2);
+  const post = (headers) => handle(new Request('https://l.test/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer t', ...headers },
+    body: JSON.stringify({ model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] }),
+  }), ENV, { store, fetchImpl: recFetch({}, []) });
+  const keyed = await post({ 'x-session-affinity': 'conv-a' });
+  assert.match(keyed.headers.get('x-ladder-attempts'), /pin=new/, 'first keyed turn reports pin=new');
+  const hit = await post({ 'x-session-affinity': 'conv-a' });
+  assert.match(hit.headers.get('x-ladder-attempts'), /pin=hit/, 'second keyed turn reports pin=hit');
+  const unkeyed = await post({});
+  assert.doesNotMatch(unkeyed.headers.get('x-ladder-attempts'), /pin=/, 'unkeyed callers see no pin status at all');
+});
+
+test('S8: GET /v1/state exposes pin stats alongside health and keys', async () => {
+  const store = memoryStore(2);
+  store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
+  const r = await handle(new Request('https://l.test/v1/state', {
+    headers: { authorization: 'Bearer t' },
+  }), ENV, { store });
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.deepEqual(body.pins, { count: 1, byRung: { [R0]: 1 } });
+  assert.ok(body.health !== undefined && body.keys !== undefined, 'existing state fields untouched');
 });
