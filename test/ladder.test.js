@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, MIN_TOKENS } from '../src/ladder.js';
+import { run, parseJson, MIN_TOKENS, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS } from '../src/ladder.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
@@ -70,6 +70,50 @@ test('Go key limit → rotate to spare key, retry SAME rung', async () => {
   assert.equal(r.model, LADDER[0]);
   assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b']);
   assert.equal(store.state.keys.active, 1, 'next call starts on the spare key');
+  assert.equal(r.attempts.find(a => a.outcome === 'key-rotated').key, 0, 'attempts name the key that failed');
+});
+
+test('spare key answers a non-key failure → the call STAYS on the same Go rung; one probe per call', async () => {
+  // Key A is unhealthy for this model for a reason that never matches the quota/401 patterns
+  // (silent throttle looks like a flaky model) — the probe keeps the call on Go instead of paying
+  // for OpenRouter and resetting the caller's prompt cache.
+  const store = memoryStore(2);
+  const beh = { [short(LADDER[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }) };
+  const calls = [];
+  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, LADDER[0]);
+  assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b']);
+  assert.equal(store.state.keys.active, 0, 'a probe is local — shared rotation state moves only on quota/401');
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1);
+
+  // Budget is ONE probe per call: the next failing Go rung must not probe again, so a Go outage
+  // cannot double the failover latency.
+  const beh2 = {
+    [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }),
+    [short(LADDER[1])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }),
+  };
+  const calls2 = [];
+  const r2 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh2, calls2) });
+  assert.equal(r2.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'exactly one probe per call');
+  assert.equal(r2.model, LADDER.find(m => m.startsWith('openrouter/')), 'spare already used → the ladder moves on');
+});
+
+test('context overflow on a Go rung does NOT probe the spare key — the key cannot change it', async () => {
+  const beh = { [short(LADDER[0])]: () => ({ status: 400, error: 'This request exceeds the context window of the model' }) };
+  const calls = [];
+  const r = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 0);
+  assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_a'], 'no probe: straight to the next rung');
+  assert.equal(r.model, LADDER[1]);
+});
+
+test('a WEEKLY Go allowance parks the key for hours; a plain rate-limit hit keeps the15-minute TTL', () => {
+  const weekly = 'HTTP 429: {"type":"error","error":{"type":"GoUsageLimitError","message":"Go usage limit exceeded"},'
+    + '"metadata":{"workspace":"wrk_01KN4","limitName":"weekly"}}';
+  assert.equal(keyFaultOf(weekly).ttlMs, KEY_WEEKLY_TTL_MS);
+  assert.equal(keyFaultOf('HTTP 429: Go usage limit exceeded').ttlMs, KEY_QUOTA_TTL_MS);
+  assert.equal(keyFaultOf('HTTP 401: invalid api key').dead, true);
 });
 
 test('both keys limited → all Go rungs parked, OpenRouter answers, Go comes back after the window', async () => {
@@ -92,13 +136,16 @@ test('both keys limited → all Go rungs parked, OpenRouter answers, Go comes ba
   assert.equal(r3.model, LADDER[0]);
 });
 
-test('503 / Bad Request on a Go rung does NOT burn a key', async () => {
+test('non-key failure on a Go rung probes the spare key once, but never burns shared state', async () => {
   const beh = { [short(LADDER[0])]: () => ({ status: 503, error: 'temporarily overloaded' }) };
   const store = memoryStore(2);
   const calls = [];
-  await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
-  assert.equal(store.state.keys.active, 0);
-  assert.equal(calls[1].auth, 'Bearer oc_a');
+  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(store.state.keys.active, 0, 'a model-level fault never moves shared key state');
+  assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b', 'Bearer oc_a'],
+    'same rung retried on the spare key, then failover to rung 2 on the active key');
+  assert.equal(r.model, LADDER[1]);
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1);
 });
 
 test('no Go keys → OpenRouter only; no keys → 503; unknown ladder → 404', async () => {
@@ -114,6 +161,27 @@ test('stale skip on every rung does not black-hole the call', async () => {
   for (const m of LADDER) store.state.health[m] = { failures: 9, firstFailureAt: Date.now(), skipUntil: Date.now() + 60000 };
   const r = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, []) });
   assert.equal(r.ok, true);
+});
+
+test('a transient Go skip is capped at 30s after the last failure (fleet returns to Go); real limits keep their TTL', async () => {
+  const old = { failures: 5, firstFailureAt: Date.now() - 60000, lastFailureAt: Date.now() - 31000, skipUntil: Date.now() + 240000 };
+  const store = memoryStore(2);
+  store.state.health[LADDER[0]] = { ...old, class: 'transient' };
+  const calls = [];
+  await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls) });
+  assert.equal(calls[0].model, short(LADDER[0]), 'a transient skip older than 30s is ignored — Go is re-tested');
+
+  const fresh = memoryStore(2);
+  fresh.state.health[LADDER[0]] = { ...old, lastFailureAt: Date.now() - 10000, class: 'transient' };
+  const calls2 = [];
+  await run(msg, { env, config, store: fresh, fetchImpl: fakeFetch({}, calls2) });
+  assert.equal(calls2[0].model, short(LADDER[1]), 'a fresh transient skip is honoured');
+
+  const quota = memoryStore(2);
+  quota.state.health[LADDER[0]] = { ...old, class: 'quota' };
+  const calls3 = [];
+  await run(msg, { env, config, store: quota, fetchImpl: fakeFetch({}, calls3) });
+  assert.equal(calls3[0].model, short(LADDER[1]), 'a quota park is never capped');
 });
 
 test('totalTimeoutMs stops walking the ladder', async () => {
@@ -186,7 +254,8 @@ test('stream: a rung that ends / errors before the first token fails over; role-
   const calls = [];
   const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch(beh, calls) });
   assert.equal(r.model, FREE[3]);
-  assert.deepEqual(r.attempts.map(a => a.outcome), ['error', 'error', 'error', 'ok']);
+  assert.deepEqual(r.attempts.map(a => a.outcome), ['key-probe', 'error', 'error', 'error', 'ok'],
+    'the first Go rung also gets the one spare-key probe; the rest fail over rung by rung');
 });
 
 test('stream: tool_calls delta counts as the first token (tools passed through)', async () => {
