@@ -144,6 +144,14 @@ jobs:
           print('\n--- served histogram ---')
           for k, v in served.most_common(30):
               print(f'{v:5d}  {k}')
+          print('\n--- sticky-rung pin histogram (epic #17: new/hit/moved/gone per window — descents show up as moved) ---')
+          pins = collections.Counter()
+          for e in evs:
+              src = e.get('source')
+              if isinstance(src, dict) and src.get('pin'):
+                  pins[src['pin']] += 1
+          for k, v in pins.most_common(20):
+              print(f'{v:5d}  {k}')
           print(f'\n--- calls with errors or served by OpenRouter ({len(interesting)}) ---')
           for ts, src in interesting:
               print(ts, '|', json.dumps(src, ensure_ascii=False)[:1300])

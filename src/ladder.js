@@ -75,13 +75,16 @@ function failureClass(errorText) {
 export const TTFB_TIMEOUT_MS = 15000;
 const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|stream_options/i;
 
-function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false } = {}) {
+function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
   const pool = readPool(env);
   const key = isGo ? pool[keyIndex] : env.OPENROUTER_API_KEY;
   if (!key) return null;
   const headers = { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' };
-  if (isGo) headers['x-opencode-session'] = `ladder-${crypto.randomUUID()}`; // Go 400s without it
+  // Keyed calls carry a stable per-conversation id so the provider-side prompt cache survives
+  // turn after turn (epic #17, S7). Unkeyed calls keep the random session (Go 400s without it).
+  if (isGo) headers['x-opencode-session'] = `ladder-${conversation || crypto.randomUUID()}`;
+  else if (conversation) headers['x-session-id'] = conversation;
   const upstream = {
     ...body,
     model: model.replace(/^opencode-go\/|^openrouter\//, ''),
@@ -104,10 +107,10 @@ async function post(fetchImpl, req, signal) {
 }
 
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
-async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl }) {
+async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null }) {
   let stripRf = false;
   for (;;) {
-    const req = upstreamRequest(env, model, body, keyIndex, { stripRf });
+    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation });
     if (!req) return { ok: false, skip: true, error: 'no key' };
     const { res, error } = await post(fetchImpl, req, AbortSignal.timeout(timeoutMs));
     if (error) return { ok: false, error };
@@ -143,8 +146,8 @@ function isOutputEvent(line) {
 
 // Streaming attempt: resolves once the first output event arrived (→ committed stream that
 // replays the buffered bytes and pipes the rest), or fails before it (→ caller tries next rung).
-async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl }) {
-  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf });
+async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null }) {
+  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation });
   if (!req) return { ok: false, skip: true, error: 'no key' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('no first token in time')), ttfbMs);
@@ -154,7 +157,7 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl }) 
     clearTimeout(timer);
     const errText = String(await res.text().catch(() => ''));
     if (res.status === 400 && !body._stripRf && body.response_format && RF_400_RE.test(errText)) {
-      return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl });
+      return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation });
     }
     return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
   }
@@ -200,14 +203,20 @@ function attempt(env, model, body, keyIndex, opts) {
  * @param {object} body   OpenAI chat.completions body; `model` = ladder name ("deepseek",
  *                        "deepseek:review", alias "free-ladder"). stream:true → SSE (rung chosen
  *                        before the first token); tools / tool_choice passed through as is.
- * @param {object} ctx    { env, config, store, fetchImpl, timeoutMs=20000, totalTimeoutMs, now }
- *   store (async): snapshot() → { health: {model: {skipUntil}}, keys: {active, exhausted: {i: until}} }
- *                  recordFailure(model, {cls, retryAfterMs}), recordSuccess(model),
- *                  rotateKey(poolSize, ttlMs) → {rotated, toIndex} | {rotated:false, retryAt},
- *                  park(models, untilMs)
- * @returns {Promise<{ok:true, model, data?, content?, stream?, attempts} | {ok:false, status, error, attempts}>}
+ * @param {object} ctx    { env, config, store, fetchImpl, timeoutMs=20000, totalTimeoutMs, now,
+ *                          pinRung, conversation }
+ *   conversation: stable per-conversation id (Kh from the route) — enables the sticky rung
+ *                 (epic #17): the conversation sticks to ONE rung so its provider-side prompt
+ *                 cache survives turn after turn. null/undefined → byte-for-byte today.
+ *   store (async): snapshot(poolSize?, pinKey?) → { health, keys, pin }
+ *                  recordFailure(model, {cls, retryAfterMs}, {pinRemove}),
+ *                  recordSuccess(model, {pin}), rotateKey(poolSize, ttlMs), park(models, untilMs),
+ *                  pinStats() → {count, byRung}
+ * @returns {Promise<{ok:true, model, data?, content?, stream?, attempts, pin?} |
+ *                   {ok:false, status, error, attempts, pin?}>}
+ *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null } = {}) {
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null } = {}) {
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -221,7 +230,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const keyed = all.filter(hasKey);
   if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [] };
 
-  const snap = await store.snapshot();
+  const snap = await store.snapshot(undefined, conversation);
   const now = Date.now();
   // A TRANSIENT wobble on a Go rung (timeout / empty answer / 500 — the failure class behind the
   // 29.09 incident) must not keep the whole fleet on the paid tail for the full exponential
@@ -239,9 +248,31 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     }
     return until > now;
   };
-  // If health skips every keyed rung, try them all anyway — a stale skip must not black-hole it.
+
+  // ── Sticky rung (epic #17) ─────────────────────────────────────────────────────────────────
+  // A valid pin = the conversation already served from a rung that is still part of THIS ladder
+  // and has a key. The pinned rung then goes FIRST and is tried despite the global skipUntil
+  // (another conversation's failure must not reset this one's prompt cache); other rungs keep
+  // today's `!skipped` filter with the all-keyed fallback.
+  const pinned = pinRung ? null : (snap.pin && all.includes(snap.pin.rung) && hasKey(snap.pin.rung) ? snap.pin : null);
+  const goHealthy = keyed.some(m => m.startsWith('opencode-go/') && !skipped(m));
+  // R6 — return from the paid tail: a pin parked on an OpenRouter rung must NOT keep this
+  // conversation on the paid tier while any healthy Go rung is standing by. Skip the pin's
+  // rung-first order for THIS call; if Go answers, the pin moves back to Go.
+  const preferGoOverPin = pinned && pinned.rung.startsWith('openrouter/') && goHealthy;
+  let pinState = conversation ? (pinned && !preferGoOverPin ? 'hit' : 'new') : null;
+  // ONE same-rung retry budget for the pinned rung (S5): a transient 5xx/timeout/empty on the
+  // rung we are caching on is retried once before the ladder moves — an "at most one switch" rule.
+  let pinRetryLeft = pinned && !preferGoOverPin ? 1 : 0;
+
   const live = pinRung ? keyed : keyed.filter(m => !skipped(m));
-  const rungs = live.length ? live : keyed;
+  let rungs;
+  if (pinned && !preferGoOverPin) {
+    const rest = live.filter(m => m !== pinned.rung);
+    rungs = [pinned.rung, ...(rest.length ? rest : keyed.filter(m => m !== pinned.rung))];
+  } else {
+    rungs = live.length ? live : keyed;
+  }
   let keyIndex = Math.min(snap.keys.active || 0, Math.max(0, pool.length - 1));
   const exhaustedAtStart = new Set(Object.keys(snap.keys.exhausted || {}).map(Number));
   // One spare-key probe per call (owner 2026-09-29: «ключ залимитился → переключаем на другой,
@@ -261,7 +292,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (isGo && goParked) continue;
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
-    const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl };
+    const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation };
     let key = keyIndex;
     const tried = new Set([key]);
     let r = await attempt(env, model, body, key, opts);
@@ -294,13 +325,40 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       r = await attempt(env, model, body, key, opts);
       if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
     }
+    // Sticky same-rung retry (S5): the pinned rung on a paid (non-Go) rung gets ONE more chance on
+    // a transient error before the ladder moves — Go already gets its spare-key probe above.
+    if (!r.ok && !r.skip && !isGo && pinRetryLeft > 0 && pinned && model === pinned.rung) {
+      const cls = classifyError(r.error)?.class || 'transient';
+      if (cls === 'transient') {
+        pinRetryLeft = 0;
+        attempts.push({ model, outcome: 'pin-retry', key, error: r.error });
+        r = await attempt(env, model, body, key, opts);
+      }
+    }
     if (r.ok) {
-      await store.recordSuccess(model);
+      if (conversation && !pinRung) {
+        pinState = model === (pinned && pinned.rung) ? 'hit' : (pinned ? 'moved' : 'new');
+        await store.recordSuccess(model, { pin: { pinKey: conversation, rung: model } });
+      } else {
+        await store.recordSuccess(model);
+      }
       attempts.push({ model, outcome: 'ok', key });
-      return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts };
+      return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
-    if (!goParked) await store.recordFailure(model, failureClass(r.error));
+    if (!goParked) {
+      const cls = classifyError(r.error)?.class || 'transient';
+      // ⚫-1 resolution (step 3): a context-class overflow while STUCK on the pinned rung returns
+      // the error as-is (the same request would overflow every lower rung — a retry loop cannot
+      // help) and INVALIDATES the pin, so the next turn picks fresh instead of dying on the model.
+      if (conversation && cls === 'context' && pinned && model === pinned.rung) {
+        await store.recordFailure(model, failureClass(r.error), { pinRemove: { pinKey: conversation, model } });
+        pinState = 'gone';
+        const m2 = /^HTTP[^\s]* (\d+)/.exec(r.error);
+        return { ok: false, status: m2 ? Number(m2[1]) : 502, error: r.error, attempts, pin: 'gone' };
+      }
+      await store.recordFailure(model, failureClass(r.error));
+    }
   }
-  return { ok: false, status: 502, error: 'every rung failed', attempts };
+  return { ok: false, status: 502, error: 'every rung failed', attempts, pin: conversation ? pinState : null };
 }

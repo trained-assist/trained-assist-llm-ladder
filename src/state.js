@@ -14,7 +14,7 @@
 export const DEFAULT_BACKOFF = Object.freeze({ baseMs: 15000, multiplier: 2, capMs: 300000, failureWindowMs: 900000 });
 
 export function emptyState() {
-  return { health: {}, keys: { active: 0, exhausted: {} } };
+  return { health: {}, keys: { active: 0, exhausted: {} }, pins: {} };
 }
 
 export function backoffFor(failures, policy = DEFAULT_BACKOFF) {
@@ -83,15 +83,68 @@ export function snapshot(state, poolSize, now = Date.now()) {
   return { health: state.health, keys: { active, exhausted } };
 }
 
+// ── Sticky rung pins (epic #17) ───────────────────────────────────────────────
+// A pin remembers the rung that served ONE conversation (keyed by Kh = sha256(conversation id))
+// so that rung's provider-side prompt cache keeps working turn after turn. One conversation, one
+// pin; the pin lives separately from the health blob and only expires by TTL / context overflow.
+//
+//   pin = { rung: <full rung id>, lastUsedAt: <epoch ms> }
+//   state.pins = { [Kh]: pin }                    // in-memory view (tests)
+//   storage key 'pin:<Kh>' → pin                  // Durable Object (src/state-do.js)
+export const PIN_TTL_MS = 30 * 60 * 1000; // ≥ 10-min idle window of the OpenRouter prompt cache
+export const PIN_CAP = 5000; // safety net — TTL is the real limiter
+
+// A pin VALUE is alive while its last touch is within the TTL window.
+export function pinFresh(p, now = Date.now(), ttl = PIN_TTL_MS) {
+  return !!(p && p.rung && now - p.lastUsedAt <= ttl);
+}
+
+// Next pin value for a write, or null when the write is throttled away: a hit on the SAME rung
+// within ttl/2 refreshes nothing, so a healthy success costs no storage write (today's hot path
+// does not write on a healthy first-rung answer and must not start now).
+export function pinDirty(prev, rung, now = Date.now(), ttl = PIN_TTL_MS, throttleMs = null) {
+  const t = throttleMs ?? Math.max(1, Math.floor(ttl / 2));
+  if (prev && prev.rung === rung && now - prev.lastUsedAt < t) return null;
+  return { rung, lastUsedAt: now };
+}
+
+// Count and group a pins map, pruning expired entries in place (used by memoryStore and the DO
+// sweep). Returns { count, byRung: { [rung]: n } }.
+export function pinStats(pins, now = Date.now(), ttl = PIN_TTL_MS) {
+  const byRung = {};
+  let count = 0;
+  if (pins) for (const [k, p] of Object.entries(pins)) {
+    if (!pinFresh(p, now, ttl)) { delete pins[k]; continue; }
+    count++;
+    byRung[p.rung] = (byRung[p.rung] || 0) + 1;
+  }
+  return { count, byRung };
+}
+
 // In-memory store with the same async interface as the Durable Object — tests, local runs.
 export function memoryStore(poolSize = 0, initial = emptyState()) {
   const state = initial;
   return {
     state,
-    async snapshot() { return snapshot(state, poolSize); },
-    async recordFailure(model, f) { recordFailure(state, model, f); },
-    async recordSuccess(model) { recordSuccess(state, model); },
+    async snapshot(poolSizeArg, pinKey) {
+      const s = snapshot(state, poolSizeArg ?? poolSize);
+      const p = pinKey ? state.pins[String(pinKey)] : null;
+      return { ...s, pin: pinFresh(p) ? p : null };
+    },
+    async recordFailure(model, f, extra) {
+      recordFailure(state, model, f);
+      if (extra && extra.pinRemove) delete state.pins[String(extra.pinRemove.pinKey)];
+    },
+    async recordSuccess(model, extra) {
+      recordSuccess(state, model);
+      if (extra && extra.pin) {
+        const k = String(extra.pin.pinKey);
+        const v = pinDirty(state.pins[k], extra.pin.rung);
+        if (v) state.pins[k] = v;
+      }
+    },
     async rotateKey(size, ttlMs) { return rotateKey(state, size, ttlMs); },
     async park(models, untilMs) { park(state, models, untilMs); },
+    async pinStats() { return pinStats(state.pins); },
   };
 }
