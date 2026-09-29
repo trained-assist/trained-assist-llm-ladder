@@ -20,4 +20,12 @@ class_name = "LadderState"
 tag = "v1"
 new_sqlite_classes = ["LadderState"]
 
+# Trace calls D1: one row per /v1/chat/completions, keyed by the caller's trace ids
+# (x-ladder-trace/run/user/chat/session — set by the agent runner). The deploy job
+# (ci.yml) provisions the database and rewrites the placeholder id before deploying.
+[[d1_databases]]
+binding = "LADDER_TRACE_DB"
+database_name = "trained-assist-llm-ladder-trace"
+database_id = "00000000-0000-0000-0000-000000000000"
+
 # Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY

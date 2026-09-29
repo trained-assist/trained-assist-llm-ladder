@@ -110,6 +110,11 @@ workflow (inputs `hours`, `step_min`, `needle`, `regex_hours`) to query Workers 
 print the aggregation — served-model histogram, distinct error strings, `key-rotated` / `key-probe`
 events, OpenRouter descents. Live health + key rotation snapshot: `GET /v1/state`.
 
+Per-call trace log (who burned the tokens): every call is appended to D1 `ladder_calls` with the
+caller's `x-ladder-trace/run/user/chat/session` ids. Dispatch the `query-ladder-trace` workflow
+(`preset` = `recent` | `trace` | `user` | `chat` | `session` + `value` | `summary` | `sql` with a
+read-only SELECT; `hours`, `limit`) — e.g. `gh workflow run query-ladder-trace -f preset=summary`.
+
 ## Claude Code Instructions
 
 - Keep the Worker dependency-free; logic stays in pure modules (`src/ladder.js`, `src/state.js`)

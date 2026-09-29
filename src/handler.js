@@ -3,6 +3,7 @@
 // handler and exports the LadderState Durable Object for the platform binding.
 
 import { run, readPool, DEFAULT_LADDER } from './ladder.js';
+import { makeTrace, logCall } from './trace.js';
 import config from '../config/ladders.json' with { type: 'json' };
 
 function json(status, body, headers = {}) {
@@ -107,7 +108,9 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
-    console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts }));
+    const trace = makeTrace(request);
+    console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
+    await logCall(env, trace, chat.model, r, started);
     if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
     if (r.stream) {
       return new Response(r.stream, { status: 200, headers: {
