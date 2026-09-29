@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 out="$(mktemp)"
-if node --test test/sticky-rung.sandbox.test.js >"$out" 2>&1; then
+if node --test test/sandbox/sticky-rung.sandbox.test.js >"$out" 2>&1; then
   echo "SANDBOX PASS: sticky-rung scenario holds (turn 1..8 green)"
   rm -f "$out"
   exit 0

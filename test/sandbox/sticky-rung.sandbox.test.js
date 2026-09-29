@@ -16,10 +16,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { handle } from '../src/handler.js';
+import { handle } from '../../src/handler.js';
 import { memoryStore } from '../src/state.js';
 
-const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
+const config = JSON.parse(fs.readFileSync(new URL('../../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.deepseek.build;
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 const RUNG0 = LADDER[0]; // full rung id — what x-ladder-model carries
