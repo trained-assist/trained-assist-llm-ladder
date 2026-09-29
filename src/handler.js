@@ -61,7 +61,8 @@ export function makeStore(env) {
     snapshot: (poolSizeArg, pinKey) => stub.snapshot(poolSizeArg ?? poolSize, pinKey),
     recordFailure: (model, f, extra) => stub.recordFailure(model, f, extra),
     recordSuccess: (model, extra) => stub.recordSuccess(model, extra),
-    rotateKey: (size, ttlMs) => stub.rotateKey(size, ttlMs),
+    rotateKey: (size, ttlMs, failedIndex) => stub.rotateKey(size, ttlMs, failedIndex),
+    resetKeys: () => stub.resetKeys(),
     park: (models, untilMs) => stub.park(models, untilMs),
     pinStats: () => stub.pinStats(),
   };
@@ -87,6 +88,13 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const s = await (store || makeStore(env)).snapshot();
     s.pins = await (store || makeStore(env)).pinStats();
     return json(200, s);
+  }
+
+  // Ops: unpark all Go keys and Go rungs (a wrongly parked key, a limit lifted early).
+  if (request.method === 'POST' && url.pathname === '/v1/state/reset-keys') {
+    const st = store || makeStore(env);
+    await st.resetKeys();
+    return json(200, await st.snapshot());
   }
 
   if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {

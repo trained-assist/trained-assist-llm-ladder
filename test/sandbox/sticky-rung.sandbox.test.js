@@ -76,7 +76,7 @@ function sandboxStore(poolSize = 2) {
       await inner.recordFailure(model, failure);
       if (extra && extra.pinRemove) pins.delete(String(extra.pinRemove.pinKey));
     },
-    async rotateKey(size, ttlMs) { return inner.rotateKey(size, ttlMs); },
+    async rotateKey(size, ttlMs, failedIndex) { return inner.rotateKey(size, ttlMs, failedIndex); },
     async park(models, untilMs) { return inner.park(models, untilMs); },
     async pinStats() {
       const byRung = {};

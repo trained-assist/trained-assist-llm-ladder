@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { run, parseJson, MIN_TOKENS, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS } from '../src/ladder.js';
-import { memoryStore, backoffFor, rotateKey, emptyState, snapshot } from '../src/state.js';
+import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.deepseek.build;
@@ -311,4 +311,57 @@ test('config: research is split by role — Gemini reads (explore), Go MiMo thin
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
+});
+
+// Incident 2026-09-29: two concurrent calls both started on key 0; A hit the weekly limit and
+// rotated to key 1, then B hit the same limit on key 0 and parked the HEALTHY key 1 for 6h —
+// "every rung failed" fleet-wide while key 1 still had allowance.
+test('state: a late failure on an already-rotated key parks THAT key, not the healthy active one', () => {
+  const st = emptyState();
+  assert.deepEqual(rotateKey(st, 2, 6 * 3600e3, 0, 0), { rotated: true, fromIndex: 0, toIndex: 1 });
+  const late = rotateKey(st, 2, 6 * 3600e3, 5, 0);
+  assert.deepEqual(late, { rotated: true, fromIndex: 0, toIndex: 1 });
+  assert.equal(st.keys.exhausted[1], undefined, 'key 1 was never failed — must stay usable');
+  assert.equal(snapshot(st, 2, 10).keys.active, 1);
+});
+
+test('ladder: concurrent weekly-limit on key 0 keeps Go serving on key 1', async () => {
+  const env = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a, oc_b', OPENROUTER_API_KEY: 'or' };
+  const cfg = { ladders: { deepseek: { build: ['opencode-go/mimo', 'openrouter/x'] } } };
+  const store = memoryStore(2);
+  const weekly = () => new Response('{"type":"error","error":{"type":"GoUsageLimitError","message":"Go usage limit exceeded"},"metadata":{"limitName":"weekly"}}', { status: 429 });
+  const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+  let gate; const held = new Promise(r => { gate = r; });
+  let firstA = true;
+  const fetchImpl = async (u, init) => {
+    const auth = init.headers.Authorization;
+    if (String(u).includes('openrouter')) return new Response('down', { status: 500 });
+    if (auth === 'Bearer oc_a') {
+      if (firstA) { firstA = false; await held; } // B's key-0 failure lands AFTER A rotated
+      return weekly();
+    }
+    return ok();
+  };
+  const body = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
+  const pB = run(body, { env, config: cfg, store, fetchImpl });
+  await new Promise(r => setTimeout(r, 10));
+  const a = await run(body, { env, config: cfg, store, fetchImpl });
+  gate();
+  const b = await pB;
+  assert.equal(a.ok, true); assert.equal(b.ok, true);
+  const snap = await store.snapshot(2);
+  assert.equal(snap.keys.exhausted[1], undefined);
+  assert.equal(snap.keys.active, 1);
+  const c = await run(body, { env, config: cfg, store, fetchImpl });
+  assert.equal(c.ok, true);
+  assert.equal(c.model, 'opencode-go/mimo');
+});
+
+test('state: resetKeys clears Go key parks and Go rung skips, keeps OpenRouter health', () => {
+  const st = emptyState();
+  st.keys = { active: 1, exhausted: { 0: 9e15, 1: 9e15 } };
+  st.health = { 'opencode-go/mimo': { skipUntil: 9e15 }, 'openrouter/x': { skipUntil: 9e15 } };
+  resetKeys(st);
+  assert.deepEqual(st.keys, { active: 0, exhausted: {} });
+  assert.deepEqual(Object.keys(st.health), ['openrouter/x']);
 });

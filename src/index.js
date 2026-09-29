@@ -4,6 +4,7 @@
 //   GET  /health                 liveness + ladder names (no auth)
 //   GET  /v1/models              ladders as model ids (auth)
 //   GET  /v1/state               model health + key rotation snapshot (auth)
+//   POST /v1/state/reset-keys    unpark all Go keys + Go rungs (auth, ops lever)
 //   POST /v1/chat/completions    body.model = ladder ("deepseek", "deepseek:review") (auth)
 //
 // Auth: `Authorization: Bearer <LADDER_TOKEN>`. Non-streaming → a normal chat.completion whose
