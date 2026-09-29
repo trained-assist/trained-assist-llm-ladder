@@ -17,46 +17,99 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          HOURS: ${{ inputs.hours }}
+          NEEDLE: ${{ inputs.needle }}
         run: |
           set -uo pipefail
-          AUTH=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json")
-          BASE="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}"
-          NOW=$(date +%s000)
-          FROM=$(date -d "-${{ inputs.hours }} hours" +%s000)
-
-          echo "=== 1) telemetry keys ==="
-          curl -sS "${AUTH[@]}" -X POST "${BASE}/workers/observability/telemetry/keys" -d '{}' | head -c 4000
-          echo
-
-          echo "=== 2) events query (needle=${{ inputs.needle }}) ==="
-          curl -sS "${AUTH[@]}" -X POST "${BASE}/workers/observability/telemetry/query" -d "{
-            \"queryId\": \"adhoc-ladder-logs\",
-            \"timeframe\": {\"from\": ${FROM}, \"to\": ${NOW}},
-            \"view\": \"events\",
-            \"parameters\": {
-              \"limit\": 300,
-              \"needle\": {\"value\": \"${{ inputs.needle }}\", \"isRegex\": false, \"matchCase\": false}
-            }
-          }" > /tmp/q.json
-          head -c 6000 /tmp/q.json
-          echo
-
-          echo "=== 3) extract events ==="
           python3 - <<'PY'
-          import json, datetime
-          try:
-              d = json.load(open('/tmp/q.json'))
-          except Exception as e:
-              print('parse failed', e); raise SystemExit
-          if not d.get('success', False):
-              print('QUERY FAILED:', json.dumps(d.get('errors'))[:2000]); raise SystemExit
-          res = d.get('result') or {}
-          evs = ((res.get('run') or {}).get('query') or {})
-          events = (res.get('events') or {}).get('events') or []
-          print('event count:', len(events))
-          for e in events[:300]:
-              md = e.get('$metadata') or {}
-              ts = md.get('timestamp') or md.get('startTime')
+          import json, os, time, urllib.request, urllib.error
+
+          TOKEN = os.environ['CLOUDFLARE_API_TOKEN']
+          ACCT = os.environ['CLOUDFLARE_ACCOUNT_ID']
+          HOURS = float(os.environ.get('HOURS') or 24)
+          NEEDLE = os.environ.get('NEEDLE') or 'attempts'
+          BASE = f'https://api.cloudflare.com/client/v4/accounts/{ACCT}'
+          now = int(time.time() * 1000)
+          frm = int(now - HOURS * 3600 * 1000)
+
+          def post(path, payload):
+              req = urllib.request.Request(
+                  BASE + path,
+                  data=json.dumps(payload).encode(),
+                  headers={'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'},
+                  method='POST')
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      return json.loads(r.read().decode())
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode()[:3000]
+                  return {'http_error': e.code, 'body': body}
+              except Exception as e:
+                  return {'error': str(e)}
+
+          print('=== 1) telemetry keys ===')
+          keys = post('/workers/observability/telemetry/keys', {})
+          print(json.dumps(keys)[:6000])
+
+          # candidate query payloads, most specific first
+          candidates = [
+              {'view': 'events', 'parameters': {'limit': 200,
+               'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}}},
+              {'view': 'events', 'parameters': {'datasets': ['console'], 'limit': 200,
+               'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}}},
+              {'view': 'events', 'parameters': {'datasets': ['custom-logs'], 'limit': 200,
+               'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}}},
+              {'view': 'events'},
+              {'view': 'invocations'},
+          ]
+          best = None
+          for i, p in enumerate(candidates):
+              payload = {'queryId': f'adhoc-ladder-{i}', 'timeframe': {'from': frm, 'to': now}, **p}
+              res = post('/workers/observability/telemetry/query', payload)
+              print(f'=== 2.{i}) payload={json.dumps(p)[:200]} -> success={res.get("success")} ===')
+              if res.get('success'):
+                  # find event lists anywhere in the result
+                  found = []
+
+                  def walk(o):
+                      if isinstance(o, dict):
+                          for k, v in o.items():
+                              if k == 'events' and isinstance(v, list) and v and isinstance(v[0], dict):
+                                  found.extend(v)
+                              else:
+                                  walk(v)
+                      elif isinstance(o, list):
+                          for v in o:
+                              walk(v)
+
+                  walk(res.get('result'))
+                  print(f'events found: {len(found)}')
+                  if found and not best:
+                      best = (payload, res, found)
+                  if len(found) >= 5:
+                      break
+              else:
+                  print(json.dumps(res)[:2000])
+
+          if not best:
+              print('NO EVENTS RETRIEVED')
+              raise SystemExit(1)
+
+          payload, res, found = best
+          print(f'=== 3) extracting with payload {json.dumps(payload)[:200]} ===')
+          print('total events:', len(found))
+          shown = 0
+          for e in found:
               msg = e.get('message') or e.get('text') or ''
-              print('---', ts, md.get('scriptName',''), '|', str(msg)[:900])
+              if isinstance(msg, dict):
+                  msg = json.dumps(msg, ensure_ascii=False)
+              if NEEDLE not in str(msg) and 'ladder' not in str(msg):
+                  continue
+              md = e.get('$metadata') or {}
+              ts = md.get('timestamp') or md.get('startTime') or e.get('timestamp')
+              print('---', ts, '|', str(msg)[:1500])
+              shown += 1
+              if shown >= 250:
+                  break
+          print('shown:', shown)
           PY
