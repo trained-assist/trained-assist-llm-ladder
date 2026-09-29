@@ -8,6 +8,9 @@ on:
       needle:
         description: Substring to search in log messages
         default: "attempts"
+      raw:
+        description: Dump full raw JSON of the first events (true/false)
+        default: "false"
 
 jobs:
   query:
@@ -19,6 +22,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           HOURS: ${{ inputs.hours }}
           NEEDLE: ${{ inputs.needle }}
+          RAW: ${{ inputs.raw }}
         run: |
           set -uo pipefail
           python3 - <<'PY'
@@ -28,6 +32,7 @@ jobs:
           ACCT = os.environ['CLOUDFLARE_ACCOUNT_ID']
           HOURS = float(os.environ.get('HOURS') or 24)
           NEEDLE = os.environ.get('NEEDLE') or 'attempts'
+          RAW = (os.environ.get('RAW') or 'false').lower() == 'true'
           BASE = f'https://api.cloudflare.com/client/v4/accounts/{ACCT}'
           now = int(time.time() * 1000)
           frm = int(now - HOURS * 3600 * 1000)
@@ -39,77 +44,65 @@ jobs:
                   headers={'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'},
                   method='POST')
               try:
-                  with urllib.request.urlopen(req, timeout=60) as r:
+                  with urllib.request.urlopen(req, timeout=90) as r:
                       return json.loads(r.read().decode())
               except urllib.error.HTTPError as e:
-                  body = e.read().decode()[:3000]
-                  return {'http_error': e.code, 'body': body}
+                  return {'http_error': e.code, 'body': e.read().decode()[:3000]}
               except Exception as e:
                   return {'error': str(e)}
 
-          print('=== 1) telemetry keys ===')
-          keys = post('/workers/observability/telemetry/keys', {})
-          print(json.dumps(keys)[:6000])
+          def find_events(res):
+              found = []
 
-          # candidate query payloads, most specific first
-          candidates = [
-              {'view': 'events', 'parameters': {'limit': 200,
-               'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}}},
-              {'view': 'events', 'parameters': {'datasets': ['console'], 'limit': 200,
-               'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}}},
-              {'view': 'events', 'parameters': {'datasets': ['custom-logs'], 'limit': 200,
-               'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}}},
-              {'view': 'events'},
-              {'view': 'invocations'},
-          ]
-          best = None
-          for i, p in enumerate(candidates):
-              payload = {'queryId': f'adhoc-ladder-{i}', 'timeframe': {'from': frm, 'to': now}, **p}
-              res = post('/workers/observability/telemetry/query', payload)
-              print(f'=== 2.{i}) payload={json.dumps(p)[:200]} -> success={res.get("success")} ===')
-              if res.get('success'):
-                  # find event lists anywhere in the result
-                  found = []
-
-                  def walk(o):
-                      if isinstance(o, dict):
-                          for k, v in o.items():
-                              if k == 'events' and isinstance(v, list) and v and isinstance(v[0], dict):
-                                  found.extend(v)
-                              else:
-                                  walk(v)
-                      elif isinstance(o, list):
-                          for v in o:
+              def walk(o):
+                  if isinstance(o, dict):
+                      for k, v in o.items():
+                          if k == 'events' and isinstance(v, list) and v and isinstance(v[0], dict):
+                              found.extend(v)
+                          else:
                               walk(v)
+                  elif isinstance(o, list):
+                      for v in o:
+                          walk(v)
 
-                  walk(res.get('result'))
-                  print(f'events found: {len(found)}')
-                  if found and not best:
-                      best = (payload, res, found)
-                  if len(found) >= 5:
-                      break
-              else:
-                  print(json.dumps(res)[:2000])
+              walk(res.get('result'))
+              return found
 
-          if not best:
-              print('NO EVENTS RETRIEVED')
-              raise SystemExit(1)
+          print('=== keys ===')
+          keys = post('/workers/observability/telemetry/keys', {})
+          print(json.dumps(keys, ensure_ascii=False)[:5000])
 
-          payload, res, found = best
-          print(f'=== 3) extracting with payload {json.dumps(payload)[:200]} ===')
-          print('total events:', len(found))
-          shown = 0
-          for e in found:
-              msg = e.get('message') or e.get('text') or ''
-              if isinstance(msg, dict):
-                  msg = json.dumps(msg, ensure_ascii=False)
-              if NEEDLE not in str(msg) and 'ladder' not in str(msg):
-                  continue
+          res = post('/workers/observability/telemetry/query', {
+              'queryId': 'adhoc-ladder-logs',
+              'timeframe': {'from': frm, 'to': now},
+              'view': 'events',
+              'parameters': {'limit': 200, 'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}},
+          })
+          print('=== query success:', res.get('success'))
+          if not res.get('success'):
+              print(json.dumps(res, ensure_ascii=False)[:4000])
+              raise SystemExit(0)
+          events = find_events(res)
+          print('=== events:', len(events))
+          if events:
+              print('EVENT KEYS:', sorted(events[0].keys()))
+              if RAW:
+                  for e in events[:5]:
+                      print('RAW>', json.dumps(e, ensure_ascii=False)[:4000])
+          # Fallback: print whatever text-ish fields each event carries
+          for i, e in enumerate(events[:200]):
               md = e.get('$metadata') or {}
-              ts = md.get('timestamp') or md.get('startTime') or e.get('timestamp')
-              print('---', ts, '|', str(msg)[:1500])
-              shown += 1
-              if shown >= 250:
-                  break
-          print('shown:', shown)
+              ts = md.get('timestamp') or md.get('startTime') or e.get('timestamp') or ''
+              parts = []
+              for k in ('message', 'text', 'level', 'dataset', 'source', 'stringFields'):
+                  if k in e:
+                      v = e[k]
+                      parts.append(f'{k}={json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v}')
+              # nested cloudflare/message shapes
+              for k, v in e.items():
+                  if isinstance(v, dict):
+                      for kk, vv in v.items():
+                          if isinstance(vv, str) and ('attempts' in vv or 'ladder' in vv or 'opencode-go' in vv):
+                              parts.append(f'{k}.{kk}={vv[:1200]}')
+              print(f'[{i}]', ts, '|', ' | '.join(parts)[:2000])
           PY
