@@ -3,7 +3,9 @@
 // where reliability beats everything else.
 //
 //   * model health — a flaky / limited rung is skipped for everyone (shared state in `store`);
-//   * Go key pool — a key-level fault rotates to the spare key and the rung is retried; once
+//   * Go key pool — a key-level fault rotates to the spare key and the rung is retried; a rung
+//     that fails for a NON-key reason also gets ONE spare-key probe per call before the ladder
+//     leaves Go for paid OpenRouter (a silently throttled key looks like a slow model); once
 //     every key is parked, all Go rungs are skipped until the earliest key heals;
 //   * guard — empty content, or non-JSON when JSON was requested, fails the rung.
 //
@@ -22,6 +24,11 @@ const KEY_QUOTA_RE = /usage limit|quota[^.]{0,20}exceeded|rate[_\s-]{0,5}limit|t
 const DEAD_KEY_RE = /invalid credential|invalid api key|\b401\b|unauthorized/i;
 export const KEY_QUOTA_TTL_MS = 15 * 60 * 1000;
 export const KEY_DEAD_TTL_MS = 60 * 60 * 1000;
+// A WEEKLY Go allowance (the 429 body carries `"limitName":"weekly"`, seen live 2026-09-29) does
+// not heal in 15 minutes: parking it for the rate-limit TTL means the next rotation immediately
+// bounces back onto a key that is still limited for days. Park it for hours instead.
+export const KEY_WEEKLY_TTL_MS = 6 * 60 * 60 * 1000;
+const WEEKLY_LIMIT_RE = /limitName["'\s:]{0,6}weekly/i;
 
 export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
@@ -52,7 +59,7 @@ export function parseJson(content) {
 export function keyFaultOf(errorText) {
   const t = String(errorText || '');
   if (DEAD_KEY_RE.test(t)) return { dead: true, ttlMs: KEY_DEAD_TTL_MS };
-  if (KEY_QUOTA_RE.test(t)) return { dead: false, ttlMs: KEY_QUOTA_TTL_MS };
+  if (KEY_QUOTA_RE.test(t)) return { dead: false, ttlMs: WEEKLY_LIMIT_RE.test(t) ? KEY_WEEKLY_TTL_MS : KEY_QUOTA_TTL_MS };
   return null;
 }
 
@@ -216,11 +223,34 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
 
   const snap = await store.snapshot();
   const now = Date.now();
-  const skipped = m => { const h = snap.health[m]; return !!h && (h.skipUntil === null || h.skipUntil > now); };
+  // A TRANSIENT wobble on a Go rung (timeout / empty answer / 500 — the failure class behind the
+  // 29.09 incident) must not keep the whole fleet on the paid tail for the full exponential
+  // backoff (up to 5 min): cap it, so the Go tier is re-tested at least every 30s. Real limits
+  // (quota parks from key exhaustion, 503, config) keep their own TTL — hammering them helps no
+  // one.
+  const GO_TRANSIENT_SKIP_CAP_MS = 30 * 1000;
+  const skipped = m => {
+    const h = snap.health[m];
+    if (!h) return false;
+    if (h.skipUntil === null) return true;
+    let until = h.skipUntil;
+    if (m.startsWith('opencode-go/') && h.class === 'transient' && h.lastFailureAt) {
+      until = Math.min(until, h.lastFailureAt + GO_TRANSIENT_SKIP_CAP_MS);
+    }
+    return until > now;
+  };
   // If health skips every keyed rung, try them all anyway — a stale skip must not black-hole it.
   const live = pinRung ? keyed : keyed.filter(m => !skipped(m));
   const rungs = live.length ? live : keyed;
   let keyIndex = Math.min(snap.keys.active || 0, Math.max(0, pool.length - 1));
+  const exhaustedAtStart = new Set(Object.keys(snap.keys.exhausted || {}).map(Number));
+  // One spare-key probe per call (owner 2026-09-29: «ключ залимитился → переключаем на другой,
+  // всё»). A Go rung that fails for a NON-key reason (timeout, empty answer, 500) still gets one
+  // attempt on the other provisioned key before the ladder leaves Go for paid OpenRouter — a
+  // silently throttled key looks exactly like a slow model, and staying on Go costs nothing.
+  // Bounded to ONE probe per call so a Go outage cannot double the failover latency.
+  // pinRung (benchmarks) measures exactly ONE attempt on ONE rung — no probe there either.
+  let probeBudget = pinRung ? 0 : 1;
   let goParked = false;
 
   const wantJson = body.response_format && body.response_format.type === 'json_object';
@@ -232,27 +262,44 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
     const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl };
-    let r = await attempt(env, model, body, keyIndex, opts);
+    let key = keyIndex;
+    const tried = new Set([key]);
+    let r = await attempt(env, model, body, key, opts);
     if (r.skip) continue;
-    for (let k = 0; !r.ok && isGo && k < pool.length; k++) {
+    while (!r.ok && isGo && !goParked) {
       const fault = keyFaultOf(r.error);
-      if (!fault) break;
-      const rot = await store.rotateKey(pool.length, fault.ttlMs);
-      if (!rot.rotated) {
-        await store.park(all.filter(m => m.startsWith('opencode-go/')), rot.retryAt);
-        goParked = true;
-        break;
+      if (fault) {
+        const rot = await store.rotateKey(pool.length, fault.ttlMs);
+        if (!rot.rotated) {
+          await store.park(all.filter(m => m.startsWith('opencode-go/')), rot.retryAt);
+          goParked = true;
+          break;
+        }
+        attempts.push({ model, outcome: 'key-rotated', key, error: r.error });
+        key = rot.toIndex;
+        keyIndex = key; // rotation is shared state: the rest of this call rides the spare key too
+        tried.add(key);
+        r = await attempt(env, model, body, key, opts);
+        continue;
       }
-      attempts.push({ model, outcome: 'key-rotated', error: r.error });
-      keyIndex = rot.toIndex;
-      r = await attempt(env, model, body, keyIndex, opts);
+      // Not a key-level signal. Never probe for problems the spare key cannot change: a context
+      // overflow or a config-class rejection is a property of the request / the model, not the key.
+      const cls = classifyError(r.error)?.class || 'transient';
+      const spare = pool.findIndex((_, i) => !tried.has(i) && !exhaustedAtStart.has(i));
+      if (cls === 'context' || cls === 'config' || spare < 0 || probeBudget <= 0) break;
+      probeBudget--;
+      attempts.push({ model, outcome: 'key-probe', key, error: r.error });
+      key = spare;
+      tried.add(key);
+      r = await attempt(env, model, body, key, opts);
+      if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
     }
     if (r.ok) {
       await store.recordSuccess(model);
-      attempts.push({ model, outcome: 'ok' });
+      attempts.push({ model, outcome: 'ok', key });
       return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts };
     }
-    attempts.push({ model, outcome: 'error', error: r.error });
+    attempts.push({ model, outcome: 'error', key, error: r.error });
     if (!goParked) await store.recordFailure(model, failureClass(r.error));
   }
   return { ok: false, status: 502, error: 'every rung failed', attempts };

@@ -38,11 +38,19 @@ Rungs are tried top-down:
 
 - **Model health** — a failing rung is skipped for everyone: transient faults back off per model
   (15s → 30s → 60s … cap 5 min, each model its own counter); quota/limit errors skip for the
-  classified TTL (`src/classify.js`).
+  classified TTL (`src/classify.js`). Exception: a TRANSIENT skip on a Go rung is capped at 30s
+  after its last failure — a short Go wobble must not keep the fleet on the paid OpenRouter tail
+  (money + a mid-run prompt-cache reset) for the full backoff. Real limits keep their TTL.
 - **Two OpenCode Go keys** (`OPENCODE_GO_API_KEYS`) — a key-level fault (usage limit, 429,
-  rejected key) rotates to the spare key and retries the same rung. When both keys are parked,
-  every Go rung is skipped until the earliest key heals (15 min quota / 1 h rejected), so the
-  ladder serves OpenRouter and returns to Go by itself. 503 / Bad Request never burn a key.
+  rejected key) rotates to the spare key and retries the same rung; a WEEKLY allowance parks that
+  key for 6 h (`"limitName":"weekly"`), not the 15-minute rate-limit TTL. A rung that fails for a
+  NON-key reason (timeout, empty answer, 500) gets ONE spare-key probe per call before the ladder
+  leaves Go for paid OpenRouter — a silently throttled key looks exactly like a slow model, and
+  staying on Go costs nothing. Context/config rejections never probe (the key cannot change them).
+  When both keys are parked, every Go rung is skipped until the earliest key heals, so the ladder
+  serves OpenRouter and returns to Go by itself. Every attempt entry carries the pool `key` index
+  (`ok` / `error` / `key-rotated` / `key-probe`), so `/v1/state` and the Workers Observability
+  logs show which key served. 503 / Bad Request never burn a key.
 - **Guard** — empty content, or non-JSON when `response_format: json_object`, fails the rung.
 
 State lives in one global Durable Object (`LadderState`) — strongly consistent across callers.
@@ -95,6 +103,12 @@ npx wrangler dev    # local worker
 Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`.
 Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
 `CF_ACCOUNT_ID`).
+
+Inspecting what actually served a call (which rung, which key, which error): the worker logs one
+JSON line per call with the full `attempts` array. Dispatch the `query-ladder-logs` GitHub Actions
+workflow (inputs `hours`, `step_min`, `needle`, `regex_hours`) to query Workers Observability and
+print the aggregation — served-model histogram, distinct error strings, `key-rotated` / `key-probe`
+events, OpenRouter descents. Live health + key rotation snapshot: `GET /v1/state`.
 
 ## Claude Code Instructions
 
