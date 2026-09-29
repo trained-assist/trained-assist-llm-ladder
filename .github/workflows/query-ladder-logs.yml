@@ -8,9 +8,6 @@ on:
       needle:
         description: Substring to search in log messages
         default: "attempts"
-      raw:
-        description: Dump full raw JSON of the first events (true/false)
-        default: "false"
 
 jobs:
   query:
@@ -22,25 +19,22 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           HOURS: ${{ inputs.hours }}
           NEEDLE: ${{ inputs.needle }}
-          RAW: ${{ inputs.raw }}
         run: |
           set -uo pipefail
           python3 - <<'PY'
-          import json, os, time, urllib.request, urllib.error
+          import json, os, time, urllib.request, urllib.error, collections, datetime
 
           TOKEN = os.environ['CLOUDFLARE_API_TOKEN']
           ACCT = os.environ['CLOUDFLARE_ACCOUNT_ID']
           HOURS = float(os.environ.get('HOURS') or 24)
           NEEDLE = os.environ.get('NEEDLE') or 'attempts'
-          RAW = (os.environ.get('RAW') or 'false').lower() == 'true'
           BASE = f'https://api.cloudflare.com/client/v4/accounts/{ACCT}'
           now = int(time.time() * 1000)
           frm = int(now - HOURS * 3600 * 1000)
 
           def post(path, payload):
               req = urllib.request.Request(
-                  BASE + path,
-                  data=json.dumps(payload).encode(),
+                  BASE + path, data=json.dumps(payload).encode(),
                   headers={'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'},
                   method='POST')
               try:
@@ -53,7 +47,6 @@ jobs:
 
           def find_events(res):
               found = []
-
               def walk(o):
                   if isinstance(o, dict):
                       for k, v in o.items():
@@ -64,45 +57,75 @@ jobs:
                   elif isinstance(o, list):
                       for v in o:
                           walk(v)
-
               walk(res.get('result'))
               return found
 
-          print('=== keys ===')
-          keys = post('/workers/observability/telemetry/keys', {})
-          print(json.dumps(keys, ensure_ascii=False)[:5000])
+          # 30-minute windows, newest first, aggregate everything
+          STEP = 30 * 60 * 1000
+          events = []
+          t = now
+          while t > frm:
+              w_from = max(t - STEP, frm)
+              res = post('/workers/observability/telemetry/query', {
+                  'queryId': 'adhoc-ladder-agg',
+                  'timeframe': {'from': w_from, 'to': t},
+                  'view': 'events',
+                  'parameters': {'limit': 500, 'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}},
+              })
+              if not res.get('success'):
+                  print('WINDOW FAIL', json.dumps(res)[:800])
+              else:
+                  evs = [e for e in find_events(res)
+                         if ((e.get('$workers') or {}).get('scriptName')) == 'trained-assist-llm-ladder']
+                  events.extend(evs)
+                  print(f'window {datetime.datetime.utcfromtimestamp(w_from/1000):%m-%d %H:%M} -> {len(evs)}')
+              t = w_from
 
-          res = post('/workers/observability/telemetry/query', {
-              'queryId': 'adhoc-ladder-logs',
-              'timeframe': {'from': frm, 'to': now},
-              'view': 'events',
-              'parameters': {'limit': 200, 'needle': {'value': NEEDLE, 'isRegex': False, 'matchCase': False}},
-          })
-          print('=== query success:', res.get('success'))
-          if not res.get('success'):
-              print(json.dumps(res, ensure_ascii=False)[:4000])
-              raise SystemExit(0)
-          events = find_events(res)
-          print('=== events:', len(events))
-          if events:
-              print('EVENT KEYS:', sorted(events[0].keys()))
-              if RAW:
-                  for e in events[:5]:
-                      print('RAW>', json.dumps(e, ensure_ascii=False)[:4000])
-          # Fallback: print whatever text-ish fields each event carries
-          for i, e in enumerate(events[:200]):
-              md = e.get('$metadata') or {}
-              ts = md.get('timestamp') or md.get('startTime') or e.get('timestamp') or ''
-              parts = []
-              for k in ('message', 'text', 'level', 'dataset', 'source', 'stringFields'):
-                  if k in e:
-                      v = e[k]
-                      parts.append(f'{k}={json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v}')
-              # nested cloudflare/message shapes
-              for k, v in e.items():
-                  if isinstance(v, dict):
-                      for kk, vv in v.items():
-                          if isinstance(vv, str) and ('attempts' in vv or 'ladder' in vv or 'opencode-go' in vv):
-                              parts.append(f'{k}.{kk}={vv[:1200]}')
-              print(f'[{i}]', ts, '|', ' | '.join(parts)[:2000])
+          print('TOTAL EVENTS:', len(events))
+          served = collections.Counter()
+          errors = collections.Counter()
+          rotations = []
+          descents = []
+          failures = []
+          for e in events:
+              src = e.get('source') or {}
+              if not isinstance(src, dict):
+                  continue
+              ts = e.get('timestamp') or e.get('$metadata', {}).get('timestamp')
+              def fmt(ms):
+                  try:
+                      return datetime.datetime.utcfromtimestamp(int(ms)/1000).strftime('%m-%d %H:%M:%S')
+                  except Exception:
+                      return '?'
+              served[(src.get('ladder'), src.get('model'))] += 1
+              for a in (src.get('attempts') or []):
+                  if a.get('outcome') == 'error' and a.get('error'):
+                      errors[a['error'][:160]] += 1
+                  if a.get('outcome') == 'key-rotated':
+                      rotations.append((fmt(ts), src.get('ladder'), a.get('model'), (a.get('error') or '')[:200]))
+              m = src.get('model') or ''
+              if isinstance(m, str) and m.startswith('openrouter/'):
+                  descents.append((fmt(ts), src.get('ladder'), m,
+                                   [(a.get('model'), a.get('outcome'), (a.get('error') or '')[:120])
+                                    for a in (src.get('attempts') or [])]))
+              if src.get('ok') is False:
+                  failures.append((fmt(ts), src.get('ladder'), src.get('error') or '',
+                                   [(a.get('model'), a.get('outcome'), (a.get('error') or '')[:120])
+                                    for a in (src.get('attempts') or [])]))
+
+          print('\n=== SERVED (ladder, model) histogram ===')
+          for k, v in served.most_common(40):
+              print(f'{v:5d}  {k}')
+          print('\n=== DISTINCT ERROR STRINGS ===')
+          for k, v in errors.most_common(40):
+              print(f'{v:5d}  {k}')
+          print(f'\n=== KEY ROTATIONS ({len(rotations)}) ===')
+          for r in rotations[:60]:
+              print(r)
+          print(f'\n=== CALLS SERVED BY OPENROUTER ({len(descents)}) ===')
+          for d in descents[:80]:
+              print(d)
+          print(f'\n=== FULL LADDER FAILURES ({len(failures)}) ===')
+          for f in failures[:40]:
+              print(f)
           PY
