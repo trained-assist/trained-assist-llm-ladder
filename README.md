@@ -158,9 +158,10 @@ Local iteration without touching prod: `cp .dev.vars.example .dev.vars`, fill in
 
 **Live gate** (`scripts/live-gate.mjs`): `/health` → one `ladder_rung`-pinned call per rung of the
 gate ladder (default `deepseek`/`build`; override with `LADDER_GATE_RUNGS="rung1 rung2"`) →
-`/v1/state` skip check. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the
-repo) — never printed, never committed. Exit 0 = green. Only people who hold the token can call the
-API; repo access (the repo is public) grants nothing.
+`/v1/state` skip check. A failed pin retries twice (`LADDER_GATE_RETRIES`) — upstream blips don't
+flake the gate, a dead rung still does. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token`
+(chmod 600, outside the repo) — never printed, never committed. Exit 0 = green. Only people who hold
+the token can call the API; repo access (the repo is public) grants nothing.
 
 Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
 `OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;

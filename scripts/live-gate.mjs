@@ -55,21 +55,28 @@ try {
   report('/health', false, `unreachable: ${e.message}`);
 }
 
-// 2. one pinned call per gate rung — no failover, so a 200 means THIS rung answered
+// 2. one pinned call per gate rung — no failover, so a 200 means THIS rung answered.
+//    Upstream blips are normal on live rungs: a failed pin is retried LADDER_GATE_RETRIES times
+//    (default 2) before it counts red, so the gate reports "rung dead", not "rung hiccupped".
+const RETRIES = Math.max(1, Number(process.env.LADDER_GATE_RETRIES) || 2);
 for (const rung of rungs) {
-  let ok = false, detail = '';
-  try {
-    const res = await fetch(`${BASE}/v1/chat/completions`, {
-      method: 'POST', headers: auth,
-      body: JSON.stringify({ model: LADDER, ladder_rung: rung, messages: [{ role: 'user', content: 'gate' }] }),
-    });
-    const data = await res.json().catch(() => null);
-    ok = res.status === 200 && data?.model === rung;
-    detail = res.status === 200 ? `answered=${data?.model}` : `HTTP ${res.status} ${data?.error?.message || ''}`;
-  } catch (e) {
-    detail = `unreachable: ${e.message}`;
+  let ok = false, detail = '', tries = 0;
+  for (; tries < RETRIES && !ok; tries++) {
+    if (tries) await new Promise(r => setTimeout(r, 1500));
+    try {
+      const res = await fetch(`${BASE}/v1/chat/completions`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ model: LADDER, ladder_rung: rung, messages: [{ role: 'user', content: 'gate' }] }),
+      });
+      const data = await res.json().catch(() => null);
+      ok = res.status === 200 && data?.model === rung;
+      const attempts = (data?.error?.attempts || []).map(a => `${a.model}=${a.outcome}`).join(', ');
+      detail = res.status === 200 ? `answered=${data?.model}` : `HTTP ${res.status} ${data?.error?.message || ''}${attempts ? ` [${attempts}]` : ''}`;
+    } catch (e) {
+      detail = `unreachable: ${e.message}`;
+    }
   }
-  report(`pin ${rung}`, ok, detail);
+  report(`pin ${rung}`, ok, `${tries > 1 ? `after ${tries} tries, ` : ''}${detail}`);
 }
 
 // 3. nothing in the gate set parked in skip
