@@ -9,9 +9,10 @@ Live: `https://llm-ladder.trainedassist.store`
 
 `config/ladders.json`:
 
-- **`deepseek`** (alias `service`) — small service calls; owner decision 2026-09-30 (issue #36),
-  same for every role — five tiers, free first. Owner 2026-09-30 (issue #42): the four zen rungs
-  moved out of `deepseek` — zen lives in `free` only:
+- **`service`** (renamed from `deepseek` in issue #49 — the legacy alias `deepseek` keeps
+  resolving, so no client changes; the agent keeps sending it) — small service calls; owner
+  decision 2026-09-30 (issue #36), same for every role — five tiers, free first. Owner
+  2026-09-30 (issue #42): the four zen rungs moved out of this ladder — zen lives in `free` only:
 
 1. `opencode-go/space-bunny-free` — Go free tier, **Unlimited** (limited time); keeps working
    after the Go usage limit, so a weekly-limit incident stops here
@@ -24,16 +25,19 @@ Live: `https://llm-ladder.trainedassist.store`
 7. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
 8. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
 9. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
-10. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
-11. `openrouter/inclusionai/ling-3.0-flash` — paid tail starts here ($0.021/$0.063 per M, live
+10. `openrouter/inclusionai/ling-3.0-flash` — paid tail starts here ($0.021/$0.063 per M, live
     OpenRouter price 2026-09-30; fastest paid rung: 1–4s and judge q2 in the continuous bench)
-12. `openrouter/xiaomi/mimo-v2.6-flash` — paid, second vendor ($0.14/$0.28; owner: «мимо норм»)
+11. `openrouter/xiaomi/mimo-v2.6-flash` — paid, second vendor ($0.14/$0.28; owner: «мимо норм»)
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 (`openrouter/deepseek/deepseek-v4-flash-0731` was removed 2026-09-30 — issue #45: the live
 OpenRouter price is $0.01/**$1.28** per M output (40× ling), the bench shows ❌ ping/json/code
 and a live probe timed out at 60s on code-gen/agent-plan — owner: «дипсик вполне можно
 заменять». Alongside it #45 adds ONE same-rung guard-retry for empty/non-JSON answers.)
+(`opencode-go/deepseek-v4.1-flash` was dropped from this ladder 2026-10-01 — issue #49: the
+intermittent `HTTP 400 {"model":"deepseek-v4.1-flash"}` (×8/hour in query-ladder-logs, known
+since 2026-09-25) + bench ❌ on agent-plan/code-fix; owner: «дипсик вполне можно заменять».
+It REMAINS in the `research` ladder.)
 
 **Zen free tier needs a relay** and lives in the `free` ladder only (owner decision 2026-09-30,
 issue #42). OpenCode gates `zen/v1` free models behind an exact client
@@ -113,10 +117,10 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | Method | Path | |
 |---|---|---|
 | GET | `/health` | liveness + ladder names |
-| GET | `/v1/models` | ladders as model ids (`deepseek`, `deepseek:review`, …) |
+| GET | `/v1/models` | ladders as model ids (`service`, `service:review`, …) |
 | GET | `/v1/state` | model health + key rotation snapshot |
 | GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens, attempts-depth histogram and merged top-20 errors (digit-normalized, same grouping as `scripts/analytics.py`); N = window in hours, 1–168, default 24. What the hourly Telegram digest in `vm-telegram-monitor` renders |
-| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `deepseek`); `stream: true` → SSE; `tools` passed through |
+| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `service`, legacy alias `deepseek`); `stream: true` → SSE; `tools` passed through |
 
 Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
 `ladder_ttfb_ms` (streaming: first-token window, default 15000), `ladder_total_timeout_ms` (whole
@@ -140,13 +144,14 @@ Failure: `502 {error:{type:"ladder_error", attempts:[…]}}`.
 ```bash
 curl -s https://llm-ladder.trainedassist.store/v1/chat/completions \
   -H "Authorization: Bearer $LADDER_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek","messages":[{"role":"user","content":"Верни JSON {\"ok\":true}"}],"response_format":{"type":"json_object"}}'
+  -d '{"model":"service","messages":[{"role":"user","content":"Верни JSON {\"ok\":true}"}],"response_format":{"type":"json_object"}}'
 ```
 
 Clients:
 
-- `trained-assist-agent` `src/service-llm.js` — all small service calls (`deepseek`); the only
-  implementation, no in-process copy.
+- `trained-assist-agent` `src/service-llm.js` — all small service calls (sends `deepseek`, the
+  legacy alias of `service` — no agent change needed, issue #49); the only implementation, no
+  in-process copy.
 - `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder`), token via org secret `LLM_LADDER_TOKEN`.
 - opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free-ladder`.
 
@@ -164,7 +169,7 @@ Local iteration without touching prod: `cp .dev.vars.example .dev.vars`, fill in
 `http://localhost:8787`. `.dev.vars` is gitignored — real values never enter the repo.
 
 **Live gate** (`scripts/live-gate.mjs`): `/health` → one `ladder_rung`-pinned call per rung of the
-gate ladder (default `deepseek`/`build`; override with `LADDER_GATE_RUNGS="rung1 rung2"`) →
+gate ladder (default `service`/`build`; override with `LADDER_GATE_RUNGS="rung1 rung2"`) →
 `/v1/state` skip check. A failed pin retries twice (`LADDER_GATE_RETRIES`) — upstream blips don't
 flake the gate, a dead rung still does. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token`
 (chmod 600, outside the repo) — never printed, never committed. Exit 0 = green. Only people who hold
