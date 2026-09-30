@@ -6,6 +6,20 @@ import { run, readPool, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from
 import { makeTrace, logCall } from './trace.js';
 import config from '../config/ladders.json' with { type: 'json' };
 
+// GET /v1/analytics: both bind ?1 = since (ms). Aggregates per requested ladder name;
+// the depth histogram is attempts-per-call from the attempts JSON (json_valid guards
+// legacy rows). Keep the bind: an interpolated timestamp is an injection (query-trace
+// guard tests the same rule for the python read path).
+const ANALYTICS_AGG_SQL =
+  'SELECT ladder, COUNT(*) AS calls, SUM(1 - ok) AS failed, '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
+  + 'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
+  + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY ladder';
+const ANALYTICS_DEPTH_SQL =
+  'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
+  + 'GROUP BY ladder, depth';
+
 function json(status, body, headers = {}) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 }
@@ -88,6 +102,56 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const s = await (store || makeStore(env)).snapshot();
     s.pins = await (store || makeStore(env)).pinStats();
     return json(200, s);
+  }
+
+  // Aggregates over the D1 trace for the hourly Telegram digest (vm-telegram-monitor):
+  // per-ladder calls / failures / tokens + the attempts-depth histogram the reporter turns
+  // into a retry funnel. Read-only; window is whole hours 1..168 (default 24).
+  if (request.method === 'GET' && url.pathname === '/v1/analytics') {
+    const db = env.LADDER_TRACE_DB;
+    if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+    const hours = Math.min(168, Math.max(1, Math.floor(Number(url.searchParams.get('hours')) || 24)));
+    const since = Date.now() - hours * 3_600_000;
+    try {
+      const aggRows = (await db.prepare(ANALYTICS_AGG_SQL).bind(since).all()).results || [];
+      const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
+      const num = (v) => Number(v) || 0;
+      const ladders = new Map();
+      const entry = (raw) => {
+        // Group the requested names by ladder: 'service'→'deepseek', 'free-ladder'→'free'
+        // (config.aliases), so the digest shows one line per ladder, not per alias.
+        const ladder = config.aliases[raw] || raw;
+        let e = ladders.get(ladder);
+        if (!e) { e = { ladder, calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, depth: [] }; ladders.set(ladder, e); }
+        return e;
+      };
+      for (const r of aggRows) {
+        const e = entry(r.ladder);
+        e.calls += num(r.calls); e.failed += num(r.failed);
+        e.tokens_in += num(r.tin); e.tokens_out += num(r.tout); e.no_usage += num(r.no_usage);
+      }
+      // depth histogram: attempts per call (key-rotation retries included — it counts
+      // HTTP attempts, which is what the digest labels "retries"). Rows arrive per raw
+      // ladder name, so after the alias merge two raw names can map to one (depth, ladder)
+      // bucket — sum, don't push duplicates (the reporter sums by depth anyway, but a
+      // clean histogram keeps the payload self-describing).
+      for (const r of depthRows) {
+        const e = entry(r.ladder);
+        const depth = num(r.depth), calls = num(r.calls);
+        const hit = e.depth.find(x => x.depth === depth);
+        if (hit) hit.calls += calls;
+        else e.depth.push({ depth, calls });
+      }
+      const totals = { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0 };
+      const out = [...ladders.values()].sort((a, b) => b.calls - a.calls);
+      for (const e of out) {
+        e.depth.sort((a, b) => a.depth - b.depth);
+        for (const k of Object.keys(totals)) totals[k] += e[k];
+      }
+      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out });
+    } catch (e) {
+      return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
+    }
   }
 
   // Ops: unpark all Go keys and Go rungs (a wrongly parked key, a limit lifted early).
