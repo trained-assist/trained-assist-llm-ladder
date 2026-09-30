@@ -99,30 +99,38 @@ const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|strea
 
 export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
+  const isZen = model.startsWith('opencode-zen/');
   const pool = readPool(env);
-  const key = isGo ? pool[keyIndex] : env.OPENROUTER_API_KEY;
+  // Zen (#36): single shared relay token — no key pool, no rotation. Missing token → null →
+  // the rung is treated as keyless and skipped, so an unconfigured worker just skips zen.
+  const key = isGo ? pool[keyIndex] : isZen ? env.OPENCODE_ZEN_RELAY_TOKEN : env.OPENROUTER_API_KEY;
   if (!key) return null;
   const headers = { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' };
   // Keyed calls carry a stable per-conversation id so the provider-side prompt cache survives
   // turn after turn (epic #17, S7). Unkeyed calls keep the random session (Go 400s without it).
+  // The zen relay turns x-session-id into its ses_/msg_ fingerprint (deterministic per conv).
   if (isGo) headers['x-opencode-session'] = `ladder-${conversation || crypto.randomUUID()}`;
   else if (conversation) headers['x-session-id'] = conversation;
-  // App attribution (#33): only OpenRouter understands these — Go rungs must not get them.
-  if (!isGo) {
+  // App attribution (#33): only OpenRouter understands these — Go and zen rungs must not get them.
+  if (!isGo && !isZen) {
     headers['HTTP-Referer'] = `${APP_REFERER_BASE}/${sanitizeAppSlug(appSlug)}`;
     headers['X-OpenRouter-Title'] = sanitizeAppTitle(appTitle);
     headers['X-OpenRouter-App-Visibility'] = 'hidden';
   }
   const upstream = {
     ...body,
-    model: model.replace(/^opencode-go\/|^openrouter\//, ''),
+    model: model.replace(/^opencode-go\/|^opencode-zen\/|^openrouter\//, ''),
     stream,
     max_tokens: Math.max(Number(body.max_tokens) || 0, MIN_TOKENS),
   };
   delete upstream.stream_options;
-  if (stream && !isGo) upstream.stream_options = { include_usage: true };
+  if (stream && !isGo && !isZen) upstream.stream_options = { include_usage: true };
   if (stripRf) { delete upstream.response_format; delete upstream.stream_options; }
-  const base = isGo ? (env.OPENCODE_GO_BASE_URL || 'https://opencode.ai/zen/go/v1') : (env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1');
+  const base = isGo
+    ? (env.OPENCODE_GO_BASE_URL || 'https://opencode.ai/zen/go/v1')
+    : isZen
+      ? (env.OPENCODE_ZEN_BASE_URL || 'https://136-65-7-197.sslip.io/zen')
+      : (env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1');
   return { url: `${base}/chat/completions`, headers, body: upstream };
 }
 
@@ -256,7 +264,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     all = [pinRung];
   }
   const pool = readPool(env);
-  const hasKey = m => (m.startsWith('opencode-go/') ? pool.length > 0 : !!env.OPENROUTER_API_KEY);
+  const hasKey = m => (m.startsWith('opencode-go/') ? pool.length > 0
+    : m.startsWith('opencode-zen/') ? !!env.OPENCODE_ZEN_RELAY_TOKEN
+      : !!env.OPENROUTER_API_KEY);
   const keyed = all.filter(hasKey);
   if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [] };
 
@@ -266,14 +276,15 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // 29.09 incident) must not keep the whole fleet on the paid tail for the full exponential
   // backoff (up to 5 min): cap it, so the Go tier is re-tested at least every 30s. Real limits
   // (quota parks from key exhaustion, 503, config) keep their own TTL — hammering them helps no
-  // one.
+  // one. Zen rungs (#36) get the same cap: they sit in the free segment, and a long skip there
+  // pushes calls onto the rate-limited OpenRouter free pool and then the paid tail.
   const GO_TRANSIENT_SKIP_CAP_MS = 30 * 1000;
   const skipped = m => {
     const h = snap.health[m];
     if (!h) return false;
     if (h.skipUntil === null) return true;
     let until = h.skipUntil;
-    if (m.startsWith('opencode-go/') && h.class === 'transient' && h.lastFailureAt) {
+    if ((m.startsWith('opencode-go/') || m.startsWith('opencode-zen/')) && h.class === 'transient' && h.lastFailureAt) {
       until = Math.min(until, h.lastFailureAt + GO_TRANSIENT_SKIP_CAP_MS);
     }
     return until > now;

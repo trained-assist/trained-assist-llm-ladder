@@ -24,13 +24,35 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
-test('config: Go mimo → Go deepseek-v4.1-flash → free OpenRouter tier → paid tail of three vendors', () => {
-  assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash',
-    'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'openrouter/inclusionai/ling-3.0-flash-sante:free',
-    'openrouter/deepseek/deepseek-v4-flash-0731', 'openrouter/inclusionai/ling-3.0-flash', 'openrouter/xiaomi/mimo-v2.6-flash']);
+test('config: five tiers — Go free → zen free → OpenRouter :free ×5 → Go subscription → paid tail (#36)', () => {
+  assert.deepEqual(LADDER, [
+    'opencode-go/space-bunny-free',
+    'opencode-go/longcat-2.5-preview-free',
+    'opencode-zen/mimo-v2.6-flash-free',
+    'opencode-zen/mimo-v2.5-free',
+    'opencode-zen/big-pickle',
+    'opencode-zen/nemotron-3.5-lightning-free',
+    'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
+    'openrouter/inclusionai/ling-3.0-flash-sante:free',
+    'openrouter/cohere/north-mini-code:free',
+    'openrouter/dots-studio/dots-3-note-preview:free',
+    'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    'opencode-go/mimo-v2.6-flash',
+    'opencode-go/deepseek-v4.1-flash',
+    'openrouter/deepseek/deepseek-v4-flash-0731',
+    'openrouter/inclusionai/ling-3.0-flash',
+    'openrouter/xiaomi/mimo-v2.6-flash',
+  ]);
+  for (const role of ['build', 'plan', 'explore', 'general', 'review']) {
+    assert.deepEqual(config.ladders.deepseek[role], LADDER, role);
+  }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
+  assert.ok(firstPaid === 13, 'paid OpenRouter only after the free tiers and Go subscription');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
+  const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
+  assert.ok(firstGoPaid > LADDER.filter(m => m.endsWith(':free') || m.startsWith('opencode-zen/') || m.endsWith('-free')).length - 1,
+    'Go subscription rungs sit after every free rung');
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -419,8 +441,59 @@ test('run() threads appSlug/appTitle down to the OpenRouter upstream; Go stays c
   assert.equal(or[0].headers['X-OpenRouter-App-Visibility'], 'hidden');
 });
 
-test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forwarded to run()', async () => {
-  const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
+// ── Zen free tier via relay (#36) ────────────────────────────────────────────────────────────────
+const zenv = { ...env, OPENCODE_ZEN_RELAY_TOKEN: 'zr_t', OPENCODE_ZEN_BASE_URL: 'https://relay.test/zen' };
+
+test('zen upstreamRequest: relay URL + relay token, no OpenRouter attribution, model prefix stripped', () => {
+  const r = upstreamRequest(zenv, 'opencode-zen/mimo-v2.6-flash-free', { ...msg, response_format: { type: 'json_object' } }, 0, { appSlug: 'hh-messages' });
+  assert.equal(r.url, 'https://relay.test/zen/chat/completions');
+  assert.equal(r.headers.Authorization, 'Bearer zr_t');
+  assert.equal(r.body.model, 'mimo-v2.6-flash-free');
+  assert.equal(r.body.stream, false);
+  for (const h of ['HTTP-Referer', 'X-OpenRouter-Title', 'X-OpenRouter-App-Visibility']) {
+    assert.equal(r.headers[h], undefined, `${h} must not be sent to the zen relay`);
+  }
+  assert.equal(r.headers['x-opencode-session'], undefined, 'zen has its own session fingerprint');
+  assert.ok(r.body.response_format, 'response_format passes through to the relay');
+
+  const conv = upstreamRequest(zenv, 'opencode-zen/big-pickle', msg, 0, { conversation: 'conv-42' });
+  assert.equal(conv.headers['x-session-id'], 'conv-42', 'conversation id goes to the relay for ses_ derivation');
+});
+
+test('zen rung without OPENCODE_ZEN_RELAY_TOKEN is skipped; with it the relay answers', async () => {
+  // no token → hasKey filters every zen rung out: the walk goes Go → (zen absent) → OpenRouter
+  const beh = { [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }), [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }) };
+  const noTok = [];
+  const r0 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, noTok) });
+  assert.equal(r0.model, 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'unconfigured zen → OpenRouter free tier');
+  assert.ok(noTok.every(c => !c.url.includes('sslip.io')), 'no relay calls without the token');
+
+  // token present → the third rung (first zen) serves after both Go-free rungs fail
+  const calls = [];
+  const r1 = await run(msg, { env: zenv, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r1.ok, true);
+  assert.equal(r1.model, 'opencode-zen/mimo-v2.6-flash-free');
+  const zenCall = calls[calls.length - 1];
+  assert.equal(zenCall.url, 'https://relay.test/zen/chat/completions');
+  assert.equal(zenCall.auth, 'Bearer zr_t');
+  assert.equal(zenCall.body.model, 'mimo-v2.6-flash-free');
+});
+
+test('zen failures skip the rung for everyone (shared health), same as any provider', async () => {
+  const beh = {
+    [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }),
+    [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }),
+    'mimo-v2.6-flash-free': () => ({ status: 429, error: 'Rate limit exceeded. Please try again later.' }),
+  };
+  const store = memoryStore(2);
+  const r = await run(msg, { env: zenv, config, store, fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r.ok, true, 'walked past the limited zen rung');
+  assert.notEqual(r.model, 'opencode-zen/mimo-v2.6-flash-free');
+  const h = store.state.health['opencode-zen/mimo-v2.6-flash-free'];
+  assert.ok(h && h.skipUntil > Date.now(), 'the limited zen rung is parked in shared health');
+});
+
+test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forwarded to run()', async () => {  const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
   const seen = [];
   const f = async (url, init) => {
     seen.push({ url, headers: init.headers });

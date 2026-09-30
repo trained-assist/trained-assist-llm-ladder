@@ -76,9 +76,10 @@ def normalize_error(err):
 
 
 def openrouter_id(model):
-    """Ladder rung → OpenRouter pricing id; None when not billed per token here."""
+    """Ladder rung → OpenRouter pricing id; None when not billed per token here
+    (opencode-go/* is the subscription, opencode-zen/* is the free tier, #36)."""
     if not model or not model.startswith('openrouter/'):
-        return None  # opencode-go/* is the Go subscription; unknown prefixes are not ours
+        return None  # opencode-go/* / opencode-zen/* are not per-token billed here
     return model[len('openrouter/'):]
 
 

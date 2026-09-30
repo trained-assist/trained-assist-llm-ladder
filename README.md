@@ -9,18 +9,38 @@ Live: `https://llm-ladder.trainedassist.store`
 
 `config/ladders.json`:
 
-- **`deepseek`** (alias `service`) — small service calls; owner decision 2026-09-27, same for every role:
+- **`deepseek`** (alias `service`) — small service calls; owner decision 2026-09-30 (issue #36),
+  same for every role — five tiers, free first:
 
-1. `opencode-go/mimo-v2.6-flash`
-2. `opencode-go/deepseek-v4.1-flash`
-3. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — free tier (issue #26, owner 2026-09-30):
-   rides out a Go weekly-limit incident without paying the OpenRouter tail
-4. `openrouter/inclusionai/ling-3.0-flash-sante:free` — free, second vendor
-5. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
-6. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
-7. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
+1. `opencode-go/space-bunny-free` — Go free tier, **Unlimited** (limited time); keeps working
+   after the Go usage limit, so a weekly-limit incident stops here
+2. `opencode-go/longcat-2.5-preview-free` — Go free tier, Unlimited (limited time), zero-retention
+3. `opencode-zen/mimo-v2.6-flash-free` — Zen free tier via the relay (see below)
+4. `opencode-zen/mimo-v2.5-free` — Zen free
+5. `opencode-zen/big-pickle` — Zen free (stealth model)
+6. `opencode-zen/nemotron-3.5-lightning-free` — Zen free, fast
+7. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
+8. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
+9. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
+10. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
+11. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
+12. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
+13. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
+14. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
+15. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
+16. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
+
+**Zen free tier needs a relay.** OpenCode gates `zen/v1` free models behind an exact client
+fingerprint (captured live: `Bearer public`, `User-Agent: opencode/1.18.31 ai-sdk/…`, `x-opencode-client`,
+`x-opencode-project`, `msg_`/`ses_` ids, `stream:true`, and `tools` containing functions named
+`shell` + `read`) **and** IP reputation: Cloudflare Worker egress gets a stable
+`429 FreeUsageLimitError` from every colo, while the GCP VM answers 200. So the Worker calls
+`scripts/zen-relay.mjs` (systemd `zen-relay.service` on the GCP VM, nginx `location /zen/` on
+`https://136-65-7-197.sslip.io/zen`) with `OPENCODE_ZEN_RELAY_TOKEN`; the relay injects the
+fingerprint, forces `stream:true`, merges `shell`/`read` into `tools` (`tool_choice:"none"` when the
+caller sent none) and aggregates SSE → JSON for non-streaming callers.
 
 - **`research`** — Hermes / opencode researcher runs (owner 2026-09-28), **split by role**:
   `research:explore` (the reading subagent — big docs, PDFs, pages) = Go `mimo-v2.6-flash` (1M ctx) →
@@ -43,7 +63,7 @@ Rungs are tried top-down:
 
 - **Model health** — a failing rung is skipped for everyone: transient faults back off per model
   (15s → 30s → 60s … cap 5 min, each model its own counter); quota/limit errors skip for the
-  classified TTL (`src/classify.js`). Exception: a TRANSIENT skip on a Go rung is capped at 30s
+  classified TTL (`src/classify.js`). Exception: a TRANSIENT skip on a Go or zen rung is capped at 30s
   after its last failure — a short Go wobble must not keep the fleet on the paid OpenRouter tail
   (money + a mid-run prompt-cache reset) for the full backoff. Real limits keep their TTL.
 - **Two OpenCode Go keys** (`OPENCODE_GO_API_KEYS`) — a key-level fault (usage limit, 429,
@@ -113,7 +133,9 @@ npm test            # node:test — ladder + state logic (no Workers runtime nee
 npx wrangler dev    # local worker
 ```
 
-Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`.
+Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
+`OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;
+without it every `opencode-zen/` rung is filtered out as keyless).
 Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
 `CF_ACCOUNT_ID`).
 
@@ -143,4 +165,8 @@ summary; locally: `CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… python3 sc
 - Changing the ladder = edit `config/ladders.json` + the test that pins the order, and log it in
   `docs/requirements-log.md`.
 - Never add a rung that is more expensive than the ones above it without the owner's decision.
+- Zen free tier runs through `scripts/zen-relay.mjs` on the GCP VM (systemd `zen-relay.service`,
+  nginx `location /zen/`). The Worker only holds `OPENCODE_ZEN_RELAY_TOKEN`; the relay owns the
+  client fingerprint and the `shell`/`read` tools requirement. Relay down → zen rungs 502 → health
+  skip → the ladder walks on; nothing else breaks.
 - PRs only, never push to `main` directly.
