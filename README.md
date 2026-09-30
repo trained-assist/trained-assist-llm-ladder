@@ -114,7 +114,7 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/health` | liveness + ladder names |
 | GET | `/v1/models` | ladders as model ids (`deepseek`, `deepseek:review`, …) |
 | GET | `/v1/state` | model health + key rotation snapshot |
-| GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens + attempts-depth histogram (N = window in hours, 1–168, default 24). What the hourly Telegram digest in `vm-telegram-monitor` renders |
+| GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens, attempts-depth histogram and merged top-20 errors (digit-normalized, same grouping as `scripts/analytics.py`); N = window in hours, 1–168, default 24. What the hourly Telegram digest in `vm-telegram-monitor` renders |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `deepseek`); `stream: true` → SSE; `tools` passed through |
 
 Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
