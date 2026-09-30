@@ -120,6 +120,14 @@ caller's `x-ladder-trace/run/user/chat/session` ids. Dispatch the `query-ladder-
 (`preset` = `recent` | `trace` | `user` | `chat` | `session` + `value` | `summary` | `sql` with a
 read-only SELECT; `hours`, `limit`) — e.g. `gh workflow run query-ladder-trace -f preset=summary`.
 
+Spend & reliability digest: `scripts/analytics.py` rolls the D1 trace into a markdown report —
+calls/ok-rate/latency per ladder, served rungs with tokens, estimated OpenRouter spend
+(tokens × current list price from the public `/models` endpoint; Go rungs are subscription → no
+cost, `:free` → $0), failover-depth histogram and digit-normalized top errors. The
+`ladder-analytics` workflow runs it daily (and on dispatch, inputs `days`, `format`) into the job
+summary; locally: `CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… python3 scripts/analytics.py
+--days 7 [--format json]`. Stream calls still report no usage (#22), so spend is a lower bound.
+
 ## Claude Code Instructions
 
 - Keep the Worker dependency-free; logic stays in pure modules (`src/ladder.js`, `src/state.js`)

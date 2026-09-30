@@ -117,7 +117,8 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
     const trace = makeTrace(request);
-    console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
+    // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
+    console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
     await logCall(env, trace, chat.model, r, started);
     if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
     if (r.stream) {
