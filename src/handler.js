@@ -32,15 +32,18 @@ const ANALYTICS_ERRORS_SQL =
 
 // Port of analytics.py normalize_error: keep the 'HTTP <status>:' head, mask digits in
 // the payload so one failure with varying counts stays one bucket; cap at 160 chars.
+// Truncation gets an ellipsis — without it the digest shows a raw mid-JSON cut
+// ('…-flash-fin","c — 34') that reads as corruption.
 export function normalizeError(err) {
   if (!err) return '(no message)';
+  const clip = (s) => s.length > 160 ? s.slice(0, 159).trimEnd() + '…' : s;
   const s = String(err);
   const i = s.indexOf(': ');
   if (i !== -1 && /^HTTP \d+$/.test(s.slice(0, i).trim())) {
     const body = s.slice(i + 2).replace(/\d+/g, '#');
-    return (s.slice(0, i + 2) + body).replace(/\s+/g, ' ').trim().slice(0, 160);
+    return clip((s.slice(0, i + 2) + body).replace(/\s+/g, ' ').trim());
   }
-  return s.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 160);
+  return clip(s.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim());
 }
 
 function json(status, body, headers = {}) {

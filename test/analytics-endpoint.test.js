@@ -195,8 +195,12 @@ test('normalizeError: HTTP head kept, digits masked; non-HTTP masked wholesale; 
   assert.equal(normalizeError('rate limited for 60s'), 'rate limited for #s');
   assert.equal(normalizeError(''), '(no message)');
   assert.equal(normalizeError(null), '(no message)');
-  // 160-char cap
-  assert.equal(normalizeError('x'.repeat(300)).length, 160);
+  // 160-char cap, ellipsis marks the cut (no raw mid-JSON truncation in the digest)
+  const long = normalizeError('x'.repeat(300));
+  assert.equal(long.length, 160);
+  assert.ok(long.endsWith('…'));
+  assert.equal(normalizeError('y'.repeat(160)).length, 160, 'exactly 160 stays untouched');
+  assert.ok(!normalizeError('y'.repeat(160)).endsWith('…'), 'exactly 160 gets no ellipsis');
   // multi-space collapse
   assert.equal(normalizeError('too    many\nspaces 42'), 'too many spaces #');
 });

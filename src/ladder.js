@@ -29,8 +29,8 @@ export const MIN_TOKENS = 1500;
 // no details (deepseek-v4-flash) or 0 (glm-5.3-flash) while returning a long
 // `message.reasoning_content` (855ch / 517ch against 2ch of content) — reasoning that the usage
 // counter does not count, so they are in. Excluded: openrouter/google/gemini-2.5-flash-lite
-// (reasoning_tokens=0 twice, works in visible content), ling-3.0-flash-fin:free (dead rung, no
-// data). See the PR for the full per-rung table.
+// (reasoning_tokens=0 twice, works in visible content). ling-3.0-flash-fin:free had no data
+// either and is gone from the ladder (dead 404, removed 2026-09-30). See the PR for the full per-rung table.
 //
 // Added after #39 reordered deepseek: opencode-go/space-bunny-free measured reasoning_tokens=32
 // (+ reasoning_content 100ch) through the live worker. The four opencode-zen/* rungs (now the tail

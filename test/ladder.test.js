@@ -62,7 +62,7 @@ test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscriptio
 // #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
 // front of the 14 working rungs it would poison the main free fallback (trained-assist-agent#1899)
 // with four dead steps. This pin is what keeps zen out of deepseek and out of the free head.
-test('config: free = 14 working rungs + zen tail (#42)', () => {
+test('config: free = 13 working rungs + zen tail (#42)', () => {
   assert.deepEqual(FREE, [
     'opencode-go/deepseek-v4-flash',
     'opencode-go/longcat-2.5-preview-free',
@@ -71,7 +71,6 @@ test('config: free = 14 working rungs + zen tail (#42)', () => {
     'opencode-go/deepseek-flash',
     'opencode-go/glm-5.3-flash',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
-    'openrouter/inclusionai/ling-3.0-flash-fin:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/cohere/north-mini-code:free',
@@ -83,14 +82,14 @@ test('config: free = 14 working rungs + zen tail (#42)', () => {
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ]);
-  assert.equal(FREE.length, 18, '14 working rungs + 4 zen');
-  assert.deepEqual(FREE.slice(14), [
+  assert.equal(FREE.length, 17, '13 working rungs + 4 zen');
+  assert.deepEqual(FREE.slice(13), [
     'opencode-zen/mimo-v2.6-flash-free',
     'opencode-zen/mimo-v2.5-free',
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ], 'zen is the tail — never ahead of a working rung while the relay is 404');
-  assert.ok(FREE.slice(0, 14).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
+  assert.ok(FREE.slice(0, 13).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
   assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
 });
 
