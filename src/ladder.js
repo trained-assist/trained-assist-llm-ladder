@@ -17,6 +17,50 @@ import { classifyError } from './classify.js';
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
 export const MIN_TOKENS = 1500;
+// #38 (owner decision, variant 2): 1500 is not enough for rungs whose chain-of-thought eats the
+// whole floor — prod showed `empty answer (finish=length, out=1500, reasoning=1500, prompt=97,
+// max_tokens=1500)`, i.e. the reasoning consumed every token, content came back empty, the guard
+// failed the rung (chronic 1–25 empty answers/hour). Reasoning rungs get a higher floor instead
+// of raising it for everyone.
+//
+// REASONING_MODELS is empirical, not guessed from names (issue #38): every unique rung of
+// config/ladders.json was pinned through the live worker (ladder_rung) and read
+// `usage.completion_tokens_details.reasoning_tokens` — nonzero → reasoning. Two Go rungs report
+// no details (deepseek-v4-flash) or 0 (glm-5.3-flash) while returning a long
+// `message.reasoning_content` (855ch / 517ch against 2ch of content) — reasoning that the usage
+// counter does not count, so they are in. Excluded: openrouter/google/gemini-2.5-flash-lite
+// (reasoning_tokens=0 twice, works in visible content), ling-3.0-flash-fin:free (dead rung, no
+// data). See the PR for the full per-rung table.
+export const REASONING_MIN_TOKENS = 3000;
+export const REASONING_MODELS = [
+  'opencode-go/mimo-v2.6-flash',
+  'opencode-go/deepseek-v4.1-flash',
+  'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
+  'openrouter/inclusionai/ling-3.0-flash-sante:free',
+  'openrouter/deepseek/deepseek-v4-flash-0731',
+  'openrouter/inclusionai/ling-3.0-flash',
+  'openrouter/xiaomi/mimo-v2.6-flash',
+  'opencode-go/deepseek-v4-flash',
+  'opencode-go/longcat-2.5-preview-free',
+  'opencode-go/qwen3.8-flash',
+  'opencode-go/deepseek-flash',
+  'opencode-go/glm-5.3-flash',
+  'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
+  'openrouter/cohere/north-mini-code:free',
+  'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  'openrouter/poolside/laguna-xs-2.1:free',
+  'openrouter/dots-studio/dots-3-note-preview:free',
+  'opencode-go/qwen3.7-plus',
+  'opencode-go/deepseek-v4-pro',
+];
+const REASONING = new Set(REASONING_MODELS);
+
+// The floor for this rung — what upstreamRequest clamps to and what the #34 guard diagnostic
+// prints, so the diag always shows the max_tokens that actually went out.
+export function minTokensFor(model) {
+  return REASONING.has(model) ? REASONING_MIN_TOKENS : MIN_TOKENS;
+}
+
 export const DEFAULT_LADDER = 'deepseek';
 const DEFAULT_ROLE = 'build';
 // OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
@@ -131,7 +175,7 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
     ...body,
     model: model.replace(/^opencode-go\/|^openrouter\//, ''),
     stream,
-    max_tokens: Math.max(Number(body.max_tokens) || 0, MIN_TOKENS),
+    max_tokens: Math.max(Number(body.max_tokens) || 0, minTokensFor(model)),
   };
   delete upstream.stream_options;
   if (stream && !isGo) upstream.stream_options = { include_usage: true };
