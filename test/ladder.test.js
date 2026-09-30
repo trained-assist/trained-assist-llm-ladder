@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
@@ -63,7 +63,7 @@ test('first Go rung answers; Go gets the session header, non-stream, reasoning-s
   assert.match(calls[0].url, /opencode\.ai\/zen\/go\/v1\/chat\/completions$/);
   assert.ok(calls[0].session);
   assert.equal(calls[0].body.stream, false);
-  assert.ok(calls[0].body.max_tokens >= MIN_TOKENS);
+  assert.equal(calls[0].body.max_tokens, REASONING_MIN_TOKENS, 'rung 0 is a reasoning model → the 3000 floor (#38)');
   assert.equal(calls[0].auth, 'Bearer oc_a');
 });
 
@@ -88,8 +88,9 @@ test('json guard: non-JSON fails the rung, fenced JSON is accepted', async () =>
 });
 
 // ── #34: guard failures carry finish_reason + usage so chronic empty answers are diagnosable ───
-const EMPTY_USAGE = { prompt_tokens: 840, completion_tokens: 1500, completion_tokens_details: { reasoning_tokens: 1500 } };
-const EMPTY_DIAG = 'finish=length, out=1500, reasoning=1500, prompt=840, max_tokens=1500';
+// usage mirrors the real failure at the #38 floor: reasoning ate all 3000 tokens, content empty.
+const EMPTY_USAGE = { prompt_tokens: 840, completion_tokens: 3000, completion_tokens_details: { reasoning_tokens: 3000 } };
+const EMPTY_DIAG = 'finish=length, out=3000, reasoning=3000, prompt=840, max_tokens=3000';
 
 test('empty answer error carries finish_reason + usage — reasoning eating the floor is visible', async () => {
   const beh = { [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) };
@@ -121,6 +122,33 @@ test('#34: diag token counts are never read as key faults or quota — instrumen
   assert.equal(store.state.keys.active, 0, 'key state untouched');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'still exactly one non-key probe');
   assert.equal(store.state.health[LADDER[0]].class, 'transient', 'empty answer stays transient, not quota');
+});
+
+// ── #38: the max_tokens floor is per-rung — 3000 for the empirical REASONING_MODELS list, 1500 for the rest ─
+test('reasoning-модель получает 3000, обычная — 1500', async () => {
+  // every rung of the empirical list clamps to REASONING_MIN_TOKENS (caller asking for less is raised)
+  for (const m of REASONING_MODELS) {
+    assert.equal(upstreamRequest(env, m, { messages: [] }, 0).body.max_tokens, REASONING_MIN_TOKENS, m);
+  }
+  // a rung outside the list keeps the common floor
+  const plain = 'openrouter/google/gemini-2.5-flash-lite';
+  assert.ok(!REASONING_MODELS.includes(plain));
+  assert.equal(upstreamRequest(env, plain, { messages: [] }, 0).body.max_tokens, MIN_TOKENS);
+  assert.equal(minTokensFor(plain), MIN_TOKENS);
+  // a caller-supplied max_tokens higher than the rung floor still wins
+  assert.equal(upstreamRequest(env, plain, { messages: [], max_tokens: 4000 }, 0).body.max_tokens, 4000);
+  assert.equal(upstreamRequest(env, 'opencode-go/mimo-v2.6-flash', { messages: [], max_tokens: 4000 }, 0).body.max_tokens, 4000);
+
+  // the #34 guard diagnostic prints the floor that ACTUALLY went upstream, per rung class
+  const reasoningRung = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({ [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) }, []) });
+  const rErr = reasoningRung.attempts.find(a => a.outcome === 'error').error;
+  assert.ok(rErr.includes('max_tokens=3000'), `reasoning rung → max_tokens=3000 in the diag, got: ${rErr}`);
+  const plainRung = await run({ ...msg, model: 'research:explore' }, {
+    env, config, store: memoryStore(2), pinRung: plain,
+    fetchImpl: fakeFetch({ 'google/gemini-2.5-flash-lite': () => ({ status: 200, content: '', finish: 'length', usage: { prompt_tokens: 9, completion_tokens: 1500 } }) }, []),
+  });
+  const pErr = plainRung.attempts.find(a => a.outcome === 'error').error;
+  assert.ok(pErr.includes('max_tokens=1500'), `plain rung → max_tokens=1500 in the diag, got: ${pErr}`);
 });
 
 test('Go key limit → rotate to spare key, retry SAME rung', async () => {

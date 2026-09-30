@@ -79,6 +79,16 @@ Rungs are tried top-down:
   (`ok` / `error` / `key-rotated` / `key-probe`), so `/v1/state` and the Workers Observability
   logs show which key served. 503 / Bad Request never burn a key.
 - **Guard** — empty content, or non-JSON when `response_format: json_object`, fails the rung.
+- **`max_tokens` floor** (`src/ladder.js`) — the caller's `max_tokens` is raised to at least
+  `MIN_TOKENS = 1500`, and to `REASONING_MIN_TOKENS = 3000` for the rungs of the empirical
+  `REASONING_MODELS` list (issue #38, owner decision: variant 2): a reasoning rung can burn the
+  whole 1500 floor on chain-of-thought (`empty answer (finish=length, out=1500, reasoning=1500,
+  prompt=97, max_tokens=1500)` in prod → content empty → chronic guard failures), so only those
+  rungs get the higher floor. The list is measured, not guessed: every rung of
+  `config/ladders.json` was pinned through the live worker (`ladder_rung`) and its
+  `usage.completion_tokens_details.reasoning_tokens` read — 19 of 21 unique rungs reason;
+  `openrouter/google/gemini-2.5-flash-lite` reads 0 and stays at 1500, `ling-3.0-flash-fin:free` is
+  a dead rung (no data). The #34 guard diagnostic prints the floor that actually went upstream.
 
 State lives in one global Durable Object (`LadderState`) — strongly consistent across callers.
 
