@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const BASE = (process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store').replace(/\/+$/, '');
-const LADDER = process.env.LADDER || 'deepseek';
+const LADDER = process.env.LADDER || 'service'; // legacy alias 'deepseek' also resolves (#49)
 const ROLE = process.env.LADDER_ROLE || 'build';
 
 function readToken() {

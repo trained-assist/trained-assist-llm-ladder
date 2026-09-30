@@ -10,7 +10,7 @@ import { handle } from '../src/handler.js';
 import { memoryStore, pinFresh, pinDirty, pinStats, emptyState } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
-const LADDER = config.ladders.deepseek.build;
+const LADDER = config.ladders.service.build;
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
@@ -74,7 +74,7 @@ function recFetch(behaviour, calls) {
   };
 }
 const R0 = LADDER[0]; // opencode-go/mimo-v2.6-flash
-const R1 = LADDER[1]; // opencode-go/deepseek-v4.1-flash
+const R1 = LADDER[1]; // opencode-go/longcat-2.5-preview-free (was deepseek-v4.1-flash, dropped #49)
 const OR = LADDER.findLast(m => m.startsWith('openrouter/'));
 const OR_TWO = LADDER.filter(m => m.startsWith('openrouter/'))[1];
 

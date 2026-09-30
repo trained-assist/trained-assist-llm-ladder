@@ -71,7 +71,7 @@ export function minTokensFor(model) {
   return REASONING.has(model) ? REASONING_MIN_TOKENS : MIN_TOKENS;
 }
 
-export const DEFAULT_LADDER = 'deepseek';
+export const DEFAULT_LADDER = 'service'; // legacy alias 'deepseek' resolves here (issue #49)
 const DEFAULT_ROLE = 'build';
 // OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
 // OpenRouter dashboard ("Application" cut), Title is its display name, hidden keeps our internal
@@ -110,7 +110,7 @@ export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
 
-// "deepseek", "deepseek:review" or an alias ("free-ladder") → rungs, null for an unknown ladder.
+// "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
 export function rungsFor(config, name) {
   let [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
   if (config.aliases && config.aliases[ladderName]) ladderName = config.aliases[ladderName];
@@ -322,8 +322,8 @@ function attempt(env, model, body, keyIndex, opts) {
 }
 
 /**
- * @param {object} body   OpenAI chat.completions body; `model` = ladder name ("deepseek",
- *                        "deepseek:review", alias "free-ladder"). stream:true → SSE (rung chosen
+ * @param {object} body   OpenAI chat.completions body; `model` = ladder name ("service",
+ *                        legacy alias "deepseek", "service:review", alias "free-ladder"). stream:true → SSE (rung chosen
  *                        before the first token); tools / tool_choice passed through as is.
  * @param {object} ctx    { env, config, store, fetchImpl, timeoutMs=20000, totalTimeoutMs, now,
  *                          pinRung, conversation, appSlug, appTitle }

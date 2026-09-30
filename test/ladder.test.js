@@ -6,7 +6,7 @@ import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
-const LADDER = config.ladders.deepseek.build;
+const LADDER = config.ladders.service.build; // primary key renamed in #49; 'deepseek' stays a legacy alias
 const FREE = config.ladders.free.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
@@ -31,7 +31,7 @@ const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 // exists only so the failover half of the diag tests has a stable second rung.
 const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
 const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
-const DIAG_CFG = { ...config, ladders: { ...config.ladders, deepseek: { build: [DIAG_REASONING, DIAG_SECOND] } } };
+const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } } }; // keyed by the canonical name — rungsFor resolves 'deepseek' → 'service' (#49)
 
 test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscription → paid tail (#36, zen moved to free #42)', () => {
   assert.deepEqual(LADDER, [
@@ -44,17 +44,16 @@ test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscriptio
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     'opencode-go/mimo-v2.6-flash',
-    'opencode-go/deepseek-v4.1-flash',
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ]);
   assert.ok(LADDER.every(m => !m.startsWith('opencode-zen/')), 'zen rungs left deepseek for free (#42)');
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) {
-    assert.deepEqual(config.ladders.deepseek[role], LADDER, role);
+    assert.deepEqual(config.ladders.service[role], LADDER, role);
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 10, 'paid OpenRouter only after the free tiers and Go subscription');
+  assert.ok(firstPaid === 9, 'paid OpenRouter only after the free tiers and Go subscription');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
   assert.ok(firstGoPaid === 8, 'Go subscription rungs sit after every free rung');
@@ -613,7 +612,7 @@ const ZEN_WALK = [
   'opencode-zen/mimo-v2.6-flash-free',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
 ];
-const ZEN_CFG = { ...config, ladders: { ...config.ladders, deepseek: { build: ZEN_WALK } } };
+const ZEN_CFG = { ...config, ladders: { ...config.ladders, service: { build: ZEN_WALK } } }; // canonical key — rungsFor resolves 'deepseek' → 'service' (#49)
 const zenGoFail = () => ({
   [short(ZEN_WALK[0])]: () => ({ status: 500, error: 'boom' }),
   [short(ZEN_WALK[1])]: () => ({ status: 500, error: 'boom' }),

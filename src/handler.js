@@ -118,8 +118,8 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const num = (v) => Number(v) || 0;
       const ladders = new Map();
       const entry = (raw) => {
-        // Group the requested names by ladder: 'service'→'deepseek', 'free-ladder'→'free'
-        // (config.aliases), so the digest shows one line per ladder, not per alias.
+        // Group the requested names by ladder: 'deepseek'→'service', 'free-ladder'→'free'
+        // (config.aliases: deepseek → service, #49), so the digest shows one line per ladder, not per alias.
         // The default role is not a distinction: rungFor('deepseek:build') === rungFor('deepseek'),
         // so 'X:build' collapses to 'X' — otherwise every default-role caller splits the
         // ladder's numbers across two rows. Non-default roles (:review, :explore — different

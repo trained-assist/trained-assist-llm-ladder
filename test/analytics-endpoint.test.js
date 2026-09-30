@@ -41,7 +41,7 @@ test('GET /v1/analytics: requires auth', async () => {
 test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', async () => {
   const d1 = fakeD1({
     aggRows: [
-      // service → deepseek (alias), free-ladder → free, deepseek:build → deepseek (default role)
+      // deepseek → service (alias #49), free-ladder → free, deepseek:build → service (default role)
       { ladder: 'deepseek', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
       { ladder: 'service', calls: 5, failed: 0, tin: 500, tout: 25, no_usage: 2 },
       { ladder: 'deepseek:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
@@ -65,12 +65,12 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   assert.ok(Date.now() - b.since_ms <= 3_600_000 + 5_000, 'since covers ~1h');
   assert.ok(b.generated_ms <= Date.now() + 5_000);
 
-  // aliases merged: service → deepseek, free-ladder → free; the default role
-  // (deepseek:build) collapses into 'deepseek'; a non-default role stays separate.
+  // aliases merged: deepseek → service (#49), free-ladder → free; the default role
+  // (deepseek:build) collapses into 'service'; a non-default role stays separate.
   const names = b.ladders.map(l => l.ladder);
-  assert.deepEqual(names.sort(), ['deepseek', 'deepseek:review', 'free']);
-  const ds = b.ladders.find(l => l.ladder === 'deepseek');
-  assert.equal(ds.calls, 22, 'service + deepseek:build merged into deepseek');
+  assert.deepEqual(names.sort(), ['free', 'service', 'service:review']);
+  const ds = b.ladders.find(l => l.ladder === 'service');
+  assert.equal(ds.calls, 22, 'deepseek + deepseek:build merged into service');
   assert.equal(ds.failed, 1);
   assert.equal(ds.tokens_in, 2200);
   assert.equal(ds.no_usage, 2);
@@ -82,7 +82,7 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
 
   assert.deepEqual(b.totals, { calls: 27, failed: 4, tokens_in: 2400, tokens_out: 120, no_usage: 5 });
   // ladders sorted by calls desc
-  assert.equal(b.ladders[0].ladder, 'deepseek');
+  assert.equal(b.ladders[0].ladder, 'service');
 });
 
 test('GET /v1/analytics: hours param clamped to [1,168], default 24', async () => {
