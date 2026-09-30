@@ -9,3 +9,13 @@ LADDER_TOKEN=local-dev
 # Upstream keys — copy from the worker secrets (wrangler secret list / your password manager).
 OPENCODE_GO_API_KEYS=oc_xxx,oc_yyy
 OPENROUTER_API_KEY=sk-or-xxx
+
+# ZeroCreds connect flow (#53). Point ZEROCREDS_BASE_URL at a local zerocreds-server
+# (PORT=3456 npm start in its repo) when developing offline.
+ZEROCREDS_BASE_URL=https://zerocreds.ru
+# Admin token of that zerocreds-server — same value as its ZEROCREDS_ADMIN_TOKEN.
+ZEROCREDS_ADMIN_TOKEN=zc_admin_local
+# Shared secret the worker puts in the webhook Authorization header; zerocreds POSTs here.
+ZC_WEBHOOK_TOKEN=wh_local
+# 32 bytes, base64 or hex: `openssl rand -base64 32`. Encrypts KV blobs at rest.
+CREDS_ENC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

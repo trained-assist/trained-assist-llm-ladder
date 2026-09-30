@@ -1,0 +1,27 @@
+{
+  "openrouter": {
+    "label": "OpenRouter",
+    "where": "openrouter.ai/keys → Create Key",
+    "hint": "Один ключ OpenRouter открывает все платные и :free модели лестницы."
+  },
+  "opencode_go": {
+    "label": "OpenCode Go",
+    "where": "opencode.ai → Account → API keys",
+    "hint": "Ключ подписки OpenCode Go — без него лестница уходит на платный хвост OpenRouter."
+  },
+  "zen": {
+    "label": "Zen",
+    "where": "opencode.ai → Zen → Free tier",
+    "hint": "Бесплатный Zen free tier; лестница ходит через наш релей."
+  },
+  "openai": {
+    "label": "OpenAI",
+    "where": "platform.openai.com/api-keys",
+    "hint": "Ключ sk-… используется как платная ступень."
+  },
+  "cloudflare": {
+    "label": "Cloudflare",
+    "where": "dash.cloudflare.com → My Profile → API Tokens",
+    "hint": "Токен Cloudflare — бесплатный лимит Workers/Pages."
+  }
+}

@@ -4,6 +4,7 @@
 
 import { run, readPool, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
+import { handleLanding, handleWebhook } from './connect.js';
 import config from '../config/ladders.json' with { type: 'json' };
 
 // GET /v1/analytics: both bind ?1 = since (ms). Aggregates per requested ladder name;
@@ -113,6 +114,14 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   if (request.method === 'GET' && url.pathname === '/health') {
     return json(200, { ok: true, ladders: Object.keys(config.ladders), build: env.BUILD_SHA || null });
   }
+  // Public routes (#53): the ZeroCreds webhook authenticates on its own shared secret and
+  // the landing on an unguessable uid — neither may sit behind LADDER_TOKEN, which is what
+  // used to make GET / answer 401. Everything under /v1/* stays gated below.
+  const webhook = await handleWebhook(request, env);
+  if (webhook) return webhook;
+  const landing = await handleLanding(request, env, { fetchImpl });
+  if (landing) return landing;
+
   if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
 
   if (request.method === 'GET' && url.pathname === '/v1/models') {

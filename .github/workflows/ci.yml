@@ -37,7 +37,23 @@ jobs:
             DB_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="trained-assist-llm-ladder-trace"][0])')
           fi
           echo "DB_ID=$DB_ID" >> "$GITHUB_ENV"
-          sed -i "s/00000000-0000-0000-0000-000000000000/$DB_ID/" wrangler.toml
+          # Scoped to database_id: wrangler.toml now carries the same placeholder uuid twice
+          # (D1 + KV), and an unscoped s|a|b| would rewrite both lines with one id.
+          sed -i "/^database_id =/s|00000000-0000-0000-0000-000000000000|$DB_ID|" wrangler.toml
+      - name: Provision KV credential store
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if CREATE_OUT=$(npx --yes wrangler@4 kv namespace create trained-assist-llm-ladder-creds 2>&1); then
+            KV_ID=$(printf '%s' "$CREATE_OUT" | grep -oE '[0-9a-f]{32}' | head -1)
+          else
+            KV_ID=$(npx --yes wrangler@4 kv namespace list | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("id") for x in d if x.get("title")=="trained-assist-llm-ladder-creds"][0])')
+          fi
+          [ -n "$KV_ID" ] || { echo "could not resolve the KV namespace id"; exit 1; }
+          echo "KV_ID=$KV_ID" >> "$GITHUB_ENV"
+          sed -i "/^id =/s|00000000-0000-0000-0000-000000000000|$KV_ID|" wrangler.toml
       - name: Apply trace schema
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

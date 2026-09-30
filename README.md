@@ -77,12 +77,12 @@ Rungs are tried top-down:
   (money + a mid-run prompt-cache reset) for the full backoff. Real limits keep their TTL.
 - **OpenCode Go key pool** (`OPENCODE_GO_API_KEYS`, comma-separated, index 0 = default primary;
   three keys since 2026-10-01) — a key-level fault (usage limit, 429,
-  rejected key) rotates to the spare key and retries the same rung; a WEEKLY allowance parks that
+  rejected key) rotates to the next key and retries the same rung; a WEEKLY allowance parks that
   key for 6 h (`"limitName":"weekly"`), not the 15-minute rate-limit TTL. A rung that fails for a
   NON-key reason (timeout, empty answer, 500) gets ONE spare-key probe per call before the ladder
   leaves Go for paid OpenRouter — a silently throttled key looks exactly like a slow model, and
   staying on Go costs nothing. Context/config rejections never probe (the key cannot change them).
-  When both keys are parked, every Go rung is skipped until the earliest key heals, so the ladder
+  When every key is parked, every Go rung is skipped until the earliest key heals, so the ladder
   serves OpenRouter and returns to Go by itself. Every attempt entry carries the pool `key` index
   (`ok` / `error` / `key-rotated` / `key-probe`), so `/v1/state` and the Workers Observability
   logs show which key served. 503 / Bad Request never burn a key.
@@ -107,7 +107,9 @@ State lives in one global Durable Object (`LadderState`) — strongly consistent
 
 ## API
 
-All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
+All endpoints under `/v1/*` need `Authorization: Bearer <LADDER_TOKEN>`. `/health` and the
+public connect routes (`/`, `/u/{uid}`, `/internal/creds`) do not — see the connect section
+below for how each of those authenticates.
 
 | Method | Path | |
 |---|---|---|
@@ -149,6 +151,42 @@ Clients:
 - `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder`), token via org secret `LLM_LADDER_TOKEN`.
 - opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free-ladder`.
 
+## Подключение ключей (#53)
+
+Пользователь приносит свой ключ (OpenCode Go / Zen / OpenRouter / OpenAI / Cloudflare), ключ
+не проходит через модель и не через чужие логи: форму отдаёт **ZeroCreds** — наш open-source
+сервер (`Zerocreds-com/zerocreds-server`, задеплоен на `zerocreds.ru`), и он же отправляет
+записанные значения обратно воркеру.
+
+```
+GET  /                                → 302 /u/{uid}; uid (128-bit hex) в cookie — это capability
+GET  /u/{uid}                         → страница с кнопками провайдеров
+POST /u/{uid}/connect {provider}      → POST zerocreds.ru/api/session/create → 302 на форму
+                                        (destination = наш вебхук с запечёнными sid/uid/provider)
+POST /internal/creds?uid&sid&provider → AES-GCM(CREDS_ENC_KEY) → KV.put("creds:{uid}:{sid}")
+GET  /u/{uid}/status/{sid}            → статус сессии + метаданные сохранённого (без ключей)
+```
+
+| Путь | Auth |
+|---|---|
+| `/`, `/u/{uid}`, `/favicon.ico` | нет (uid неугадываем) |
+| `/u/{uid}/connect`, `/u/{uid}/status/{sid}` | uid в пути (capability) |
+| `/internal/creds` | `ZC_WEBHOOK_TOKEN` в `Authorization`, timing-safe |
+| всё `/v1/*` | `LADDER_TOKEN` — не изменилось |
+
+Три детали, которые ломают наивную реализацию:
+
+- **`sid` запекаем сами.** ZeroCreds шаблонизирует в `http_post`-URL **только поля формы**, контекст сессии туда не попадает, поэтому токен вернуть он не может. Решение — передавать destination инлайном при `session/create` и строить URL у себя. Принимаем запись только для `sid`, который мы сами выдали на `/connect`.
+- **Preflight.** ZeroCreds пингует `http_post`-destination **до показа формы** (`X-ZeroCreds-Preflight`). Ему отвечаем 200 и ничего не пишем — иначе проба сохраняется как «ключ» (инцидент в trained-assist-agent 24.09.2026).
+- **Хранилище — KV, а не Cloudflare Secrets Store.** Биндинг Secrets Store даёт только `get()` у имени, объявленного в `wrangler.toml` статически, и не умеет `put()` — динамический приём туда невозможен. KV принимает что угодно, значения шифруются AES-GCM в ворке (`CREDS_ENC_KEY`, формат `v1‖iv‖ct`, IV свой на запись) — это закрывает дамп KV, выгрузку из дашборда и случайное логирование; от самого воркера и от владельца `CREDS_ENC_KEY` не защищает.
+
+Записи append-only (`creds:{uid}:{sid}`), поэтому сабмит не затирает прошлые, а `uid` может
+хранить несколько провайдеров. Маршрутизация вызовов на эти ключи (BYOK) **не реализована** —
+сейчас ключи только собираются; читать их потом `KV.list({prefix: "creds:{uid}:"})`.
+
+Секреты этой фичи — в общем списке ниже (`ZEROCREDS_ADMIN_TOKEN`, `ZC_WEBHOOK_TOKEN`,
+`CREDS_ENC_KEY`).
+
 ## Development
 
 ```bash
@@ -171,7 +209,10 @@ the token can call the API; repo access (the repo is public) grants nothing.
 
 Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
 `OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;
-without it every `opencode-zen/` rung is filtered out as keyless).
+without it every `opencode-zen/` rung is filtered out as keyless), and for the connect flow:
+`ZEROCREDS_ADMIN_TOKEN` (admin token of our zerocreds-server), `ZC_WEBHOOK_TOKEN` (shared secret
+in the webhook `Authorization` header), `CREDS_ENC_KEY` (32 bytes, `openssl rand -base64 32` —
+encrypts the KV blobs). Optional `ZEROCREDS_BASE_URL` defaults to `https://zerocreds.ru`.
 Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
 `CF_ACCOUNT_ID`).
 

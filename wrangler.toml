@@ -28,4 +28,13 @@ binding = "LADDER_TRACE_DB"
 database_name = "trained-assist-llm-ladder-trace"
 database_id = "00000000-0000-0000-0000-000000000000"
 
-# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY
+# User-submitted API keys collected through ZeroCreds (#53): creds:{uid}:{sid} blobs,
+# AES-GCM encrypted in the worker before the put. Not Secrets Store — its binding exposes
+# only get() on a name fixed in this file, so it cannot receive dynamic submissions.
+# ci.yml creates the namespace and rewrites the placeholder id before deploying.
+[[kv_namespaces]]
+binding = "LADDER_CREDS"
+id = "00000000-0000-0000-0000-000000000000"
+
+# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY,
+# OPENCODE_ZEN_RELAY_TOKEN, ZEROCREDS_ADMIN_TOKEN, ZC_WEBHOOK_TOKEN, CREDS_ENC_KEY
