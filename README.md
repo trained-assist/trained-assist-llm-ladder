@@ -23,8 +23,10 @@ Live: `https://llm-ladder.trainedassist.store`
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 
 - **`research`** — Hermes / opencode researcher runs (owner 2026-09-28), **split by role**:
-  `research:explore` (the reading subagent — big docs, PDFs, pages) = `gemini-2.5-flash-lite` →
-  `gemini-3.1-flash-lite` → Go MiMo; `research` / `:plan` / `:general` / `:review` (the thinking and
+  `research:explore` (the reading subagent — big docs, PDFs, pages) = Go `mimo-v2.6-flash` (1M ctx) →
+  Go `deepseek-v4.1-flash` → paid `openrouter/google/gemini-2.5-flash-lite` as the degradation tail
+  (issue #28, owner 2026-09-30: Go-first, `gemini-3.1-flash-lite` dropped — redundant paid rung of
+  the same vendor); `research` / `:plan` / `:general` / `:review` (the thinking and
   writing main agent) = Go `mimo-v2.6-flash` (1M ctx) → Go `deepseek-v4.1-flash` → paid OpenRouter mimo.
   `gemini-2.5-flash` and `2.5-pro` are deliberately not in it (too expensive).
 
