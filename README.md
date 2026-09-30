@@ -21,14 +21,16 @@ Live: `https://llm-ladder.trainedassist.store`
 6. `opencode-zen/nemotron-3.5-lightning-free` — Zen free, fast
 7. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
 8. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
-9. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
-10. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
-11. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
-12. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
-13. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
-14. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
-15. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
-16. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
+9. `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter free, strongest by bench
+   (coding 49.3; flaky some hours — health-skip walks past it)
+10. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
+11. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
+12. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
+13. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
+14. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
+15. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
+16. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
+17. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 

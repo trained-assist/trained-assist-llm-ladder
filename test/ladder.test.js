@@ -24,7 +24,7 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
-test('config: five tiers — Go free → zen free → OpenRouter :free ×5 → Go subscription → paid tail (#36)', () => {
+test('config: five tiers — Go free → zen free → OpenRouter :free ×6 → Go subscription → paid tail (#36)', () => {
   assert.deepEqual(LADDER, [
     'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
@@ -34,6 +34,7 @@ test('config: five tiers — Go free → zen free → OpenRouter :free ×5 → G
     'opencode-zen/nemotron-3.5-lightning-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
+    'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
@@ -48,11 +49,10 @@ test('config: five tiers — Go free → zen free → OpenRouter :free ×5 → G
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 13, 'paid OpenRouter only after the free tiers and Go subscription');
+  assert.ok(firstPaid === 14, 'paid OpenRouter only after the free tiers and Go subscription');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
-  assert.ok(firstGoPaid > LADDER.filter(m => m.endsWith(':free') || m.startsWith('opencode-zen/') || m.endsWith('-free')).length - 1,
-    'Go subscription rungs sit after every free rung');
+  assert.ok(firstGoPaid === 12, 'Go subscription rungs sit after every free rung');
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
