@@ -10,31 +10,29 @@ Live: `https://llm-ladder.trainedassist.store`
 `config/ladders.json`:
 
 - **`deepseek`** (alias `service`) — small service calls; owner decision 2026-09-30 (issue #36),
-  same for every role — five tiers, free first:
+  same for every role — five tiers, free first. Owner 2026-09-30 (issue #42): the four zen rungs
+  moved out of `deepseek` — zen lives in `free` only:
 
 1. `opencode-go/space-bunny-free` — Go free tier, **Unlimited** (limited time); keeps working
    after the Go usage limit, so a weekly-limit incident stops here
 2. `opencode-go/longcat-2.5-preview-free` — Go free tier, Unlimited (limited time), zero-retention
-3. `opencode-zen/mimo-v2.6-flash-free` — Zen free tier via the relay (see below)
-4. `opencode-zen/mimo-v2.5-free` — Zen free
-5. `opencode-zen/big-pickle` — Zen free (stealth model)
-6. `opencode-zen/nemotron-3.5-lightning-free` — Zen free, fast
-7. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
-8. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
-9. `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter free, strongest by bench
+3. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
+4. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
+5. `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter free, strongest by bench
    (coding 49.3; flaky some hours — health-skip walks past it)
-10. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
-11. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
-12. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
-13. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
-14. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
-15. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
-16. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
-17. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
+6. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
+7. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
+8. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
+9. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
+10. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
+11. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
+12. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
+13. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 
-**Zen free tier needs a relay.** OpenCode gates `zen/v1` free models behind an exact client
+**Zen free tier needs a relay** and lives in the `free` ladder only (owner decision 2026-09-30,
+issue #42). OpenCode gates `zen/v1` free models behind an exact client
 fingerprint (captured live: `Bearer public`, `User-Agent: opencode/1.18.31 ai-sdk/…`, `x-opencode-client`,
 `x-opencode-project`, `msg_`/`ses_` ids, `stream:true`, and `tools` containing functions named
 `shell` + `read`) **and** IP reputation: Cloudflare Worker egress gets a stable
@@ -60,6 +58,11 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
 - **`free`** (alias `free-ladder`) — cheap/free rungs for agents that run on weak models
   (opencode as a client, pr-autofix): OpenCode Go cheap models first, OpenRouter `:free`
   fallback; order from the pr-autofix bench (2026-09-26). Streaming + tools supported.
+  Zen tail (owner decision 2026-09-30, issue #42) — **хвост до починки релея #42**: 14 working
+  rungs, then `opencode-zen/mimo-v2.6-flash-free` → `opencode-zen/mimo-v2.5-free` →
+  `opencode-zen/big-pickle` → `opencode-zen/nemotron-3.5-lightning-free`. The relay answers 404
+  right now, so zen may not be moved ahead of the working rungs — it would break the main free
+  fallback (trained-assist-agent#1899) with four dead steps; revisit the order once the relay is up.
 
 Rungs are tried top-down:
 
