@@ -19,6 +19,29 @@ const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
   + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
   + 'GROUP BY ladder, depth';
+// Raw error counts (top 100 by frequency, same as scripts/analytics.py). Grouping is on
+// the RAW string — digit variants ('can only afford 499' / '776') are merged by
+// normalizeError() below, mirroring analytics.py normalize_error.
+const ANALYTICS_ERRORS_SQL =
+  "SELECT json_extract(j.value, '$.error') AS err, COUNT(*) AS n "
+  + 'FROM ladder_calls, json_each(ladder_calls.attempts) j '
+  + "WHERE ts >= ?1 AND json_extract(j.value, '$.outcome') <> 'ok' "
+  + "AND json_extract(j.value, '$.error') IS NOT NULL "
+  + 'AND json_valid(ladder_calls.attempts) '
+  + 'GROUP BY err ORDER BY n DESC LIMIT 100';
+
+// Port of analytics.py normalize_error: keep the 'HTTP <status>:' head, mask digits in
+// the payload so one failure with varying counts stays one bucket; cap at 160 chars.
+export function normalizeError(err) {
+  if (!err) return '(no message)';
+  const s = String(err);
+  const i = s.indexOf(': ');
+  if (i !== -1 && /^HTTP \d+$/.test(s.slice(0, i).trim())) {
+    const body = s.slice(i + 2).replace(/\d+/g, '#');
+    return (s.slice(0, i + 2) + body).replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+  return s.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 160);
+}
 
 function json(status, body, headers = {}) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
@@ -115,6 +138,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     try {
       const aggRows = (await db.prepare(ANALYTICS_AGG_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
+      const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
       const ladders = new Map();
       const entry = (raw) => {
@@ -154,7 +178,20 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         e.depth.sort((a, b) => a.depth - b.depth);
         for (const k of Object.keys(totals)) totals[k] += e[k];
       }
-      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out });
+      // Top errors, merged across all ladders: normalize first (digits masked), then
+      // re-sum — 'can only afford 499' / '776' become one row. Top 20 with headroom;
+      // the digest shows top 5. Rows arrive already frequency-ordered, but the merge
+      // can promote a variant, so re-sort after grouping.
+      const errGroups = new Map();
+      for (const r of errRows) {
+        const key = normalizeError(r.err);
+        errGroups.set(key, (errGroups.get(key) || 0) + num(r.n));
+      }
+      const errors = [...errGroups.entries()]
+        .map(([error, calls]) => ({ error, calls }))
+        .sort((a, b) => b.calls - a.calls)
+        .slice(0, 20);
+      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, errors });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
     }
