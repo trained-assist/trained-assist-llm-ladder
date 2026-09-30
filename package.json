@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:sandbox": "bash scripts/sandbox/sticky-rung.sh",
+    "gate": "node scripts/live-gate.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
