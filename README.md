@@ -80,6 +80,14 @@ ladder), `ladder_rung` (benchmarks: pin one rung of the ladder — no failover; 
 continuous bench in trained-assist-free-models-benchmark). Streaming picks the rung before the first output token (text, reasoning or tool call);
 after it there is no failover.
 
+App attribution to OpenRouter (issue #33): send `x-ladder-app: <slug>` (`[a-z0-9-]`, ≤64 chars,
+default `llm-ladder`) and optionally `x-ladder-app-title: <name>` (default `Trained Assist`). For
+`openrouter/*` rungs the worker adds `HTTP-Referer: https://recruiter-assistant.ru/app/<slug>` —
+the URL *is* the application id in the OpenRouter "Application" analytics cut — plus
+`X-OpenRouter-Title` and `X-OpenRouter-App-Visibility: hidden` (hidden from public rankings,
+analytics kept). A garbage/absent slug falls back to `llm-ladder`, never a half-repaired one.
+`opencode-go/*` rungs get none of these (not an OpenRouter concept there).
+
 opencode provider (free ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
 `apiKey = <LADDER_TOKEN>`, model `free-ladder`. Response = the upstream `chat.completion` with `model`
 set to the rung that answered, plus headers `x-ladder-model` / `x-ladder-attempts`.

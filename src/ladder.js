@@ -19,6 +19,28 @@ import { classifyError } from './classify.js';
 export const MIN_TOKENS = 1500;
 export const DEFAULT_LADDER = 'deepseek';
 const DEFAULT_ROLE = 'build';
+// OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
+// OpenRouter dashboard ("Application" cut), Title is its display name, hidden keeps our internal
+// tools out of public rankings while keeping the analytics.
+export const DEFAULT_APP_SLUG = 'llm-ladder';
+export const DEFAULT_APP_TITLE = 'Trained Assist';
+export const APP_REFERER_BASE = 'https://recruiter-assistant.ru/app';
+const SLUG_RE = /^[a-z0-9-]{1,64}$/;
+
+// Caller-supplied slug → a clean URL segment, or the generic default. Anything that is not a
+// slug already (Cyrillic, spaces, path traversal, overlong) falls back to llm-ladder instead of
+// being repaired — a half-sanitised slug would silently become a DIFFERENT application upstream.
+export function sanitizeAppSlug(raw) {
+  const s = String(raw ?? '').trim().toLowerCase();
+  return SLUG_RE.test(s) ? s : DEFAULT_APP_SLUG;
+}
+
+// Display name for X-OpenRouter-Title: strip control characters (header safety), cap the length,
+// blank → the default title.
+export function sanitizeAppTitle(raw) {
+  const s = String(raw ?? '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64);
+  return s || DEFAULT_APP_TITLE;
+}
 // Only KEY-level signals rotate a Go key; a 503 / Bad Request is about one model.
 const KEY_QUOTA_RE = /usage limit|quota[^.]{0,20}exceeded|rate[_\s-]{0,5}limit|too many requests|\b429\b|more credits?/i;
 const DEAD_KEY_RE = /invalid credential|invalid api key|\b401\b|unauthorized/i;
@@ -75,7 +97,7 @@ function failureClass(errorText) {
 export const TTFB_TIMEOUT_MS = 15000;
 const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|stream_options/i;
 
-function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null } = {}) {
+export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
   const pool = readPool(env);
   const key = isGo ? pool[keyIndex] : env.OPENROUTER_API_KEY;
@@ -85,6 +107,12 @@ function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf =
   // turn after turn (epic #17, S7). Unkeyed calls keep the random session (Go 400s without it).
   if (isGo) headers['x-opencode-session'] = `ladder-${conversation || crypto.randomUUID()}`;
   else if (conversation) headers['x-session-id'] = conversation;
+  // App attribution (#33): only OpenRouter understands these — Go rungs must not get them.
+  if (!isGo) {
+    headers['HTTP-Referer'] = `${APP_REFERER_BASE}/${sanitizeAppSlug(appSlug)}`;
+    headers['X-OpenRouter-Title'] = sanitizeAppTitle(appTitle);
+    headers['X-OpenRouter-App-Visibility'] = 'hidden';
+  }
   const upstream = {
     ...body,
     model: model.replace(/^opencode-go\/|^openrouter\//, ''),
@@ -107,10 +135,10 @@ async function post(fetchImpl, req, signal) {
 }
 
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
-async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null }) {
+async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
   let stripRf = false;
   for (;;) {
-    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation });
+    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle });
     if (!req) return { ok: false, skip: true, error: 'no key' };
     const { res, error } = await post(fetchImpl, req, AbortSignal.timeout(timeoutMs));
     if (error) return { ok: false, error };
@@ -146,8 +174,8 @@ function isOutputEvent(line) {
 
 // Streaming attempt: resolves once the first output event arrived (→ committed stream that
 // replays the buffered bytes and pipes the rest), or fails before it (→ caller tries next rung).
-async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null }) {
-  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation });
+async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
+  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation, appSlug, appTitle });
   if (!req) return { ok: false, skip: true, error: 'no key' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('no first token in time')), ttfbMs);
@@ -157,7 +185,7 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
     clearTimeout(timer);
     const errText = String(await res.text().catch(() => ''));
     if (res.status === 400 && !body._stripRf && body.response_format && RF_400_RE.test(errText)) {
-      return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation });
+      return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle });
     }
     return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
   }
@@ -204,7 +232,9 @@ function attempt(env, model, body, keyIndex, opts) {
  *                        "deepseek:review", alias "free-ladder"). stream:true → SSE (rung chosen
  *                        before the first token); tools / tool_choice passed through as is.
  * @param {object} ctx    { env, config, store, fetchImpl, timeoutMs=20000, totalTimeoutMs, now,
- *                          pinRung, conversation }
+ *                          pinRung, conversation, appSlug, appTitle }
+ *   appSlug / appTitle: OpenRouter app attribution (#33) — slug for HTTP-Referer (default
+ *                 'llm-ladder'), display name for X-OpenRouter-Title (default 'Trained Assist').
  *   conversation: stable per-conversation id (Kh from the route) — enables the sticky rung
  *                 (epic #17): the conversation sticks to ONE rung so its provider-side prompt
  *                 cache survives turn after turn. null/undefined → byte-for-byte today.
@@ -216,7 +246,7 @@ function attempt(env, model, body, keyIndex, opts) {
  *                   {ok:false, status, error, attempts, pin?}>}
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null } = {}) {
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null } = {}) {
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -292,7 +322,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (isGo && goParked) continue;
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
-    const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation };
+    const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation, appSlug, appTitle };
     let key = keyIndex;
     const tried = new Set([key]);
     let r = await attempt(env, model, body, key, opts);
