@@ -78,15 +78,29 @@ export function parseJson(content) {
   return undefined;
 }
 
+// #34 diagnostics ride INSIDE the error string (attempts → console.log / D1). Classification
+// must not see them: a token count of 401/429/503 would otherwise rotate/park a healthy Go key
+// or class the rung as quota — instrumentation must not move the ladder.
+const GUARD_DIAG_RE = /\s*\((?:finish|out|reasoning|prompt|max_tokens)=[^()]*\)$/;
+function classSignal(errorText) {
+  return String(errorText || '').replace(GUARD_DIAG_RE, '');
+}
+
+// classify + strip in one step — every error-class decision must go through here so the #34
+// diagnostic can never reach the CLASSIFIERS.
+function errorClass(errorText) {
+  return classifyError(classSignal(errorText));
+}
+
 export function keyFaultOf(errorText) {
-  const t = String(errorText || '');
+  const t = classSignal(errorText);
   if (DEAD_KEY_RE.test(t)) return { dead: true, ttlMs: KEY_DEAD_TTL_MS };
   if (KEY_QUOTA_RE.test(t)) return { dead: false, ttlMs: WEEKLY_LIMIT_RE.test(t) ? KEY_WEEKLY_TTL_MS : KEY_QUOTA_TTL_MS };
   return null;
 }
 
 function failureClass(errorText) {
-  const v = classifyError(errorText);
+  const v = errorClass(errorText);
   if (v && v.class === 'quota') return { cls: 'quota', retryAfterMs: v.ttlMs };
   if (v && v.class === 'config') return { cls: 'config' };
   return { cls: 'transient' };
@@ -134,6 +148,22 @@ async function post(fetchImpl, req, signal) {
   }
 }
 
+// #34: guard failures say WHY the answer is empty — finish_reason + usage (did reasoning eat the
+// whole floor?) travel inside the error string itself → attempts → console.log and D1
+// ladder_calls.attempts, no new columns. Missing parts are simply omitted.
+function guardDiag(data, req) {
+  const parts = [];
+  const finish = data?.choices?.[0]?.finish_reason;
+  if (finish) parts.push(`finish=${finish}`);
+  const usage = data?.usage || {};
+  if (usage.completion_tokens != null) parts.push(`out=${usage.completion_tokens}`);
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens;
+  if (reasoning != null) parts.push(`reasoning=${reasoning}`);
+  if (usage.prompt_tokens != null) parts.push(`prompt=${usage.prompt_tokens}`);
+  if (req?.body?.max_tokens != null) parts.push(`max_tokens=${req.body.max_tokens}`);
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
 async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
   let stripRf = false;
@@ -152,8 +182,8 @@ async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fe
     const message = data?.choices?.[0]?.message || {};
     const content = String(message.content || '').trim();
     const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-    if (!content && !hasTools) return { ok: false, error: 'empty answer' };
-    if (wantJson && !hasTools && parseJson(content) === undefined) return { ok: false, error: 'invalid JSON' };
+    if (!content && !hasTools) return { ok: false, error: `empty answer${guardDiag(data, req)}` };
+    if (wantJson && !hasTools && parseJson(content) === undefined) return { ok: false, error: `invalid JSON${guardDiag(data, req)}` };
     return { ok: true, data, content };
   }
 }
@@ -345,7 +375,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       }
       // Not a key-level signal. Never probe for problems the spare key cannot change: a context
       // overflow or a config-class rejection is a property of the request / the model, not the key.
-      const cls = classifyError(r.error)?.class || 'transient';
+      const cls = errorClass(r.error)?.class || 'transient';
       const spare = pool.findIndex((_, i) => !tried.has(i) && !exhaustedAtStart.has(i));
       if (cls === 'context' || cls === 'config' || spare < 0 || probeBudget <= 0) break;
       probeBudget--;
@@ -358,7 +388,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // Sticky same-rung retry (S5): the pinned rung on a paid (non-Go) rung gets ONE more chance on
     // a transient error before the ladder moves — Go already gets its spare-key probe above.
     if (!r.ok && !r.skip && !isGo && pinRetryLeft > 0 && pinned && model === pinned.rung) {
-      const cls = classifyError(r.error)?.class || 'transient';
+      const cls = errorClass(r.error)?.class || 'transient';
       if (cls === 'transient') {
         pinRetryLeft = 0;
         attempts.push({ model, outcome: 'pin-retry', key, error: r.error });
@@ -377,7 +407,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     if (!goParked) {
-      const cls = classifyError(r.error)?.class || 'transient';
+      const cls = errorClass(r.error)?.class || 'transient';
       // ⚫-1 resolution (step 3): a context-class overflow while STUCK on the pinned rung returns
       // the error as-is (the same request would overflow every lower rung — a retry loop cannot
       // help) and INVALIDATES the pin, so the next turn picks fresh instead of dying on the model.

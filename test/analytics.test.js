@@ -29,13 +29,15 @@ test('analytics: normalize_error merges digit-only variants of one failure', () 
   const out = run(`
 a = m.normalize_error('HTTP 402: {"error":{"message":"can only afford 499"}}')
 b = m.normalize_error('HTTP 402: {"error":{"message":"can only afford 776"}}')
-c = m.normalize_error('empty answer')
+c = m.normalize_error('empty answer (finish=length, out=1500, reasoning=1500, prompt=840, max_tokens=1500)')
 print(f'{int(a == b)}|{a == c}|{m.normalize_error(None)}|{c}')`);
   const [merged, distinct, noneMsg, plain] = out.trim().split('|');
   assert.equal(merged, '1');
   assert.equal(distinct, 'False');
   assert.equal(noneMsg, '(no message)');
-  assert.equal(plain, 'empty answer');
+  // #34: the guard error now carries finish/usage — prefix still reads "empty answer", digits masked
+  assert.match(plain, /^empty answer \(finish=length, out=#, reasoning=#, prompt=#, max_tokens=#/);
+  assert.ok(!/\d/.test(plain), 'token counts are masked for grouping');
 });
 
 test('analytics: est_cost bills only paid OpenRouter rungs; Go/free/unknown → None', () => {

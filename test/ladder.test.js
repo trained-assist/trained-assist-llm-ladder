@@ -10,7 +10,7 @@ const LADDER = config.ladders.deepseek.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 
-// behaviour[model](ctx) → { status, content } | 'throw'
+// behaviour[model](ctx) → { status, content, finish?, usage? } | 'throw'
 function fakeFetch(behaviour, calls) {
   return async (url, init) => {
     const body = JSON.parse(init.body);
@@ -18,7 +18,7 @@ function fakeFetch(behaviour, calls) {
     calls.push({ url, model: body.model, auth, session: init.headers['x-opencode-session'], body });
     const r = (behaviour[body.model] || (() => ({ status: 200, content: 'ok' })))({ auth, body });
     if (r === 'throw') throw new Error('network down');
-    const data = r.status === 200 ? { id: 'x', object: 'chat.completion', choices: [{ message: { role: 'assistant', content: r.content } }], usage: { prompt_tokens: 3 } } : null;
+    const data = r.status === 200 ? { id: 'x', object: 'chat.completion', choices: [{ finish_reason: r.finish, message: { role: 'assistant', content: r.content } }], usage: r.usage || { prompt_tokens: 3 } } : null;
     return { ok: r.status === 200, status: r.status, json: async () => data, text: async () => r.error || '' };
   };
 }
@@ -63,6 +63,42 @@ test('json guard: non-JSON fails the rung, fenced JSON is accepted', async () =>
   const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
   assert.equal(r.model, LADDER[1]);
   assert.deepEqual(parseJson(r.content), { kind: 'none' });
+});
+
+// ── #34: guard failures carry finish_reason + usage so chronic empty answers are diagnosable ───
+const EMPTY_USAGE = { prompt_tokens: 840, completion_tokens: 1500, completion_tokens_details: { reasoning_tokens: 1500 } };
+const EMPTY_DIAG = 'finish=length, out=1500, reasoning=1500, prompt=840, max_tokens=1500';
+
+test('empty answer error carries finish_reason + usage — reasoning eating the floor is visible', async () => {
+  const beh = { [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) };
+  const r = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r.ok, true, 'the ladder still fails over to the next rung');
+  const err = r.attempts.find(a => a.outcome === 'error').error;
+  assert.ok(err.startsWith(`empty answer (${EMPTY_DIAG})`), `prefix match on the diag, got: ${err}`);
+});
+
+test('invalid JSON error carries finish_reason + usage too (#34)', async () => {
+  const beh = {
+    [short(LADDER[0])]: () => ({ status: 200, content: 'not json', finish: 'length', usage: EMPTY_USAGE }),
+    [short(LADDER[1])]: () => ({ status: 200, content: '```json\n{"ok":true}\n```' }),
+  };
+  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r.ok, true);
+  const err = r.attempts.find(a => a.outcome === 'error').error;
+  assert.ok(err.startsWith(`invalid JSON (${EMPTY_DIAG})`), `prefix match on the diag, got: ${err}`);
+});
+
+test('#34: diag token counts are never read as key faults or quota — instrumentation cannot move the ladder', async () => {
+  // usage numbers chosen to collide with the classifiers on purpose: 429/401/503
+  const usage = { prompt_tokens: 429, completion_tokens: 401, completion_tokens_details: { reasoning_tokens: 503 } };
+  const beh = { [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage }) };
+  const store = memoryStore(2);
+  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, []) });
+  assert.ok(r.attempts.find(a => a.outcome === 'error').error.includes('prompt=429'), 'the numbers are still logged');
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-rotated').length, 0, 'no key rotation from usage numbers');
+  assert.equal(store.state.keys.active, 0, 'key state untouched');
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'still exactly one non-key probe');
+  assert.equal(store.state.health[LADDER[0]].class, 'transient', 'empty answer stays transient, not quota');
 });
 
 test('Go key limit → rotate to spare key, retry SAME rung', async () => {
