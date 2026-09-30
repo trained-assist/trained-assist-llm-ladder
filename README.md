@@ -71,7 +71,8 @@ Rungs are tried top-down:
   classified TTL (`src/classify.js`). Exception: a TRANSIENT skip on a Go or zen rung is capped at 30s
   after its last failure — a short Go wobble must not keep the fleet on the paid OpenRouter tail
   (money + a mid-run prompt-cache reset) for the full backoff. Real limits keep their TTL.
-- **Two OpenCode Go keys** (`OPENCODE_GO_API_KEYS`) — a key-level fault (usage limit, 429,
+- **OpenCode Go key pool** (`OPENCODE_GO_API_KEYS`, comma-separated, index 0 = default primary;
+  three keys since 2026-10-01) — a key-level fault (usage limit, 429,
   rejected key) rotates to the spare key and retries the same rung; a WEEKLY allowance parks that
   key for 6 h (`"limitName":"weekly"`), not the 15-minute rate-limit TTL. A rung that fails for a
   NON-key reason (timeout, empty answer, 500) gets ONE spare-key probe per call before the ladder
@@ -109,6 +110,7 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/health` | liveness + ladder names |
 | GET | `/v1/models` | ladders as model ids (`deepseek`, `deepseek:review`, …) |
 | GET | `/v1/state` | model health + key rotation snapshot |
+| GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens + attempts-depth histogram (N = window in hours, 1–168, default 24). What the hourly Telegram digest in `vm-telegram-monitor` renders |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `deepseek`); `stream: true` → SSE; `tools` passed through |
 
 Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
@@ -187,6 +189,9 @@ cost, `:free` → $0), failover-depth histogram and digit-normalized top errors.
 `ladder-analytics` workflow runs it daily (and on dispatch, inputs `days`, `format`) into the job
 summary; locally: `CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… python3 scripts/analytics.py
 --days 7 [--format json]`. Stream calls still report no usage (#22), so spend is a lower bound.
+The same trace drives the live hourly Telegram digest: `vm-telegram-monitor` polls
+`GET /v1/analytics?hours=N` with the ladder token and renders the per-ladder section next to the
+OpenRouter spend report.
 
 ## Claude Code Instructions
 
