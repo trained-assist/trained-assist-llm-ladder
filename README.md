@@ -13,9 +13,12 @@ Live: `https://llm-ladder.trainedassist.store`
 
 1. `opencode-go/mimo-v2.6-flash`
 2. `opencode-go/deepseek-v4.1-flash`
-3. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
-4. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
-5. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
+3. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — free tier (issue #26, owner 2026-09-30):
+   rides out a Go weekly-limit incident without paying the OpenRouter tail
+4. `openrouter/inclusionai/ling-3.0-flash-sante:free` — free, second vendor
+5. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
+6. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
+7. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
 

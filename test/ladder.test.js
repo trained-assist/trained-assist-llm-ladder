@@ -23,11 +23,13 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
-test('config: Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail of three vendors', () => {
+test('config: Go mimo → Go deepseek-v4.1-flash → free OpenRouter tier → paid tail of three vendors', () => {
   assert.deepEqual(LADDER, ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash',
+    'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'openrouter/inclusionai/ling-3.0-flash-sante:free',
     'openrouter/deepseek/deepseek-v4-flash-0731', 'openrouter/inclusionai/ling-3.0-flash', 'openrouter/xiaomi/mimo-v2.6-flash']);
-  const firstOr = LADDER.findIndex(m => m.startsWith('openrouter/'));
-  assert.ok(LADDER.slice(firstOr).every(m => m.startsWith('openrouter/')), 'paid OpenRouter rungs only at the tail');
+  const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
+  const firstPaid = LADDER.findIndex(paid);
+  assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
