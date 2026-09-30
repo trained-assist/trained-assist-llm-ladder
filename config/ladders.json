@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail deepseek-v4-flash-0731 → ling-3.0-flash → mimo-v2.6-flash (three vendors; muse-spark dropped 2026-09-27). free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'. doctor (owner 2026-09-28) = strongest tier for playbook 'doctor' steps when Claude/Codex are unavailable: Go MiMo-V2.6-Flash primary (tau2-bench airline 76.6% vs Kimi K2.7 Code 71.7%), then STRONGER Go models instead of cheaper ones (qwen3.7-plus → deepseek-v4-pro; qwen3.8-max dropped 2026-09-28 — owner: far too expensive), paid OpenRouter mimo last. research (owner 2026-09-28) = Hermes/opencode researcher runs, split by role: explore (the reading subagent: big docs, PDFs, pages) = gemini-2.5-flash-lite ($0.10/$0.40, 1M) → gemini-3.1-flash-lite → Go mimo; build/plan/general/review (the thinking/writing main agent) = Go MiMo-V2.6-Flash (1M ctx) → Go deepseek-v4.1-flash → paid OpenRouter mimo. gemini-2.5-flash ($0.30/$2.50) and 2.5-pro ($1.25/$10) deliberately excluded (owner: too expensive).",
+  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter. Owner 2026-09-27: deepseek = Go mimo → Go deepseek-v4.1-flash → paid OpenRouter tail deepseek-v4-flash-0731 → ling-3.0-flash → mimo-v2.6-flash (three vendors; muse-spark dropped 2026-09-27). Owner 2026-09-30 (issue #26): deepseek gains a free OpenRouter tier before the paid tail — nemotron-3-super-120b-a12b:free → ling-3.0-flash-sante:free (live in D1 72h; ling-3.0-flash-fin:free dead 404) — so a Go weekly-limit incident does not fall through to paying OpenRouter. free = cheap/free rungs for agents on 'говномодели' (issue trained-assist-agent#1526): Go models first, OpenRouter :free fallback; order from pr-autofix bench 2026-09-26. Alias model id 'free-ladder'. doctor (owner 2026-09-28) = strongest tier for playbook 'doctor' steps when Claude/Codex are unavailable: Go MiMo-V2.6-Flash primary (tau2-bench airline 76.6% vs Kimi K2.7 Code 71.7%), then STRONGER Go models instead of cheaper ones (qwen3.7-plus → deepseek-v4-pro; qwen3.8-max dropped 2026-09-28 — owner: far too expensive), paid OpenRouter mimo last. research (owner 2026-09-28) = Hermes/opencode researcher runs, split by role: explore (the reading subagent: big docs, PDFs, pages) = gemini-2.5-flash-lite ($0.10/$0.40, 1M) → gemini-3.1-flash-lite → Go mimo; build/plan/general/review (the thinking/writing main agent) = Go MiMo-V2.6-Flash (1M ctx) → Go deepseek-v4.1-flash → paid OpenRouter mimo. gemini-2.5-flash ($0.30/$2.50) and 2.5-pro ($1.25/$10) deliberately excluded (owner: too expensive).",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -11,6 +11,8 @@
       "build": [
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/deepseek/deepseek-v4-flash-0731",
         "openrouter/inclusionai/ling-3.0-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
@@ -18,6 +20,8 @@
       "plan": [
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/deepseek/deepseek-v4-flash-0731",
         "openrouter/inclusionai/ling-3.0-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
@@ -25,6 +29,8 @@
       "explore": [
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/deepseek/deepseek-v4-flash-0731",
         "openrouter/inclusionai/ling-3.0-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
@@ -32,6 +38,8 @@
       "general": [
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/deepseek/deepseek-v4-flash-0731",
         "openrouter/inclusionai/ling-3.0-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
@@ -39,6 +47,8 @@
       "review": [
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/deepseek/deepseek-v4-flash-0731",
         "openrouter/inclusionai/ling-3.0-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
