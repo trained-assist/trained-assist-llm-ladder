@@ -147,8 +147,20 @@ Clients:
 
 ```bash
 npm test            # node:test — ladder + state logic (no Workers runtime needed)
+npm run test:sandbox  # full route in-process with fake upstreams
+npm run gate        # live gate against the running worker (see below)
 npx wrangler dev    # local worker
 ```
+
+Local iteration without touching prod: `cp .dev.vars.example .dev.vars`, fill in real keys, then
+`npm run dev` and point clients (or the gate: `LADDER_BASE=http://localhost:8787 npm run gate`) at
+`http://localhost:8787`. `.dev.vars` is gitignored — real values never enter the repo.
+
+**Live gate** (`scripts/live-gate.mjs`): `/health` → one `ladder_rung`-pinned call per rung of the
+gate ladder (default `deepseek`/`build`; override with `LADDER_GATE_RUNGS="rung1 rung2"`) →
+`/v1/state` skip check. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the
+repo) — never printed, never committed. Exit 0 = green. Only people who hold the token can call the
+API; repo access (the repo is public) grants nothing.
 
 Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
 `OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;
@@ -186,4 +198,9 @@ summary; locally: `CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… python3 sc
   nginx `location /zen/`). The Worker only holds `OPENCODE_ZEN_RELAY_TOKEN`; the relay owns the
   client fingerprint and the `shell`/`read` tools requirement. Relay down → zen rungs 502 → health
   skip → the ladder walks on; nothing else breaks.
+- Live gate = `npm run gate` (`scripts/live-gate.mjs`): health → pinned call per gate rung →
+  `/v1/state` skips. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the
+  repo) — read it only inside the script, never echo it into a prompt, transcript or file in the
+  repo. No token → exit 2, not a fake pass. Local loop: `.dev.vars` + `npm run dev` +
+  `LADDER_BASE=http://localhost:8787 npm run gate`.
 - PRs only, never push to `main` directly.

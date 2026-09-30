@@ -1,0 +1,11 @@
+# Local secrets for `npm run dev` (wrangler dev). Copy to .dev.vars — it is gitignored.
+# Never commit real values; the committed example keeps placeholders only.
+#
+#   cp .dev.vars.example .dev.vars
+#
+# LADDER_TOKEN — whatever you want local clients to send; pick any value and point clients at
+# http://localhost:8787 with the same value.
+LADDER_TOKEN=local-dev
+# Upstream keys — copy from the worker secrets (wrangler secret list / your password manager).
+OPENCODE_GO_API_KEYS=oc_xxx,oc_yyy
+OPENROUTER_API_KEY=sk-or-xxx
