@@ -25,11 +25,15 @@ Live: `https://llm-ladder.trainedassist.store`
 8. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
 9. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
 10. `opencode-go/deepseek-v4.1-flash` — Go subscription, second model
-11. `openrouter/deepseek/deepseek-v4-flash-0731` — paid tail starts here ($0.021/$0.32 per M)
-12. `openrouter/inclusionai/ling-3.0-flash` — paid, different vendor (InclusionAI), 2–7s ($0.021/$0.063)
-13. `openrouter/xiaomi/mimo-v2.6-flash` — paid, third vendor ($0.14/$0.28)
+11. `openrouter/inclusionai/ling-3.0-flash` — paid tail starts here ($0.021/$0.063 per M, live
+    OpenRouter price 2026-09-30; fastest paid rung: 1–4s and judge q2 in the continuous bench)
+12. `openrouter/xiaomi/mimo-v2.6-flash` — paid, second vendor ($0.14/$0.28; owner: «мимо норм»)
 
 (`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
+(`openrouter/deepseek/deepseek-v4-flash-0731` was removed 2026-09-30 — issue #45: the live
+OpenRouter price is $0.01/**$1.28** per M output (40× ling), the bench shows ❌ ping/json/code
+and a live probe timed out at 60s on code-gen/agent-plan — owner: «дипсик вполне можно
+заменять». Alongside it #45 adds ONE same-rung guard-retry for empty/non-JSON answers.)
 
 **Zen free tier needs a relay** and lives in the `free` ladder only (owner decision 2026-09-30,
 issue #42). OpenCode gates `zen/v1` free models behind an exact client

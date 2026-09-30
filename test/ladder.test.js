@@ -45,7 +45,6 @@ test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscriptio
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     'opencode-go/mimo-v2.6-flash',
     'opencode-go/deepseek-v4.1-flash',
-    'openrouter/deepseek/deepseek-v4-flash-0731',
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ]);
@@ -166,6 +165,35 @@ test('#34: diag token counts are never read as key faults or quota — instrumen
   assert.equal(store.state.keys.active, 0, 'key state untouched');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'still exactly one non-key probe');
   assert.equal(store.state.health[DIAG_REASONING].class, 'transient', 'empty answer stays transient, not quota');
+});
+
+// ── #45: a completed-but-guard-failed answer gets ONE same-rung retry before the ladder moves ──
+test('guard-fail → one same-rung retry: recovery keeps the rung (no hop, no health-skip), a second fail moves down', async () => {
+  // flake #1 only: the retry answers → the rung keeps serving, nothing is recorded against it
+  let calls = 0;
+  const store = memoryStore(2);
+  const beh = { [short(LADDER[0])]: () => (++calls === 1
+    ? { status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }
+    : { status: 200, content: '{"ok":true}' }) };
+  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store, fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, LADDER[0], 'retried rung answered — no hop down the ladder');
+  assert.ok(r.attempts.some(a => a.outcome === 'guard-retry'), 'the retry is visible in attempts (flake rate stays measurable)');
+  assert.ok(!r.attempts.some(a => a.outcome === 'error'), 'a recovered flake never surfaces as an error');
+  assert.equal(store.state.health[LADDER[0]], undefined, 'no health-skip — one flake must not punish other callers');
+
+  // flake #2 both attempts empty → exactly one retry, then the ladder descends and the failure IS recorded
+  const store2 = memoryStore(2);
+  const beh2 = {
+    [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }),
+    [short(LADDER[1])]: () => ({ status: 200, content: '{"ok":true}' }),
+  };
+  const r2 = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store: store2, fetchImpl: fakeFetch(beh2, []) });
+  assert.equal(r2.ok, true);
+  assert.equal(r2.model, LADDER[1], 'a persistent guard-fail still moves down the ladder');
+  assert.equal(r2.attempts.filter(a => a.outcome === 'guard-retry').length, 1, 'exactly one retry per rung');
+  assert.ok(r2.attempts.some(a => a.outcome === 'error'), 'the rung still reports the failure');
+  assert.ok(store2.state.health[LADDER[0]], 'persistent guard-fail is recorded in shared health');
 });
 
 // ── #38: the max_tokens floor is per-rung — 3000 for the empirical REASONING_MODELS list, 1500 for the rest ─

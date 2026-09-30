@@ -44,7 +44,6 @@ export const REASONING_MODELS = [
   'opencode-go/deepseek-v4.1-flash',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
   'openrouter/inclusionai/ling-3.0-flash-sante:free',
-  'openrouter/deepseek/deepseek-v4-flash-0731',
   'openrouter/inclusionai/ling-3.0-flash',
   'openrouter/xiaomi/mimo-v2.6-flash',
   'opencode-go/deepseek-v4-flash',
@@ -245,8 +244,10 @@ async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fe
     const message = data?.choices?.[0]?.message || {};
     const content = String(message.content || '').trim();
     const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-    if (!content && !hasTools) return { ok: false, error: `empty answer${guardDiag(data, req)}` };
-    if (wantJson && !hasTools && parseJson(content) === undefined) return { ok: false, error: `invalid JSON${guardDiag(data, req)}` };
+    // #45 (owner): a COMPLETED answer that fails the guard is flagged, not fatal — run() gives
+    // the rung ONE same-rung retry before moving down (guardTried there bounds it).
+    if (!content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(data, req)}` };
+    if (wantJson && !hasTools && parseJson(content) === undefined) return { ok: false, guard: true, error: `invalid JSON${guardDiag(data, req)}` };
     return { ok: true, data, content };
   }
 }
@@ -408,6 +409,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // Bounded to ONE probe per call so a Go outage cannot double the failover latency.
   // pinRung (benchmarks) measures exactly ONE attempt on ONE rung — no probe there either.
   let probeBudget = pinRung ? 0 : 1;
+  // #45: one same-rung retry per rung for a completed-but-guard-failed answer (empty / non-JSON).
+  const guardTried = new Set();
   let goParked = false;
 
   const wantJson = body.response_format && body.response_format.type === 'json_object';
@@ -423,6 +426,18 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     const tried = new Set([key]);
     let r = await attempt(env, model, body, key, opts);
     if (r.skip) continue;
+    // #45 (owner «если ошибка то ретрай и далее потом по лесенке»): a guard-failed answer ALREADY
+    // arrived — retrying the same rung costs a fraction of one ladder hop, while today's straight
+    // descent pays double: a hop to a possibly pricier rung PLUS a health-skip that punishes every
+    // other caller for 15s+ over one cheap flake (measured: an empty gpt-oss JSON in 285ms).
+    // Bounded to ONE retry per rung; success records no failure at all. Visible in attempts as
+    // outcome 'guard-retry' so flake rates stay measurable. Streams are excluded — a retry there
+    // costs a full TTFB window, and the no-first-token path is not a guard failure.
+    if (r.guard && !guardTried.has(model)) {
+      guardTried.add(model);
+      attempts.push({ model, outcome: 'guard-retry', key, error: r.error });
+      r = await attempt(env, model, body, key, opts);
+    }
     while (!r.ok && isGo && !goParked) {
       const fault = keyFaultOf(r.error);
       if (fault) {
