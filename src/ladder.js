@@ -33,10 +33,10 @@ export const MIN_TOKENS = 1500;
 // data). See the PR for the full per-rung table.
 //
 // Added after #39 reordered deepseek: opencode-go/space-bunny-free measured reasoning_tokens=32
-// (+ reasoning_content 100ch) through the live worker. The four opencode-zen/* rungs of #39 are
-// NOT in the list yet — the zen relay (136-65-7-197.sslip.io/zen) answers HTTP 404 right now, so
-// there is nothing to measure; pin and add them once the relay is up (mimo/nemotron families are
-// expected to reason, but this list is measured, never guessed).
+// (+ reasoning_content 100ch) through the live worker. The four opencode-zen/* rungs (now the tail
+// of the free ladder, #43) were measured 30.09 through the live worker once the relay was up —
+// mimo-v2.6-flash-free 17, mimo-v2.5-free 15, nemotron-3.5-lightning-free 255, big-pickle 43 —
+// and are added (#42).
 export const REASONING_MIN_TOKENS = 3000;
 export const REASONING_MODELS = [
   'opencode-go/space-bunny-free',
@@ -59,6 +59,10 @@ export const REASONING_MODELS = [
   'openrouter/dots-studio/dots-3-note-preview:free',
   'opencode-go/qwen3.7-plus',
   'opencode-go/deepseek-v4-pro',
+  'opencode-zen/mimo-v2.6-flash-free',
+  'opencode-zen/mimo-v2.5-free',
+  'opencode-zen/nemotron-3.5-lightning-free',
+  'opencode-zen/big-pickle',
 ];
 const REASONING = new Set(REASONING_MODELS);
 

@@ -171,8 +171,17 @@ test('#34: diag token counts are never read as key faults or quota — instrumen
 // ── #38: the max_tokens floor is per-rung — 3000 for the empirical REASONING_MODELS list, 1500 for the rest ─
 test('reasoning-модель получает 3000, обычная — 1500', async () => {
   // every rung of the empirical list clamps to REASONING_MIN_TOKENS (caller asking for less is raised)
+  // zen rungs build their request only with the relay token present (keyless → null), so give it one
+  const envZ = { ...env, OPENCODE_ZEN_RELAY_TOKEN: 'zr_t' };
   for (const m of REASONING_MODELS) {
-    assert.equal(upstreamRequest(env, m, { messages: [] }, 0).body.max_tokens, REASONING_MIN_TOKENS, m);
+    assert.equal(upstreamRequest(envZ, m, { messages: [] }, 0).body.max_tokens, REASONING_MIN_TOKENS, m);
+  }
+  // #42: the four zen rungs are IN the list — the loop above only proves the list clamps, so pin
+  // the zen ids explicitly; dropping one must fail here, not in prod
+  for (const z of ['opencode-zen/mimo-v2.6-flash-free', 'opencode-zen/mimo-v2.5-free', 'opencode-zen/nemotron-3.5-lightning-free', 'opencode-zen/big-pickle']) {
+    assert.ok(REASONING_MODELS.includes(z), `${z} must stay in REASONING_MODELS`);
+    assert.equal(minTokensFor(z), REASONING_MIN_TOKENS, z);
+    assert.equal(upstreamRequest(envZ, z, { messages: [] }, 0).body.max_tokens, REASONING_MIN_TOKENS, z);
   }
   // a rung outside the list keeps the common floor
   const plain = 'openrouter/google/gemini-2.5-flash-lite';
