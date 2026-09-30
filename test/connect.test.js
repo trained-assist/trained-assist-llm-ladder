@@ -180,12 +180,26 @@ test('POST /connect creates a zerocreds session and stores the sid mapping', asy
 
 test('POST /connect rejects unknown providers and missing config', async () => {
   assert.equal((await post(env(), `/u/${UID}/connect`, { provider: 'evil' }, {}, { fetchImpl: fakeZeroCreds().fetchImpl })).status, 400);
-  assert.equal((await post(env({ ZEROCREDS_ADMIN_TOKEN: '' }), `/u/${UID}/connect`, { provider: 'openai' }, {}, { fetchImpl: fakeZeroCreds().fetchImpl })).status, 503);
   assert.equal((await post(env({ ZC_WEBHOOK_TOKEN: '' }), `/u/${UID}/connect`, { provider: 'openai' }, {}, { fetchImpl: fakeZeroCreds().fetchImpl })).status, 503);
   assert.equal((await post(env({ LADDER_CREDS: null }), `/u/${UID}/connect`, { provider: 'openai' }, {}, { fetchImpl: fakeZeroCreds().fetchImpl })).status, 503);
   const down = await post(env(), `/u/${UID}/connect`, { provider: 'openai' }, {}, { fetchImpl: fakeZeroCreds({ fail: true }).fetchImpl });
   assert.equal(down.status, 502);
   assert.ok(!(await down.text()).includes('admin'), 'admin token leaked in the error');
+});
+
+test('the admin token is optional — omitted, not sent empty, when the server runs open', async () => {
+  // The deployed zerocreds-server has ADMIN_TOKEN unset (auth skipped server-side), so a
+  // hard requirement here would 503 a working integration; a forged "Bearer undefined"
+  // would be worse than no header at all.
+  const zc = fakeZeroCreds();
+  const r = await post(env({ ZEROCREDS_ADMIN_TOKEN: '' }), `/u/${UID}/connect`,
+    { provider: 'openai' }, { accept: 'application/json' }, { fetchImpl: zc.fetchImpl });
+  assert.equal(r.status, 200);
+  assert.equal(zc.calls[0].init.headers.authorization, undefined);
+
+  const withToken = fakeZeroCreds();
+  await post(env(), `/u/${UID}/connect`, { provider: 'openai' }, { accept: 'application/json' }, { fetchImpl: withToken.fetchImpl });
+  assert.equal(withToken.calls[0].init.headers.authorization, 'Bearer admin');
 });
 
 test('POST /connect answers a plain form with a redirect to zerocreds', async () => {

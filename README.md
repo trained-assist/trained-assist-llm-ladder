@@ -184,8 +184,12 @@ GET  /u/{uid}/status/{sid}            → статус сессии + метад
 хранить несколько провайдеров. Маршрутизация вызовов на эти ключи (BYOK) **не реализована** —
 сейчас ключи только собираются; читать их потом `KV.list({prefix: "creds:{uid}:"})`.
 
-Секреты этой фичи — в общем списке ниже (`ZEROCREDS_ADMIN_TOKEN`, `ZC_WEBHOOK_TOKEN`,
-`CREDS_ENC_KEY`).
+Секреты этой фичи — в общем списке ниже. `ZC_WEBHOOK_TOKEN` и `CREDS_ENC_KEY` обязательны
+(fail-closed), `ZEROCREDS_ADMIN_TOKEN` — опционален: развёрнутый zerocreds-server работает
+без него (`ADMIN_TOKEN` пуст → аутентификация пропускается целиком, `POST /api/session/create`
+без токена отвечает 400 по телу, а не 401), поэтому заголовок шлём только когда он задан —
+иначе воркер выглядел бы настроенным, а запросы опирались бы на открытый сервер. Когда токен
+появится с обеих сторон (ZeroCreds #64), достаточно выставить то же значение здесь.
 
 ## Development
 
@@ -210,9 +214,10 @@ the token can call the API; repo access (the repo is public) grants nothing.
 Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
 `OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;
 without it every `opencode-zen/` rung is filtered out as keyless), and for the connect flow:
-`ZEROCREDS_ADMIN_TOKEN` (admin token of our zerocreds-server), `ZC_WEBHOOK_TOKEN` (shared secret
-in the webhook `Authorization` header), `CREDS_ENC_KEY` (32 bytes, `openssl rand -base64 32` —
-encrypts the KV blobs). Optional `ZEROCREDS_BASE_URL` defaults to `https://zerocreds.ru`.
+`ZC_WEBHOOK_TOKEN` (shared secret in the webhook `Authorization` header), `CREDS_ENC_KEY`
+(32 bytes, `openssl rand -base64 32` — encrypts the KV blobs), and optionally
+`ZEROCREDS_ADMIN_TOKEN` (admin token of our zerocreds-server; omit it while that server runs
+with auth disabled). Optional `ZEROCREDS_BASE_URL` defaults to `https://zerocreds.ru`.
 Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
 `CF_ACCOUNT_ID`).
 

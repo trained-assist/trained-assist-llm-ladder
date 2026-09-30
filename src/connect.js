@@ -104,7 +104,6 @@ export async function handleLanding(request, env, { fetchImpl = fetch } = {}) {
 
 async function handleConnect(request, env, uid, { fetchImpl }) {
   if (!validUid(uid)) return json(400, { error: 'bad uid' });
-  if (!env.ZEROCREDS_ADMIN_TOKEN) return misconfigured('ZEROCREDS_ADMIN_TOKEN');
   if (!env.ZC_WEBHOOK_TOKEN) return misconfigured('ZC_WEBHOOK_TOKEN');
   if (!kv(env)) return misconfigured('LADDER_CREDS');
 
@@ -162,7 +161,6 @@ async function handleStatus(env, uid, sid, { fetchImpl }) {
   if (!kv(env)) return misconfigured('LADDER_CREDS');
   const meta = await getSessionMeta(kv(env), sid);
   if (!meta || meta.uid !== uid) return json(404, { error: 'unknown session' });
-  if (!env.ZEROCREDS_ADMIN_TOKEN) return misconfigured('ZEROCREDS_ADMIN_TOKEN');
   try {
     const s = await sessionStatus({
       baseUrl: env.ZEROCREDS_BASE_URL || 'https://zerocreds.ru',

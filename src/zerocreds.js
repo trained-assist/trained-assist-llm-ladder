@@ -31,10 +31,16 @@ export function buildDestination({ origin, uid, sid, provider, webhookToken }) {
 }
 
 // POST /api/session/create → { token, url, expires_at }.
-export async function createSession({ baseUrl, adminToken, title, description, fields, destination, ttlMinutes = 30, fetchImpl = fetch }) {
+// The admin token is OPTIONAL and sent only when set: the deployed zerocreds-server runs with
+// ADMIN_TOKEN empty (auth skipped entirely), and inventing a value here would let the worker
+// look configured while every call actually relies on the server being open. When the token
+// lands on both sides (ZeroCreds #64), setting the same value here is enough.
+export async function createSession({ baseUrl, adminToken = '', title, description, fields, destination, ttlMinutes = 30, fetchImpl = fetch }) {
+  const headers = { 'content-type': 'application/json' };
+  if (adminToken) headers.authorization = `Bearer ${adminToken}`;
   const resp = await fetchImpl(`${String(baseUrl).replace(/\/+$/, '')}/api/session/create`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${adminToken}` },
+    headers,
     body: JSON.stringify({ title, description, fields, destination, ttl_minutes: ttlMinutes }),
   });
   if (!resp.ok) throw new Error(`zerocreds create: HTTP ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
@@ -42,9 +48,11 @@ export async function createSession({ baseUrl, adminToken, title, description, f
 }
 
 // GET /api/session/{token}/status → { status: pending | done | expired }.
-export async function sessionStatus({ baseUrl, adminToken, token, fetchImpl = fetch }) {
+export async function sessionStatus({ baseUrl, adminToken = '', token, fetchImpl = fetch }) {
+  const headers = {};
+  if (adminToken) headers.authorization = `Bearer ${adminToken}`;
   const resp = await fetchImpl(`${String(baseUrl).replace(/\/+$/, '')}/api/session/${encodeURIComponent(token)}/status`, {
-    headers: { authorization: `Bearer ${adminToken}` },
+    headers,
   });
   if (resp.status === 404) return { status: 'expired' };
   if (!resp.ok) throw new Error(`zerocreds status: HTTP ${resp.status}`);
