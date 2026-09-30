@@ -24,6 +24,14 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
+// Floor/diag assertions are pinned to EXPLICIT rung ids — never to LADDER[0]: #39 reordered the
+// real deepseek ladder (space-bunny-free first) and that alone turned the previous version of
+// these tests red (#40 → CI fail). DIAG_REASONING is measured reasoning → 3000 floor; DIAG_SECOND
+// exists only so the failover half of the diag tests has a stable second rung.
+const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
+const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
+const DIAG_CFG = { ...config, ladders: { ...config.ladders, deepseek: { build: [DIAG_REASONING, DIAG_SECOND] } } };
+
 test('config: five tiers — Go free → zen free → OpenRouter :free ×6 → Go subscription → paid tail (#36)', () => {
   assert.deepEqual(LADDER, [
     'opencode-go/space-bunny-free',
@@ -63,7 +71,10 @@ test('first Go rung answers; Go gets the session header, non-stream, reasoning-s
   assert.match(calls[0].url, /opencode\.ai\/zen\/go\/v1\/chat\/completions$/);
   assert.ok(calls[0].session);
   assert.equal(calls[0].body.stream, false);
-  assert.equal(calls[0].body.max_tokens, REASONING_MIN_TOKENS, 'rung 0 is a reasoning model → the 3000 floor (#38)');
+  // #38: the caller's 5 is raised to THIS rung's floor — assert the clamp logic, not the identity
+  // of whatever the ladder orders first (identity is test 'reasoning-модель получает 3000…').
+  assert.equal(calls[0].body.max_tokens, minTokensFor(LADDER[0]), 'floor follows the first rung class');
+  assert.ok(calls[0].body.max_tokens >= MIN_TOKENS, 'caller max_tokens=5 is raised to at least the common floor');
   assert.equal(calls[0].auth, 'Bearer oc_a');
 });
 
@@ -93,8 +104,8 @@ const EMPTY_USAGE = { prompt_tokens: 840, completion_tokens: 3000, completion_to
 const EMPTY_DIAG = 'finish=length, out=3000, reasoning=3000, prompt=840, max_tokens=3000';
 
 test('empty answer error carries finish_reason + usage — reasoning eating the floor is visible', async () => {
-  const beh = { [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) };
-  const r = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
+  const beh = { [short(DIAG_REASONING)]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) };
+  const r = await run(msg, { env, config: DIAG_CFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
   assert.equal(r.ok, true, 'the ladder still fails over to the next rung');
   const err = r.attempts.find(a => a.outcome === 'error').error;
   assert.ok(err.startsWith(`empty answer (${EMPTY_DIAG})`), `prefix match on the diag, got: ${err}`);
@@ -102,10 +113,10 @@ test('empty answer error carries finish_reason + usage — reasoning eating the 
 
 test('invalid JSON error carries finish_reason + usage too (#34)', async () => {
   const beh = {
-    [short(LADDER[0])]: () => ({ status: 200, content: 'not json', finish: 'length', usage: EMPTY_USAGE }),
-    [short(LADDER[1])]: () => ({ status: 200, content: '```json\n{"ok":true}\n```' }),
+    [short(DIAG_REASONING)]: () => ({ status: 200, content: 'not json', finish: 'length', usage: EMPTY_USAGE }),
+    [short(DIAG_SECOND)]: () => ({ status: 200, content: '```json\n{"ok":true}\n```' }),
   };
-  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
+  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config: DIAG_CFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
   assert.equal(r.ok, true);
   const err = r.attempts.find(a => a.outcome === 'error').error;
   assert.ok(err.startsWith(`invalid JSON (${EMPTY_DIAG})`), `prefix match on the diag, got: ${err}`);
@@ -114,14 +125,14 @@ test('invalid JSON error carries finish_reason + usage too (#34)', async () => {
 test('#34: diag token counts are never read as key faults or quota — instrumentation cannot move the ladder', async () => {
   // usage numbers chosen to collide with the classifiers on purpose: 429/401/503
   const usage = { prompt_tokens: 429, completion_tokens: 401, completion_tokens_details: { reasoning_tokens: 503 } };
-  const beh = { [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage }) };
+  const beh = { [short(DIAG_REASONING)]: () => ({ status: 200, content: '', finish: 'length', usage }) };
   const store = memoryStore(2);
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, []) });
+  const r = await run(msg, { env, config: DIAG_CFG, store, fetchImpl: fakeFetch(beh, []) });
   assert.ok(r.attempts.find(a => a.outcome === 'error').error.includes('prompt=429'), 'the numbers are still logged');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-rotated').length, 0, 'no key rotation from usage numbers');
   assert.equal(store.state.keys.active, 0, 'key state untouched');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'still exactly one non-key probe');
-  assert.equal(store.state.health[LADDER[0]].class, 'transient', 'empty answer stays transient, not quota');
+  assert.equal(store.state.health[DIAG_REASONING].class, 'transient', 'empty answer stays transient, not quota');
 });
 
 // ── #38: the max_tokens floor is per-rung — 3000 for the empirical REASONING_MODELS list, 1500 for the rest ─
@@ -140,7 +151,7 @@ test('reasoning-модель получает 3000, обычная — 1500', as
   assert.equal(upstreamRequest(env, 'opencode-go/mimo-v2.6-flash', { messages: [], max_tokens: 4000 }, 0).body.max_tokens, 4000);
 
   // the #34 guard diagnostic prints the floor that ACTUALLY went upstream, per rung class
-  const reasoningRung = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({ [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) }, []) });
+  const reasoningRung = await run(msg, { env, config: DIAG_CFG, store: memoryStore(2), fetchImpl: fakeFetch({ [short(DIAG_REASONING)]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }) }, []) });
   const rErr = reasoningRung.attempts.find(a => a.outcome === 'error').error;
   assert.ok(rErr.includes('max_tokens=3000'), `reasoning rung → max_tokens=3000 in the diag, got: ${rErr}`);
   const plainRung = await run({ ...msg, model: 'research:explore' }, {

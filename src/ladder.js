@@ -31,8 +31,15 @@ export const MIN_TOKENS = 1500;
 // counter does not count, so they are in. Excluded: openrouter/google/gemini-2.5-flash-lite
 // (reasoning_tokens=0 twice, works in visible content), ling-3.0-flash-fin:free (dead rung, no
 // data). See the PR for the full per-rung table.
+//
+// Added after #39 reordered deepseek: opencode-go/space-bunny-free measured reasoning_tokens=32
+// (+ reasoning_content 100ch) through the live worker. The four opencode-zen/* rungs of #39 are
+// NOT in the list yet — the zen relay (136-65-7-197.sslip.io/zen) answers HTTP 404 right now, so
+// there is nothing to measure; pin and add them once the relay is up (mimo/nemotron families are
+// expected to reason, but this list is measured, never guessed).
 export const REASONING_MIN_TOKENS = 3000;
 export const REASONING_MODELS = [
+  'opencode-go/space-bunny-free',
   'opencode-go/mimo-v2.6-flash',
   'opencode-go/deepseek-v4.1-flash',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
