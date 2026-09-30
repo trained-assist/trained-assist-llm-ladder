@@ -2,7 +2,7 @@
 // `node --test` (the sandbox imports it), while src/index.js remains the Worker entry: it wraps this
 // handler and exports the LadderState Durable Object for the platform binding.
 
-import { run, readPool, DEFAULT_LADDER } from './ladder.js';
+import { run, readPool, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
 import config from '../config/ladders.json' with { type: 'json' };
 
@@ -104,6 +104,11 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     const conversation = await conversationKey(request, body, env);
+    // OpenRouter app attribution (#33): which of our tools eats this call, for the OpenRouter
+    // "Application" analytics cut. Both values are sanitised here (slug → [a-z0-9-]{1,64},
+    // default 'llm-ladder') so the ladder itself only ever sees clean values.
+    const appSlug = sanitizeAppSlug(request.headers.get('x-ladder-app'));
+    const appTitle = sanitizeAppTitle(request.headers.get('x-ladder-app-title'));
     const started = Date.now();
     const r = await run(chat, {
       env, config, store: store || makeStore(env), fetchImpl,
@@ -111,14 +116,14 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
-      conversation,
+      conversation, appSlug, appTitle,
     });
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
     const trace = makeTrace(request);
     // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
-    console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
+    console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
     await logCall(env, trace, chat.model, r, started);
     if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
     if (r.stream) {

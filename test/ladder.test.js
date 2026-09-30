@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, MIN_TOKENS, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE } from '../src/ladder.js';
+import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
@@ -366,4 +367,80 @@ test('state: resetKeys clears Go key parks and Go rung skips, keeps OpenRouter h
   resetKeys(st);
   assert.deepEqual(st.keys, { active: 0, exhausted: {} });
   assert.deepEqual(Object.keys(st.health), ['openrouter/x']);
+});
+
+// ── OpenRouter app attribution (#33) ───────────────────────────────────────────────────────────
+test('upstreamRequest: HTTP-Referer / X-OpenRouter-Title / Visibility only on openrouter/* rungs', () => {
+  const or = upstreamRequest(env, 'openrouter/deepseek/deepseek-v4-flash-0731', msg, 0, { appSlug: 'hh-messages', appTitle: 'HH Messages' });
+  assert.equal(or.headers['HTTP-Referer'], `${APP_REFERER_BASE}/hh-messages`);
+  assert.equal(or.headers['X-OpenRouter-Title'], 'HH Messages');
+  assert.equal(or.headers['X-OpenRouter-App-Visibility'], 'hidden');
+
+  const go = upstreamRequest(env, 'opencode-go/mimo-v2.6-flash', msg, 0, { appSlug: 'hh-messages', appTitle: 'HH Messages' });
+  for (const h of ['HTTP-Referer', 'X-OpenRouter-Title', 'X-OpenRouter-App-Visibility']) {
+    assert.equal(go.headers[h], undefined, `${h} must not be sent to Go`);
+  }
+});
+
+test('app attribution defaults: no slug → llm-ladder, no title → Trained Assist (openrouter only)', () => {
+  const or = upstreamRequest(env, 'openrouter/x/y', msg, 0, {});
+  assert.equal(or.headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`);
+  assert.equal(or.headers['X-OpenRouter-Title'], DEFAULT_APP_TITLE);
+  assert.equal(or.headers['X-OpenRouter-App-Visibility'], 'hidden');
+});
+
+test('sanitize: garbage slug falls back to llm-ladder (never a half-repaired one)', () => {
+  assert.equal(sanitizeAppSlug('gtd-intent'), 'gtd-intent');
+  assert.equal(sanitizeAppSlug(' HH-Messages '), 'hh-messages');
+  for (const junk of ['', '  ', 'привет', 'a b', 'a/b', '../../etc/passwd', 'a'.repeat(65), 'a_b', 'a\nb']) {
+    assert.equal(sanitizeAppSlug(junk), DEFAULT_APP_SLUG, JSON.stringify(junk));
+  }
+  assert.equal(sanitizeAppSlug(null), DEFAULT_APP_SLUG);
+  assert.equal(sanitizeAppTitle(''), DEFAULT_APP_TITLE);
+  assert.equal(sanitizeAppTitle(null), DEFAULT_APP_TITLE);
+  assert.equal(sanitizeAppTitle('My\x00Tool\n '), 'MyTool');
+});
+
+test('run() threads appSlug/appTitle down to the OpenRouter upstream; Go stays clean', async () => {
+  const beh = { [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }), [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }) };
+  const calls = [];
+  const f = async (url, init) => {
+    calls.push({ url, headers: init.headers });
+    const body = JSON.parse(init.body);
+    return { ok: false, status: 500, text: async () => (beh[body.model] ? beh[body.model]().error : 'x') };
+  };
+  await run(msg, { env, config, store: memoryStore(2), fetchImpl: f, appSlug: 'gtd-intent', appTitle: 'GTD Intent' });
+  const go = calls.filter(c => c.url.includes('opencode.ai'));
+  const or = calls.filter(c => c.url.includes('openrouter.ai'));
+  assert.ok(go.length >= 2 && or.length >= 1, 'walked Go rungs then OpenRouter');
+  assert.equal(go[0].headers['HTTP-Referer'], undefined);
+  assert.equal(or[0].headers['HTTP-Referer'], `${APP_REFERER_BASE}/gtd-intent`);
+  assert.equal(or[0].headers['X-OpenRouter-Title'], 'GTD Intent');
+  assert.equal(or[0].headers['X-OpenRouter-App-Visibility'], 'hidden');
+});
+
+test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forwarded to run()', async () => {
+  const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
+  const seen = [];
+  const f = async (url, init) => {
+    seen.push({ url, headers: init.headers });
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'ok' } }] }), text: async () => '' };
+  };
+  const post = (headers) => handle(new Request('https://l.test/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer t', ...headers },
+    body: JSON.stringify({ model: 'deepseek', ladder_rung: 'openrouter/xiaomi/mimo-v2.6-flash', messages: [{ role: 'user', content: 'hi' }] }),
+  }), ENV, { store: memoryStore(0), fetchImpl: f });
+
+  await post({ 'x-ladder-app': 'bg-Playbooks', 'x-ladder-app-title': 'Background Playbooks' });
+  assert.equal(seen[0].headers['HTTP-Referer'], `${APP_REFERER_BASE}/bg-playbooks`);
+  assert.equal(seen[0].headers['X-OpenRouter-Title'], 'Background Playbooks');
+
+  await post({ 'x-ladder-app': 'GTD Intent/../../etc' });
+  assert.equal(seen[1].headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`, 'garbage slug → default, not forwarded as-is');
+  assert.equal(seen[1].headers['X-OpenRouter-Title'], DEFAULT_APP_TITLE);
+
+  await post({});
+  assert.equal(seen[2].headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`, 'no header → default slug');
+  assert.equal(seen[2].headers['X-OpenRouter-App-Visibility'], 'hidden');
 });
