@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { handle } from '../src/handler.js';
+import { handle, normalizeError } from '../src/handler.js';
 
 const ENV = { LADDER_TOKEN: 't' };
 
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
-// canned rows for that statement (first call → aggRows, second → depthRows).
-function fakeD1({ aggRows = [], depthRows = [], fail = false } = {}) {
+// canned rows for that statement — routed by SQL shape (agg / depth / errors), not
+// by call order, so the queries can be reordered or extended freely.
+function fakeD1({ aggRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
   const calls = [];
-  let n = 0;
   return {
     _calls: calls,
     prepare(sql) {
@@ -17,7 +17,9 @@ function fakeD1({ aggRows = [], depthRows = [], fail = false } = {}) {
           calls.push({ sql, params });
           return { all: async () => {
             if (fail) throw new Error('d1 down');
-            return { results: n++ === 0 ? aggRows : depthRows };
+            if (sql.includes('json_array_length')) return { results: depthRows };
+            if (sql.includes('json_each')) return { results: errorRows };
+            return { results: aggRows };
           } };
         },
       };
@@ -106,7 +108,7 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 2, 'both queries issued');
+  assert.equal(d1._calls.length, 3, 'all three queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
@@ -115,6 +117,8 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   assert.match(d1._calls[0].sql, /FROM ladder_calls WHERE ts >= \?1 GROUP BY ladder/);
   assert.match(d1._calls[1].sql, /json_array_length\(attempts\)/);
   assert.match(d1._calls[1].sql, /json_valid\(attempts\)/);
+  assert.match(d1._calls[2].sql, /json_each\(ladder_calls\.attempts\)/);
+  assert.match(d1._calls[2].sql, /GROUP BY err/);
 });
 
 test('GET /v1/analytics: empty window → zero totals, no ladders', async () => {
@@ -149,4 +153,50 @@ test('GET /v1/analytics: SUM/COUNT arrive as strings from SQLite — coerced to 
   assert.equal(b.totals.calls, 10);
   assert.equal(b.totals.tokens_in, 1000);
   assert.deepEqual(b.ladders[0].depth, [{ depth: 1, calls: 10 }]);
+});
+
+test('GET /v1/analytics: errors — digit variants merged, re-sorted, capped at 20', async () => {
+  const d1 = fakeD1({
+    // Raw rows arrive frequency-ordered; after normalize+merge the order can change.
+    errorRows: [
+      { err: 'HTTP 402: {"error":{"message":"can only afford 499"}}', n: 40 },
+      { err: 'HTTP 500: upstream exploded', n: 30 },
+      { err: 'HTTP 402: {"error":{"message":"can only afford 776"}}', n: 25 },
+      { err: 'empty answer (finish=length, out=1500, reasoning=1500, prompt=840, max_tokens=1500)', n: 12 },
+      { err: 'no first token in time', n: 5 },
+    ],
+  });
+  const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=6');
+  const b = await r.json();
+
+  assert.ok(Array.isArray(b.errors), 'errors array present');
+  assert.equal(b.errors[0].error, 'HTTP 402: {"error":{"message":"can only afford #"}}', 'digit variants merged into one bucket');
+  assert.equal(b.errors[0].calls, 65, '40 + 25 summed');
+  assert.deepEqual(b.errors.map(e => e.calls), [65, 30, 12, 5], 're-sorted by merged count');
+  // #34 diagnostics: digits masked so one failure with varying token counts is one row
+  const guard = b.errors.find(e => e.error.startsWith('empty answer'));
+  assert.ok(guard, 'guard error present');
+  assert.equal(guard.error, 'empty answer (finish=length, out=#, reasoning=#, prompt=#, max_tokens=#)');
+  assert.match(b.errors[1].error, /^HTTP 500: upstream exploded$/);
+});
+
+test('GET /v1/analytics: errors — empty window → empty array, not missing key', async () => {
+  const r = await get({ ...ENV, LADDER_TRACE_DB: fakeD1() }, '?hours=1');
+  const b = await r.json();
+  assert.deepEqual(b.errors, []);
+});
+
+test('normalizeError: HTTP head kept, digits masked; non-HTTP masked wholesale; junk → (no message)', () => {
+  // Same contract as scripts/analytics.py normalize_error — the two must group alike.
+  assert.equal(
+    normalizeError('HTTP 402: {"error":{"message":"can only afford 499"}}'),
+    normalizeError('HTTP 402: {"error":{"message":"can only afford 776"}}'));
+  assert.equal(normalizeError('HTTP 402: x'), 'HTTP 402: x');
+  assert.equal(normalizeError('rate limited for 60s'), 'rate limited for #s');
+  assert.equal(normalizeError(''), '(no message)');
+  assert.equal(normalizeError(null), '(no message)');
+  // 160-char cap
+  assert.equal(normalizeError('x'.repeat(300)).length, 160);
+  // multi-space collapse
+  assert.equal(normalizeError('too    many\nspaces 42'), 'too many spaces #');
 });
