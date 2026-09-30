@@ -41,15 +41,17 @@ test('GET /v1/analytics: requires auth', async () => {
 test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', async () => {
   const d1 = fakeD1({
     aggRows: [
-      // service → deepseek (alias), free-ladder → free
+      // service → deepseek (alias), free-ladder → free, deepseek:build → deepseek (default role)
       { ladder: 'deepseek', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
       { ladder: 'service', calls: 5, failed: 0, tin: 500, tout: 25, no_usage: 2 },
+      { ladder: 'deepseek:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
       { ladder: 'free-ladder', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
       { ladder: 'deepseek:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
     ],
     depthRows: [
       { ladder: 'deepseek', depth: 3, calls: 1 },
       { ladder: 'deepseek', depth: 1, calls: 9 },
+      { ladder: 'deepseek:build', depth: 1, calls: 7 },
       { ladder: 'service', depth: 1, calls: 5 },
       { ladder: 'free-ladder', depth: 2, calls: 2 },
       { ladder: 'free-ladder', depth: 1, calls: 1 },
@@ -63,21 +65,22 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   assert.ok(Date.now() - b.since_ms <= 3_600_000 + 5_000, 'since covers ~1h');
   assert.ok(b.generated_ms <= Date.now() + 5_000);
 
-  // aliases merged: service → deepseek, free-ladder → free; role suffix kept as its own line
+  // aliases merged: service → deepseek, free-ladder → free; the default role
+  // (deepseek:build) collapses into 'deepseek'; a non-default role stays separate.
   const names = b.ladders.map(l => l.ladder);
   assert.deepEqual(names.sort(), ['deepseek', 'deepseek:review', 'free']);
   const ds = b.ladders.find(l => l.ladder === 'deepseek');
-  assert.equal(ds.calls, 15, 'service merged into deepseek');
+  assert.equal(ds.calls, 22, 'service + deepseek:build merged into deepseek');
   assert.equal(ds.failed, 1);
-  assert.equal(ds.tokens_in, 1500);
+  assert.equal(ds.tokens_in, 2200);
   assert.equal(ds.no_usage, 2);
-  assert.deepEqual(ds.depth, [{ depth: 1, calls: 14 }, { depth: 3, calls: 1 }], 'depth sorted asc');
+  assert.deepEqual(ds.depth, [{ depth: 1, calls: 21 }, { depth: 3, calls: 1 }], 'depth sorted asc, per-bucket summed');
 
   const free = b.ladders.find(l => l.ladder === 'free');
   assert.equal(free.calls, 3);
   assert.deepEqual(free.depth, [{ depth: 1, calls: 1 }, { depth: 2, calls: 2 }]);
 
-  assert.deepEqual(b.totals, { calls: 20, failed: 4, tokens_in: 1700, tokens_out: 85, no_usage: 5 });
+  assert.deepEqual(b.totals, { calls: 27, failed: 4, tokens_in: 2400, tokens_out: 120, no_usage: 5 });
   // ladders sorted by calls desc
   assert.equal(b.ladders[0].ladder, 'deepseek');
 });
