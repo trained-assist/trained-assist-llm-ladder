@@ -89,9 +89,11 @@ Rungs are tried top-down:
   prompt=97, max_tokens=1500)` in prod → content empty → chronic guard failures), so only those
   rungs get the higher floor. The list is measured, not guessed: every rung of
   `config/ladders.json` was pinned through the live worker (`ladder_rung`) and its
-  `usage.completion_tokens_details.reasoning_tokens` read — 19 of 21 unique rungs reason;
-  `openrouter/google/gemini-2.5-flash-lite` reads 0 and stays at 1500, `ling-3.0-flash-fin:free` is
-  a dead rung (no data). The #34 guard diagnostic prints the floor that actually went upstream.
+  `usage.completion_tokens_details.reasoning_tokens` read — 24 of 26 unique rungs reason,
+  including the four zen tail rungs of `free` (measured 2026-09-30 through the relay, #42:
+  17/15/255/43 reasoning_tokens); `openrouter/google/gemini-2.5-flash-lite` reads 0 and stays at
+  1500, `ling-3.0-flash-fin:free` is a dead rung (no data). The #34 guard diagnostic prints the
+  floor that actually went upstream.
 
 State lives in one global Durable Object (`LadderState`) — strongly consistent across callers.
 
