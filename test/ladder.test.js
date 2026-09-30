@@ -7,6 +7,7 @@ import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } f
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.deepseek.build;
+const FREE = config.ladders.free.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 
@@ -32,14 +33,10 @@ const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
 const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
 const DIAG_CFG = { ...config, ladders: { ...config.ladders, deepseek: { build: [DIAG_REASONING, DIAG_SECOND] } } };
 
-test('config: five tiers — Go free → zen free → OpenRouter :free ×6 → Go subscription → paid tail (#36)', () => {
+test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscription → paid tail (#36, zen moved to free #42)', () => {
   assert.deepEqual(LADDER, [
     'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
-    'opencode-zen/mimo-v2.6-flash-free',
-    'opencode-zen/mimo-v2.5-free',
-    'opencode-zen/big-pickle',
-    'opencode-zen/nemotron-3.5-lightning-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
@@ -52,15 +49,51 @@ test('config: five tiers — Go free → zen free → OpenRouter :free ×6 → G
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ]);
+  assert.ok(LADDER.every(m => !m.startsWith('opencode-zen/')), 'zen rungs left deepseek for free (#42)');
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) {
     assert.deepEqual(config.ladders.deepseek[role], LADDER, role);
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 14, 'paid OpenRouter only after the free tiers and Go subscription');
+  assert.ok(firstPaid === 10, 'paid OpenRouter only after the free tiers and Go subscription');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
-  assert.ok(firstGoPaid === 12, 'Go subscription rungs sit after every free rung');
+  assert.ok(firstGoPaid === 8, 'Go subscription rungs sit after every free rung');
+});
+
+// #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
+// front of the 14 working rungs it would poison the main free fallback (trained-assist-agent#1899)
+// with four dead steps. This pin is what keeps zen out of deepseek and out of the free head.
+test('config: free = 14 working rungs + zen tail (#42)', () => {
+  assert.deepEqual(FREE, [
+    'opencode-go/deepseek-v4-flash',
+    'opencode-go/longcat-2.5-preview-free',
+    'opencode-go/qwen3.8-flash',
+    'opencode-go/mimo-v2.6-flash',
+    'opencode-go/deepseek-flash',
+    'opencode-go/glm-5.3-flash',
+    'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
+    'openrouter/inclusionai/ling-3.0-flash-fin:free',
+    'openrouter/inclusionai/ling-3.0-flash-sante:free',
+    'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
+    'openrouter/cohere/north-mini-code:free',
+    'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    'openrouter/poolside/laguna-xs-2.1:free',
+    'openrouter/dots-studio/dots-3-note-preview:free',
+    'opencode-zen/mimo-v2.6-flash-free',
+    'opencode-zen/mimo-v2.5-free',
+    'opencode-zen/big-pickle',
+    'opencode-zen/nemotron-3.5-lightning-free',
+  ]);
+  assert.equal(FREE.length, 18, '14 working rungs + 4 zen');
+  assert.deepEqual(FREE.slice(14), [
+    'opencode-zen/mimo-v2.6-flash-free',
+    'opencode-zen/mimo-v2.5-free',
+    'opencode-zen/big-pickle',
+    'opencode-zen/nemotron-3.5-lightning-free',
+  ], 'zen is the tail — never ahead of a working rung while the relay is 404');
+  assert.ok(FREE.slice(0, 14).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
+  assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -331,7 +364,6 @@ async function readAll(stream) {
   const r = stream.getReader(); const dec = new TextDecoder(); let out = '';
   for (;;) { const { value, done } = await r.read(); if (done) return out; out += dec.decode(value); }
 }
-const FREE = config.ladders.free.build;
 
 test('free-ladder alias resolves; stream answered by the first rung with output, bytes replayed intact', async () => {
   const calls = [];
@@ -535,17 +567,32 @@ test('zen upstreamRequest: relay URL + relay token, no OpenRouter attribution, m
   assert.equal(conv.headers['x-session-id'], 'conv-42', 'conversation id goes to the relay for ses_ derivation');
 });
 
+// #42 (owner): zen left deepseek for the free ladder TAIL, so the live deepseek walk no longer
+// contains a zen rung. The relay mechanics below are what matter here — pin them to an explicit
+// config (the DIAG_CFG pattern) instead of to LADDER[0]/LADDER[1].
+const ZEN_WALK = [
+  'opencode-go/space-bunny-free',
+  'opencode-go/longcat-2.5-preview-free',
+  'opencode-zen/mimo-v2.6-flash-free',
+  'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
+];
+const ZEN_CFG = { ...config, ladders: { ...config.ladders, deepseek: { build: ZEN_WALK } } };
+const zenGoFail = () => ({
+  [short(ZEN_WALK[0])]: () => ({ status: 500, error: 'boom' }),
+  [short(ZEN_WALK[1])]: () => ({ status: 500, error: 'boom' }),
+});
+
 test('zen rung without OPENCODE_ZEN_RELAY_TOKEN is skipped; with it the relay answers', async () => {
   // no token → hasKey filters every zen rung out: the walk goes Go → (zen absent) → OpenRouter
-  const beh = { [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }), [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }) };
+  const beh = zenGoFail();
   const noTok = [];
-  const r0 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, noTok) });
+  const r0 = await run(msg, { env, config: ZEN_CFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, noTok) });
   assert.equal(r0.model, 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'unconfigured zen → OpenRouter free tier');
   assert.ok(noTok.every(c => !c.url.includes('sslip.io')), 'no relay calls without the token');
 
   // token present → the third rung (first zen) serves after both Go-free rungs fail
   const calls = [];
-  const r1 = await run(msg, { env: zenv, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+  const r1 = await run(msg, { env: zenv, config: ZEN_CFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
   assert.equal(r1.ok, true);
   assert.equal(r1.model, 'opencode-zen/mimo-v2.6-flash-free');
   const zenCall = calls[calls.length - 1];
@@ -556,14 +603,13 @@ test('zen rung without OPENCODE_ZEN_RELAY_TOKEN is skipped; with it the relay an
 
 test('zen failures skip the rung for everyone (shared health), same as any provider', async () => {
   const beh = {
-    [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }),
-    [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }),
+    ...zenGoFail(),
     'mimo-v2.6-flash-free': () => ({ status: 429, error: 'Rate limit exceeded. Please try again later.' }),
   };
   const store = memoryStore(2);
-  const r = await run(msg, { env: zenv, config, store, fetchImpl: fakeFetch(beh, []) });
+  const r = await run(msg, { env: zenv, config: ZEN_CFG, store, fetchImpl: fakeFetch(beh, []) });
   assert.equal(r.ok, true, 'walked past the limited zen rung');
-  assert.notEqual(r.model, 'opencode-zen/mimo-v2.6-flash-free');
+  assert.equal(r.model, 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'the ladder continues past the parked zen rung');
   const h = store.state.health['opencode-zen/mimo-v2.6-flash-free'];
   assert.ok(h && h.skipUntil > Date.now(), 'the limited zen rung is parked in shared health');
 });
