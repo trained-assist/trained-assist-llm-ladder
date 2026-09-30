@@ -120,7 +120,13 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const entry = (raw) => {
         // Group the requested names by ladder: 'service'→'deepseek', 'free-ladder'→'free'
         // (config.aliases), so the digest shows one line per ladder, not per alias.
-        const ladder = config.aliases[raw] || raw;
+        // The default role is not a distinction: rungFor('deepseek:build') === rungFor('deepseek'),
+        // so 'X:build' collapses to 'X' — otherwise every default-role caller splits the
+        // ladder's numbers across two rows. Non-default roles (:review, :explore — different
+        // rung lists) stay separate.
+        const [base, role] = String(raw || '').split(':');
+        const canon = config.aliases[base] || base;
+        const ladder = !role || role === 'build' ? canon : `${canon}:${role}`;
         let e = ladders.get(ladder);
         if (!e) { e = { ladder, calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, depth: [] }; ladders.set(ladder, e); }
         return e;
