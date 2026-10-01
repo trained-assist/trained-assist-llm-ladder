@@ -72,6 +72,13 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   right now, so zen may not be moved ahead of the working rungs — it would break the main free
   fallback (trained-assist-agent#1899) with four dead steps; revisit the order once the relay is up.
 
+- **`conversations`** — candidate-message writing from trained-assist-hh-skill
+  (`src/conversation-generation.js`, owner 2026-10-01): `openrouter/google/gemini-3.1-flash-lite-preview`
+  (first: newer and cheaper than `gemini-2.5-flash`, $0.25/$1.50 vs $0.30/$2.50) →
+  `openrouter/google/gemini-2.5-flash` → `opencode-go/mimo-v2.6-flash`. Model swaps happen here
+  (or per-call via `ladder_rung` for A/B and bench pins); the last N question/answer exchanges
+  are recorded JSONL on the hh-skill side for later benching.
+
 Rungs are tried top-down:
 
 - **Model health** — a failing rung is skipped for everyone: transient faults back off per model
@@ -153,6 +160,9 @@ Clients:
   legacy alias of `service` — no agent change needed, issue #49); the only implementation, no
   in-process copy.
 - `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder`), token via org secret `LLM_LADDER_TOKEN`.
+- `trained-assist-hh-skill` `src/conversation-generation.js` — candidate-message writing
+  (`conversations` ladder), ATS evaluation (`free-ladder`), funnel planner (`service`); token via
+  `LLM_LADDER_TOKEN` / `$AGENT_TOKENS_DIR/llm-ladder/token`.
 - opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free-ladder`.
 
 ## Development
