@@ -8,6 +8,7 @@ import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } f
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.service.build; // primary key renamed in #49; 'deepseek' stays a legacy alias
 const FREE = config.ladders.free.build;
+const CONVERSATIONS = config.ladders.conversations.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 
@@ -478,6 +479,36 @@ test('config: research is split by role — Go reads first, paid Gemini tail (ow
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
+});
+
+test('config: conversations = hh-skill writing — gemini-3.1-flash-lite-preview first (owner 2026-10-01)', () => {
+  const expected = [
+    'openrouter/google/gemini-3.1-flash-lite-preview',
+    'openrouter/google/gemini-2.5-flash',
+    'opencode-go/mimo-v2.6-flash',
+  ];
+  assert.deepEqual(CONVERSATIONS, expected);
+  assert.deepEqual(config.ladders.conversations, { build: expected }, 'conversations is the build-role ladder');
+});
+
+test('ladder: conversations walks top-down — 3.1-flash-lite-preview answers, 2.5-flash only on its failure', async () => {
+  const calls = [];
+  const beh = { [short(CONVERSATIONS[0])]: () => ({ status: 500, error: 'boom' }) };
+  const r = await run({ model: 'conversations', messages: [{ role: 'user', content: 'hi' }] },
+    { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, CONVERSATIONS[1]);
+  // upstream sees the provider prefix stripped (openrouter/ is routing, not part of the id)
+  assert.deepEqual(calls.map(c => c.model), [short(CONVERSATIONS[0]), short(CONVERSATIONS[1])]);
+});
+
+test('ladder: conversations ladder_rung pins the requested model without failover (model switch / bench)', async () => {
+  const calls = [];
+  const r = await run({ model: 'conversations', messages: [{ role: 'user', content: 'hi' }] },
+    { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls), pinRung: CONVERSATIONS[1] });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, CONVERSATIONS[1]);
+  assert.equal(calls.length, 1, 'pinned rung, no walk');
 });
 
 // Incident 2026-09-29: two concurrent calls both started on key 0; A hit the weekly limit and
