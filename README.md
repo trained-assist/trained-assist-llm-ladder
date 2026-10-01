@@ -11,20 +11,26 @@ Live: `https://llm-ladder.trainedassist.store`
 
 - **`service`** (renamed from `deepseek` in issue #49 — the legacy alias `deepseek` keeps
   resolving, so no client changes; the agent keeps sending it) — small service calls; owner
-  decision 2026-09-30 (issue #36), same for every role — five tiers, free first. Owner
-  2026-09-30 (issue #42): the four zen rungs moved out of this ladder — zen lives in `free` only:
+  decision 2026-10-02 (issue #67): **Pareto-first**, same for every role — the best model by
+  bench opens, the eight free rungs move into the tail right before the paid one (so a Go
+  weekly-limit incident still lands on free before any money is spent, #36 economics kept) —
+  a default call no longer opens on a weak free model. Free-first window that #67 closes:
+  2026-09-30T15:16Z (#39) → 2026-10-02 (#67 deploy); free rungs first entered the default
+  ladder 2026-09-30T11:07Z (#27). Owner 2026-09-30 (issue #42): the four zen rungs live in
+  `free` only:
 
-1. `opencode-go/space-bunny-free` — Go free tier, **Unlimited** (limited time); keeps working
+1. `opencode-go/mimo-v2.6-flash` — Go **subscription**, best by Pareto (τ²-bench 76.6%;
+   «мимо норм»), the same starting rung as `research` and `doctor`
+2. `opencode-go/space-bunny-free` — Go free tier, **Unlimited** (limited time); keeps working
    after the Go usage limit, so a weekly-limit incident stops here
-2. `opencode-go/longcat-2.5-preview-free` — Go free tier, Unlimited (limited time), zero-retention
-3. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
-4. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
-5. `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter free, strongest by bench
+3. `opencode-go/longcat-2.5-preview-free` — Go free tier, Unlimited (limited time), zero-retention
+4. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
+5. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
+6. `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter free, strongest by bench
    (coding 49.3; flaky some hours — health-skip walks past it)
-6. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
-7. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
-8. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
-9. `opencode-go/mimo-v2.6-flash` — Go **subscription** starts here
+7. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
+8. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
+9. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
 10. `openrouter/inclusionai/ling-3.0-flash` — paid tail starts here ($0.021/$0.063 per M, live
     OpenRouter price 2026-09-30; fastest paid rung: 1–4s and judge q2 in the continuous bench)
 11. `openrouter/xiaomi/mimo-v2.6-flash` — paid, second vendor ($0.14/$0.28; owner: «мимо норм»)
