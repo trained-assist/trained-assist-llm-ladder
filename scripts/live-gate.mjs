@@ -32,9 +32,13 @@ if (!token) {
 }
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
+// Same resolution the worker does (rungsFor): a legacy name ('deepseek') must find its ladder
+// here too, otherwise the gate skips instead of checking the very alias production callers send (#49).
+const aliasTarget = config.aliases && config.aliases[LADDER];
+const resolved = aliasTarget && config.ladders[aliasTarget] ? aliasTarget : LADDER;
 const rungs = process.env.LADDER_GATE_RUNGS
   ? process.env.LADDER_GATE_RUNGS.trim().split(/\s+/)
-  : config.ladders[LADDER]?.[ROLE];
+  : config.ladders[resolved]?.[ROLE];
 if (!rungs || !rungs.length) {
   console.error(`GATE SKIP: no rungs for ${LADDER}:${ROLE} and no LADDER_GATE_RUNGS`);
   process.exit(2);
