@@ -2,6 +2,8 @@
 // (OpenCode Go → paid OpenRouter last) for small service LLM calls across trained-assist repos.
 //
 //   GET  /health                 liveness + ladder names (no auth)
+//   GET  /pool/health            pool receiver liveness, {service:"pool",ok:true} (no auth)
+//   POST /pool/trigger           runs-pool dispatch, Bearer POOL_TRIGGER_TOKEN, body ≤ 8 KB (own token)
 //   GET  /v1/models              ladders as model ids (auth)
 //   GET  /v1/state               model health + key rotation snapshot (auth)
 //   POST /v1/state/reset-keys    unpark all Go keys + Go rungs (auth, ops lever)

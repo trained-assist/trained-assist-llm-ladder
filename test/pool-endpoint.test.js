@@ -1,0 +1,157 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { handle } from '../src/handler.js';
+
+const ENV = { POOL_TRIGGER_TOKEN: 'pool-tok', GITHUB_AI_AGENT_RUNS_POOL: 'ghp_test' };
+
+// Mock of the outgoing dispatch to api.github.com — records url/init, answers with the
+// canned status (or throws, like AbortSignal.timeout does on a 10 s stall).
+function fakeGh({ status = 204, throws = false } = {}) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (throws) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
+    return { ok: status >= 200 && status < 300, status, json: async () => ({}), text: async () => '' };
+  };
+  return { calls, fetchImpl };
+}
+
+const post = (body, { token = 'pool-tok', env = ENV, fetchImpl } = {}) =>
+  handle(new Request('https://l.test/pool/trigger', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(token === null ? {} : { authorization: `Bearer ${token}` }) },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  }), env, { fetchImpl });
+
+test('GET /pool/health — open, no auth, no ladder token involved', async () => {
+  const r = await handle(new Request('https://l.test/pool/health'), ENV, {});
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { service: 'pool', ok: true });
+
+  // Without any env at all it still answers — liveness like /health.
+  const bare = await handle(new Request('https://l.test/pool/health'), {}, {});
+  assert.equal(bare.status, 200);
+  assert.deepEqual(await bare.json(), { service: 'pool', ok: true });
+});
+
+test('ladder gate untouched: /pool routes sit beside it, /v1 still needs LADDER_TOKEN', async () => {
+  // ENV has no LADDER_TOKEN — the pool routes answer, the ladder routes still 401.
+  const models = await handle(new Request('https://l.test/v1/models'), ENV, {});
+  assert.equal(models.status, 401);
+});
+
+test('POST /pool/trigger: secrets not set → 503 CONFIG, fetch never called', async () => {
+  const none = fakeGh();
+  const r1 = await post({ task: 'x' }, { env: {}, fetchImpl: none.fetchImpl });
+  assert.equal(r1.status, 503);
+  assert.equal((await r1.json()).error.type, 'CONFIG');
+  assert.equal(none.calls.length, 0);
+
+  const noGh = fakeGh();
+  const r2 = await post({ task: 'x' }, { env: { POOL_TRIGGER_TOKEN: 'pool-tok' }, fetchImpl: noGh.fetchImpl });
+  assert.equal(r2.status, 503);
+  assert.equal((await r2.json()).error.type, 'CONFIG');
+  assert.equal(noGh.calls.length, 0);
+});
+
+test('POST /pool/trigger: missing / wrong bearer → 401, fetch never called', async () => {
+  for (const token of [null, 'nope', 'ladder-token', 'pool-tok-']) {
+    const gh = fakeGh();
+    const r = await post({ task: 'smoke' }, { token, fetchImpl: gh.fetchImpl });
+    assert.equal(r.status, 401, `token ${JSON.stringify(token)} must be rejected`);
+    assert.equal((await r.json()).error.type, 'auth_error');
+    assert.equal(gh.calls.length, 0, 'no dispatch before auth');
+  }
+});
+
+test('POST /pool/trigger: validation — bad json / task rules / field types → 400, body → 413', async () => {
+  const cases = [
+    ['not json', 400],
+    ['[]', 400],
+    ['{"repo":"a/b"}', 400],
+    ['{"task":""}', 400],
+    ['{"task":"   "}', 400],
+    ['{"task":42}', 400],
+    ['{"task":"' + 'x'.repeat(4001) + '"}', 400],
+    ['{"task":"ok","repo":42}', 400],
+    ['{"task":"ok","profile":{}}', 400],
+    ['{"task":"ok","artifactRef":["x"]}', 400],
+    ['{"task":"ok","junk":"' + 'a'.repeat(9000) + '"}', 413],
+  ];
+  for (const [raw, expected] of cases) {
+    const gh = fakeGh();
+    const r = await post(raw, { fetchImpl: gh.fetchImpl });
+    assert.equal(r.status, expected, `body ${raw.slice(0, 40)}… → ${expected}`);
+    assert.equal(gh.calls.length, 0, 'validation happens before any dispatch');
+  }
+});
+
+test('POST /pool/trigger: 204 from GitHub → 202 {queued:true}, dispatch carries the metadata', async () => {
+  const gh = fakeGh();
+  const r = await post({ task: 'smoke', repo: 'o/n', profile: 'p', artifactRef: 'https://obj/x?X-Amz-Signature=t' }, { fetchImpl: gh.fetchImpl });
+  assert.equal(r.status, 202);
+  assert.deepEqual(await r.json(), { queued: true });
+
+  assert.equal(gh.calls.length, 1);
+  const { url, init } = gh.calls[0];
+  assert.equal(url, 'https://api.github.com/repos/vovalikessmoothy-png/ai-agent-runs-pool/dispatches');
+  assert.equal(init.method, 'POST');
+  assert.equal(init.headers.authorization, 'token ghp_test');
+  assert.equal(init.headers['content-type'], 'application/json');
+  assert.ok(init.signal instanceof AbortSignal, '10 s timeout signal attached');
+
+  const sent = JSON.parse(init.body);
+  assert.equal(sent.event_type, 'agent-task');
+  assert.equal(sent.client_payload.task, 'smoke');
+  assert.equal(sent.client_payload.repo, 'o/n');
+  assert.equal(sent.client_payload.profile, 'p');
+  assert.equal(sent.client_payload.artifactRef, 'https://obj/x?X-Amz-Signature=t', 'reference relayed as-is, never fetched');
+  assert.ok(!Number.isNaN(Date.parse(sent.client_payload.ts)), 'ts is a timestamp');
+});
+
+test('POST /pool/trigger: absent optionals are dropped from the payload; 4000-char task accepted', async () => {
+  const gh = fakeGh();
+  const r = await post({ task: 'x'.repeat(4000) }, { fetchImpl: gh.fetchImpl });
+  assert.equal(r.status, 202);
+  const { client_payload: cp } = JSON.parse(gh.calls[0].init.body);
+  assert.equal(cp.task.length, 4000);
+  assert.ok(!('repo' in cp) && !('profile' in cp) && !('artifactRef' in cp));
+});
+
+test('POST /pool/trigger: non-2xx → 502 dispatch_failed + gh_status; timeout → 502 + null', async () => {
+  const gh422 = fakeGh({ status: 422 });
+  const r1 = await post({ task: 'smoke' }, { fetchImpl: gh422.fetchImpl });
+  assert.equal(r1.status, 502);
+  assert.deepEqual(await r1.json(), { error: 'dispatch_failed', gh_status: 422 });
+
+  const gh500 = fakeGh({ status: 500 });
+  const r2 = await post({ task: 'smoke' }, { fetchImpl: gh500.fetchImpl });
+  assert.equal(r2.status, 502);
+  assert.equal((await r2.json()).gh_status, 500);
+
+  const ghTimeout = fakeGh({ throws: true });
+  const r3 = await post({ task: 'smoke' }, { fetchImpl: ghTimeout.fetchImpl });
+  assert.equal(r3.status, 502);
+  assert.deepEqual(await r3.json(), { error: 'dispatch_failed', gh_status: null });
+});
+
+test('POST /pool/trigger: log line carries metadata only — never the task text or tokens', async () => {
+  const lines = [];
+  const orig = console.log;
+  console.log = (line) => { lines.push(String(line)); };
+  try {
+    const gh = fakeGh();
+    const r = await post({ task: 'TOP-SECRET-TASK' }, { fetchImpl: gh.fetchImpl });
+    assert.equal(r.status, 202);
+    const fail = fakeGh({ status: 500 });
+    assert.equal((await post({ task: 'TOP-SECRET-TASK' }, { fetchImpl: fail.fetchImpl })).status, 502);
+  } finally {
+    console.log = orig;
+  }
+  const all = lines.join('\n');
+  assert.ok(!all.includes('TOP-SECRET-TASK'), 'task text must never reach the log');
+  assert.ok(!all.includes('pool-tok') && !all.includes('ghp_test'), 'tokens must never reach the log');
+  const ok = lines.map(l => JSON.parse(l)).find(l => l.route === 'pool/trigger' && l.ok === true);
+  assert.equal(ok.task_len, 15, 'metadata: task length logged');
+  assert.equal(ok.gh_status, 204);
+});
