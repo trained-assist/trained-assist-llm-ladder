@@ -28,14 +28,16 @@ const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
 
 // Floor/diag assertions are pinned to EXPLICIT rung ids — never to LADDER[0]: #39 reordered the
 // real deepseek ladder (space-bunny-free first) and that alone turned the previous version of
-// these tests red (#40 → CI fail). DIAG_REASONING is measured reasoning → 3000 floor; DIAG_SECOND
-// exists only so the failover half of the diag tests has a stable second rung.
+// these tests red (#40 → CI fail), and #67 reordered it again (mimo first). DIAG_REASONING is
+// measured reasoning → 3000 floor; DIAG_SECOND exists only so the failover half of the diag tests
+// has a stable second rung.
 const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
 const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
 const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } } }; // keyed by the canonical name — rungsFor resolves 'deepseek' → 'service' (#49)
 
-test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscription → paid tail (#36, zen moved to free #42)', () => {
+test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid last (#36/#42 economics kept)', () => {
   assert.deepEqual(LADDER, [
+    'opencode-go/mimo-v2.6-flash',
     'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
@@ -44,7 +46,6 @@ test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscriptio
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'opencode-go/mimo-v2.6-flash',
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ]);
@@ -54,10 +55,13 @@ test('config: five tiers — Go free → OpenRouter :free ×6 → Go subscriptio
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 9, 'paid OpenRouter only after the free tiers and Go subscription');
+  assert.ok(firstPaid === 9, 'paid OpenRouter only after Go mimo and all eight free rungs');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
-  assert.ok(firstGoPaid === 8, 'Go subscription rungs sit after every free rung');
+  assert.ok(firstGoPaid === 0, 'Pareto-first: the Go subscription rung opens the ladder (#67)');
+  const firstFree = LADDER.findIndex(m => m.endsWith('-free') || m.endsWith(':free'));
+  assert.ok(firstFree === 1 && LADDER.slice(1, 9).every(m => m.endsWith('-free') || m.endsWith(':free')),
+    'the eight free rungs sit in the tail before paid — a Go limit incident still stops there (#36)');
 });
 
 // #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
@@ -265,7 +269,7 @@ test('spare key answers a non-key failure → the call STAYS on the same Go rung
   const calls2 = [];
   const r2 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh2, calls2) });
   assert.equal(r2.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'exactly one probe per call');
-  assert.equal(r2.model, LADDER.find(m => m.startsWith('openrouter/')), 'spare already used → the ladder moves on');
+  assert.equal(r2.model, LADDER[2], 'spare already used → the ladder moves on to the next rung (no second probe)');
 });
 
 test('context overflow on a Go rung does NOT probe the spare key — the key cannot change it', async () => {
