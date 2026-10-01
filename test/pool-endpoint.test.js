@@ -90,7 +90,7 @@ test('POST /pool/trigger: 204 from GitHub → 202 {queued:true}, dispatch carrie
   const gh = fakeGh();
   const r = await post({ task: 'smoke', repo: 'o/n', profile: 'p', artifactRef: 'https://obj/x?X-Amz-Signature=t' }, { fetchImpl: gh.fetchImpl });
   assert.equal(r.status, 202);
-  assert.deepEqual(await r.json(), { queued: true });
+  assert.deepEqual(await r.json(), { queued: true, location: '' });
 
   assert.equal(gh.calls.length, 1);
   const { url, init } = gh.calls[0];
@@ -106,6 +106,7 @@ test('POST /pool/trigger: 204 from GitHub → 202 {queued:true}, dispatch carrie
   assert.equal(sent.client_payload.repo, 'o/n');
   assert.equal(sent.client_payload.profile, 'p');
   assert.equal(sent.client_payload.artifactRef, 'https://obj/x?X-Amz-Signature=t', 'reference relayed as-is, never fetched');
+  assert.equal(sent.client_payload.location, '', 'location normalized to "" when absent (D4)');
   assert.ok(!Number.isNaN(Date.parse(sent.client_payload.ts)), 'ts is a timestamp');
 });
 
@@ -116,6 +117,7 @@ test('POST /pool/trigger: absent optionals are dropped from the payload; 4000-ch
   const { client_payload: cp } = JSON.parse(gh.calls[0].init.body);
   assert.equal(cp.task.length, 4000);
   assert.ok(!('repo' in cp) && !('profile' in cp) && !('artifactRef' in cp));
+  assert.equal(cp.location, '', 'location is always present in the dispatch, normalized');
 });
 
 test('POST /pool/trigger: non-2xx → 502 dispatch_failed + gh_status; timeout → 502 + null', async () => {
@@ -154,4 +156,60 @@ test('POST /pool/trigger: log line carries metadata only — never the task text
   const ok = lines.map(l => JSON.parse(l)).find(l => l.route === 'pool/trigger' && l.ok === true);
   assert.equal(ok.task_len, 15, 'metadata: task length logged');
   assert.equal(ok.gh_status, 204);
+});
+
+// ── location contract (epic ai-agent-run-api#1, Ф1 / блок D) ────────────────────────────────
+test('POST /pool/trigger: location enum — ru/eu/us accepted and marked reserved, "" and absent are our pool', async () => {
+  for (const location of ['', 'ru', 'eu', 'us']) {
+    const gh = fakeGh();
+    const r = await post({ task: 'smoke', location }, { fetchImpl: gh.fetchImpl });
+    assert.equal(r.status, 202, `location=${JSON.stringify(location)} must be accepted`);
+    const body = await r.json();
+    assert.equal(body.queued, true);
+    assert.equal(body.location, location);
+    if (location === '') assert.ok(!('reserved' in body), 'empty location is not reserved');
+    else assert.equal(body.reserved, true, `${location} must be reserved`);
+
+    const cp = JSON.parse(gh.calls[0].init.body).client_payload;
+    assert.equal(cp.location, location, 'location relayed in the dispatch payload');
+  }
+});
+
+test('POST /pool/trigger: location absent == empty (D4)', async () => {
+  const gh = fakeGh();
+  const withField = await post({ task: 'smoke', location: '' }, { fetchImpl: gh.fetchImpl });
+  const withoutField = await post({ task: 'smoke' }, { fetchImpl: gh.fetchImpl });
+  assert.equal(withField.status, 202);
+  assert.equal(withoutField.status, 202);
+  assert.deepEqual(await withField.json(), await withoutField.json(), 'D4: missing field and "" must answer identically');
+  const cpA = JSON.parse(gh.calls[0].init.body).client_payload;
+  const cpB = JSON.parse(gh.calls[1].init.body).client_payload;
+  assert.equal(cpA.location, cpB.location, 'dispatch payloads equal too');
+});
+
+test('POST /pool/trigger: invalid location → 400 naming the field, no dispatch (D3)', async () => {
+  for (const bad of ['xxx', 'RU', 'ru,eu', '1', 'asia', 'us west', 'ru ', null, 42, ['ru'], {}]) {
+    const gh = fakeGh();
+    const r = await post({ task: 'smoke', location: bad }, { fetchImpl: gh.fetchImpl });
+    assert.equal(r.status, 400, `location=${JSON.stringify(bad)} must be 400`);
+    const text = JSON.stringify(await r.json());
+    assert.match(text, /location/i, `error must name the field (got ${text})`);
+    assert.equal(gh.calls.length, 0, 'validation happens before any dispatch');
+  }
+});
+
+test('POST /pool/trigger: log carries location metadata — still never the task text', async () => {
+  const lines = [];
+  const orig = console.log;
+  console.log = (line) => { lines.push(String(line)); };
+  try {
+    const gh = fakeGh();
+    assert.equal((await post({ task: 'TOP-SECRET-TASK', location: 'ru' }, { fetchImpl: gh.fetchImpl })).status, 202);
+  } finally {
+    console.log = orig;
+  }
+  const all = lines.join('\n');
+  assert.ok(!all.includes('TOP-SECRET-TASK'), 'task text must never reach the log');
+  const ok = lines.map((l) => JSON.parse(l)).find((l) => l.route === 'pool/trigger' && l.ok === true);
+  assert.equal(ok.location, 'ru', 'location is metadata and is logged');
 });

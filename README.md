@@ -175,20 +175,26 @@ dispatch («ГБ всегда presigned-прямым путём»).
 
 | Method | Path | Auth | |
 |---|---|---|---|
-| POST | `/pool/trigger` | `Bearer $POOL_TRIGGER_TOKEN` (own token, timing-safe compare — not `LADDER_TOKEN`) | body ≤ 8 KB → GitHub `repository_dispatch` → `202 {queued:true}` |
+| POST | `/pool/trigger` | `Bearer $POOL_TRIGGER_TOKEN` (own token, timing-safe compare — not `LADDER_TOKEN`) | body ≤ 8 KB → GitHub `repository_dispatch` → `202 {queued:true, location, reserved?}` |
 | GET | `/pool/health` | none | `{service:"pool", ok:true}` |
 
 Nothing else under `/pool/*` exists yet (`status` — later, owner's call).
 
-`POST /pool/trigger` body: `{"task": "<required, ≤4000 chars>", "repo": "owner/name", "profile": "...", "artifactRef": "..."}` —
-the last three are optional plain strings, forwarded as-is (unknown body keys are ignored).
-Responses: `202 {queued:true}` once GitHub accepts the dispatch (outgoing cap 10 s);
+`POST /pool/trigger` body: `{"task": "<required, ≤4000 chars>", "repo": "owner/name", "profile": "...", "artifactRef": "...", "location": ""}` —
+`repo`/`profile`/`artifactRef` are optional plain strings forwarded as-is (unknown body keys are ignored).
+
+`location` (epic ai-agent-run-api#1, Ф1) is an enum: `""` | `ru` | `eu` | `us`. Absent == `""`.
+`""` = our pool (runs normally); `ru`/`eu`/`us` are reserved for future regional pools — the dispatch
+still goes out (the receiver records `location_reserved` and does not run), and the response carries
+`reserved: true`. Anything else → `400` naming the field `location`, before any dispatch.
+
+Responses: `202 {queued:true, location, reserved?}` once GitHub accepts the dispatch (outgoing cap 10 s);
 `502 {error:"dispatch_failed", gh_status}` on a non-2xx/timeout (`gh_status: null` on timeout);
 `401` missing/wrong bearer; `413` body > 8 KB; `400` validation;
 `503 {error:{type:"CONFIG"}}` while a secret is not set.
 
 The dispatch goes to `vovalikessmoothy-png/ai-agent-runs-pool` as
-`{event_type: "agent-task", client_payload: {task, repo, profile, artifactRef, ts}}`, where
+`{event_type: "agent-task", client_payload: {task, repo, profile, artifactRef, location, ts}}`, where
 `.github/workflows/agent-task.yml` picks it up. Worker logs carry metadata only — task length and
 statuses, never the task text or any token.
 
@@ -199,7 +205,17 @@ Secrets: GCP Secret Manager is the source of truth (`POOL_TRIGGER_TOKEN`,
 curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
   -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
   -d '{"task":"smoke","repo":"trained-assist/ai-agent-runner"}'
-# → {"queued":true}
+# → {"queued":true,"location":""}
+
+curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
+  -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"task":"smoke","location":"ru"}'
+# → {"queued":true,"location":"ru","reserved":true}   (региональный пул ещё не подключён)
+
+curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
+  -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"task":"smoke","location":"mars"}'
+# → 400 {"error":{"message":"location: expected one of \"\", \"ru\", \"eu\", \"us\", got \"mars\"", ...}}
 
 curl -s https://llm-ladder.trainedassist.store/pool/health
 # → {"service":"pool","ok":true}
