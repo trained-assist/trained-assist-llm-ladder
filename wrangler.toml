@@ -28,4 +28,5 @@ binding = "LADDER_TRACE_DB"
 database_name = "trained-assist-llm-ladder-trace"
 database_id = "00000000-0000-0000-0000-000000000000"
 
-# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY
+# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY,
+# OPENCODE_ZEN_RELAY_TOKEN, POOL_TRIGGER_TOKEN, GITHUB_AI_AGENT_RUNS_POOL
