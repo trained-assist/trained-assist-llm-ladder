@@ -155,6 +155,46 @@ Clients:
 - `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder`), token via org secret `LLM_LADDER_TOKEN`.
 - opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free-ladder`.
 
+## Pool endpoints
+
+Control-plane tail for the runs pool (owner decision 2026-10-01): the worker relays **metadata and
+references only** — a task string ≤ 4000 chars plus optional pointers. Big data (GB) never goes
+through this API: payloads move presigned-URL direct between the client and object storage, and
+`artifactRef` is just the *reference* — the worker never downloads it, only forwards it in the
+dispatch («ГБ всегда presigned-прямым путём»).
+
+| Method | Path | Auth | |
+|---|---|---|---|
+| POST | `/pool/trigger` | `Bearer $POOL_TRIGGER_TOKEN` (own token, timing-safe compare — not `LADDER_TOKEN`) | body ≤ 8 KB → GitHub `repository_dispatch` → `202 {queued:true}` |
+| GET | `/pool/health` | none | `{service:"pool", ok:true}` |
+
+Nothing else under `/pool/*` exists yet (`status` — later, owner's call).
+
+`POST /pool/trigger` body: `{"task": "<required, ≤4000 chars>", "repo": "owner/name", "profile": "...", "artifactRef": "..."}` —
+the last three are optional plain strings, forwarded as-is (unknown body keys are ignored).
+Responses: `202 {queued:true}` once GitHub accepts the dispatch (outgoing cap 10 s);
+`502 {error:"dispatch_failed", gh_status}` on a non-2xx/timeout (`gh_status: null` on timeout);
+`401` missing/wrong bearer; `413` body > 8 KB; `400` validation;
+`503 {error:{type:"CONFIG"}}` while a secret is not set.
+
+The dispatch goes to `vovalikessmoothy-png/ai-agent-runs-pool` as
+`{event_type: "agent-task", client_payload: {task, repo, profile, artifactRef, ts}}`, where
+`.github/workflows/agent-task.yml` picks it up. Worker logs carry metadata only — task length and
+statuses, never the task text or any token.
+
+Secrets: GCP Secret Manager is the source of truth (`POOL_TRIGGER_TOKEN`,
+`GITHUB_AI_AGENT_RUNS_POOL`), mirrored into the worker with `wrangler secret put` — never in git.
+
+```bash
+curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
+  -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"task":"smoke","repo":"trained-assist/ai-agent-runner"}'
+# → {"queued":true}
+
+curl -s https://llm-ladder.trainedassist.store/pool/health
+# → {"service":"pool","ok":true}
+```
+
 ## Development
 
 ```bash
@@ -177,7 +217,8 @@ the token can call the API; repo access (the repo is public) grants nothing.
 
 Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
 `OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;
-without it every `opencode-zen/` rung is filtered out as keyless).
+without it every `opencode-zen/` rung is filtered out as keyless), plus `POOL_TRIGGER_TOKEN` and
+`GITHUB_AI_AGENT_RUNS_POOL` for `/pool/trigger` (both sourced from GCP Secret Manager).
 Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
 `CF_ACCOUNT_ID`).
 

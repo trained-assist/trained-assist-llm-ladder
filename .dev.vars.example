@@ -9,3 +9,7 @@ LADDER_TOKEN=local-dev
 # Upstream keys — copy from the worker secrets (wrangler secret list / your password manager).
 OPENCODE_GO_API_KEYS=oc_xxx,oc_yyy
 OPENROUTER_API_KEY=sk-or-xxx
+# Pool endpoints (/pool/trigger): its own bearer + the GitHub dispatch token. Missing either
+# locally → 503 CONFIG, same as in prod.
+POOL_TRIGGER_TOKEN=local-pool
+GITHUB_AI_AGENT_RUNS_POOL=ghp_xxx
