@@ -122,11 +122,15 @@ const POOL_DISPATCH_URL = 'https://api.github.com/repos/vovalikessmoothy-png/ai-
 const POOL_DISPATCH_TIMEOUT_MS = 10_000;
 const POOL_BODY_MAX_BYTES = 8 * 1024;
 const POOL_TASK_MAX_CHARS = 4000;
+// location (epic ai-agent-run-api#1, Ф1): "" = наш пул; ru/eu/us зарезервированы под
+// региональные пулы (вне скоупа) — принимаются, но помечаются reserved и не исполняются.
+const POOL_LOCATIONS = ['', 'ru', 'eu', 'us'];
+const POOL_RESERVED_LOCATIONS = new Set(['ru', 'eu', 'us']);
 
 // POST /pool/trigger — own token (POOL_TRIGGER_TOKEN, independent from LADDER_TOKEN),
 // timing-safe compare; env not set → 503 CONFIG. Body ≤ 8 KB → one GitHub
-// repository_dispatch (10 s cap) → 202 {queued:true}. Logs metadata only (task length,
-// statuses) — never the task text or any token.
+// repository_dispatch (10 s cap) → 202 {queued:true, location}. Logs metadata only (task
+// length, location, statuses) — never the task text or any token.
 async function poolTrigger(request, env, fetchImpl) {
   if (!env.POOL_TRIGGER_TOKEN || !env.GITHUB_AI_AGENT_RUNS_POOL) {
     return oaError(503, 'pool trigger not configured', 'CONFIG');
@@ -142,14 +146,23 @@ async function poolTrigger(request, env, fetchImpl) {
   let body;
   try { body = JSON.parse(raw); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) return oaError(400, 'json object required', 'invalid_request_error');
-  const { task, repo, profile, artifactRef } = body;
+  const { task, repo, profile, artifactRef, location } = body;
   if (typeof task !== 'string' || !task.trim()) return oaError(400, 'task required', 'invalid_request_error');
   if (task.length > POOL_TASK_MAX_CHARS) return oaError(400, `task too long (max ${POOL_TASK_MAX_CHARS} chars)`, 'invalid_request_error');
   for (const [field, value] of Object.entries({ repo, profile, artifactRef })) {
     if (value !== undefined && typeof value !== 'string') return oaError(400, `${field} must be a string`, 'invalid_request_error');
   }
+  // absent field == empty location (D4); anything else outside the enum → 400 naming the field (D3)
+  if (location !== undefined && typeof location !== 'string') {
+    return oaError(400, 'location must be a string (one of "", "ru", "eu", "us")', 'invalid_request_error');
+  }
+  const loc = location === undefined ? '' : location;
+  if (!POOL_LOCATIONS.includes(loc)) {
+    return oaError(400, `location: expected one of "", "ru", "eu", "us", got ${JSON.stringify(String(loc).slice(0, 50))}`, 'invalid_request_error');
+  }
+  const reserved = POOL_RESERVED_LOCATIONS.has(loc);
   const started = Date.now();
-  const meta = { route: 'pool/trigger', task_len: task.length };
+  const meta = { route: 'pool/trigger', task_len: task.length, location: loc };
   let res;
   try {
     res = await fetchImpl(POOL_DISPATCH_URL, {
@@ -161,7 +174,8 @@ async function poolTrigger(request, env, fetchImpl) {
         'user-agent': 'trained-assist-llm-ladder',
       },
       // undefined optionals are dropped by JSON.stringify; artifactRef rides along untouched.
-      body: JSON.stringify({ event_type: 'agent-task', client_payload: { task, repo, profile, artifactRef, ts: new Date().toISOString() } }),
+      // location is always present (normalized) so the receiver never has to guess D4.
+      body: JSON.stringify({ event_type: 'agent-task', client_payload: { task, repo, profile, artifactRef, location: loc, ts: new Date().toISOString() } }),
       signal: AbortSignal.timeout(POOL_DISPATCH_TIMEOUT_MS),
     });
   } catch (e) {
@@ -170,7 +184,7 @@ async function poolTrigger(request, env, fetchImpl) {
   }
   console.log(JSON.stringify({ ...meta, ok: res.ok, gh_status: res.status, ms: Date.now() - started }));
   if (!res.ok) return json(502, { error: 'dispatch_failed', gh_status: res.status });
-  return json(202, { queued: true });
+  return json(202, { queued: true, location: loc, ...(reserved ? { reserved: true } : {}) });
 }
 
 export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
