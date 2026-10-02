@@ -99,8 +99,9 @@ Rungs are tried top-down:
   NON-key reason (timeout, empty answer, 500) gets ONE spare-key probe per call before the ladder
   leaves Go for paid OpenRouter — a silently throttled key looks exactly like a slow model, and
   staying on Go costs nothing. Context/config rejections never probe (the key cannot change them).
-  When both keys are parked, every Go rung is skipped until the earliest key heals, so the ladder
-  serves OpenRouter and returns to Go by itself. Every attempt entry carries the pool `key` index
+  When every key is parked, only the PAID Go rungs are skipped until the earliest key heals —
+  the free Go rungs (`*-free`) keep serving, they don't eat the allowance (#69) — so the ladder
+  rides the incident out on free Go → OpenRouter :free → paid and returns to Go by itself. Every attempt entry carries the pool `key` index
   (`ok` / `error` / `key-rotated` / `key-probe`), so `/v1/state` and the Workers Observability
   logs show which key served. 503 / Bad Request never burn a key.
 - **Guard** — empty content, or non-JSON when `response_format: json_object`, fails the rung.

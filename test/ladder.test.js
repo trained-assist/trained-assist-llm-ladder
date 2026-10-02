@@ -289,19 +289,27 @@ test('a WEEKLY Go allowance parks the key for hours; a plain rate-limit hit keep
   assert.equal(keyFaultOf('HTTP 401: invalid api key').dead, true);
 });
 
-test('both keys limited → all Go rungs parked, OpenRouter answers, Go comes back after the window', async () => {
+// #69: the weekly limit must NOT take the free Go rungs down with the paid ones — they don't
+// consume the allowance, and the incident is exactly when the free head has to keep serving.
+test('every key limited → paid Go rungs parked, free Go rungs keep serving (#69)', async () => {
   const beh = {};
-  for (const m of LADDER) if (m.startsWith('opencode-go/')) beh[short(m)] = () => ({ status: 429, error: 'usage limit' });
+  for (const m of LADDER) if (m.startsWith('opencode-go/') && !m.endsWith('-free')) beh[short(m)] = () => ({ status: 429, error: 'usage limit' });
   const store = memoryStore(2);
   const calls = [];
   const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
-  assert.equal(r.model, LADDER.find(m => m.startsWith('openrouter/')));
-  assert.equal(calls.filter(c => c.url.includes('opencode.ai')).length, 2, 'first Go rung once per key, rest parked');
-  // next call goes straight to OpenRouter
+  // service = [mimo, space-bunny, longcat, OR…]: mimo burns both keys → paid Go parked,
+  // yet the free Go rung right behind it answers in the SAME call
+  assert.equal(r.model, 'opencode-go/space-bunny-free', 'free Go serves while every key is limited');
+  assert.ok(store.state.health['opencode-go/mimo-v2.6-flash'], 'paid Go rung is parked');
+  assert.equal(store.state.health['opencode-go/space-bunny-free'], undefined, 'free Go rung is never parked');
+  assert.deepEqual(calls.filter(c => c.url.includes('opencode.ai')).map(c => c.model),
+    ['mimo-v2.6-flash', 'mimo-v2.6-flash', 'space-bunny-free'],
+    'paid rung once per key, then the free rung on the last key');
+  // next call: paid Go still parked → the free rung is the head that answers
   const calls2 = [];
-  await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls2) });
-  assert.ok(calls2[0].url.includes('openrouter.ai'));
-  // window lapses → Go again, without any manual step
+  const r2 = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls2) });
+  assert.equal(r2.model, 'opencode-go/space-bunny-free');
+  // window lapses → the normal head (paid Go) is back, without any manual step
   for (const m of Object.keys(store.state.health)) store.state.health[m].skipUntil = Date.now() - 1;
   for (const k of Object.keys(store.state.keys.exhausted)) store.state.keys.exhausted[k] = Date.now() - 1;
   const calls3 = [];
