@@ -1,5 +1,24 @@
 # Go Key Management
 
+## Key format — the one that matters
+
+Go keys look like `oc_sk_<43 chars>` (51 total, e.g. `oc_sk_60d00c482dc4__YpLl…`).
+A **`os_sk_` prefix is a typo and the key will be rejected with
+`401 AuthError: Invalid API key`** — one letter of difference, and the only
+symptom is every Go rung failing while the paid OpenRouter tail silently takes
+the load (incident #86, 2026-10-02).
+
+The same key also authenticates against `https://opencode.ai/zen/v1/*` (Zen and
+Go share one account key). The difference is billing, not auth:
+
+- **Go** — subscription with $-based per-model allowances: monthly limit per
+  model, 5-hour window 20%, weekly 50%, monthly 100% (docs: opencode.ai/docs/go).
+  A weekly exhaustion arrives as `429 {"error":{"type":"GoUsageLimitError"},"metadata":{"workspace":"wrk_…","limitName":"weekly"}}`.
+  `*-free` models are Unlimited and never consume it.
+- **Zen** — pay-as-you-go; a valid key with an empty balance returns
+  `402 Insufficient account funds`, not 401. Zen free models are anonymous
+  (`Bearer public` via the relay) — keys are irrelevant there.
+
 ## Where keys live
 
 Go API keys are stored as a Cloudflare Worker secret:
@@ -12,6 +31,21 @@ The secret name is `OPENCODE_GO_API_KEYS`. It contains a comma-separated list of
 OpenCode Go API keys (the pool). The first key (index 0) is the primary; the
 worker rotates through the pool on key-level faults (usage limit, 429, rejected
 key).
+
+Limits are shared per workspace (`workspace: wrk_…` / `org_…` in the error
+metadata) — three keys of one workspace are three accessors to the same
+allowance, so they all park together. A key generated in a different workspace
+gets a fresh allowance.
+
+## After replacing keys — always reset the pool state
+
+A 401 parks the key for 60 minutes. After `wrangler secret put`, unpark it or
+the pool keeps refusing the fresh key:
+
+```bash
+curl -s -X POST https://llm-ladder.trainedassist.store/v1/state/reset-keys \
+  -H "Authorization: Bearer $(cat ~/.llm-ladder-token)"
+```
 
 ## Viewing the current pool
 
