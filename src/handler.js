@@ -211,10 +211,52 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     return json(200, { object: 'list', data });
   }
 
+  // GET /v1/state
   if (request.method === 'GET' && url.pathname === '/v1/state') {
     const s = await (store || makeStore(env)).snapshot();
     s.pins = await (store || makeStore(env)).pinStats();
     return json(200, s);
+  }
+
+  // GET /v1/calls — the per-CALL trace log, the read side /v1/analytics has no counterpart for.
+  //
+  // /v1/analytics answers "how did the ladder do"; this answers "what happened to THIS request":
+  // which rungs were walked, in what order, what each one said, how long the whole thing took.
+  // Until now the only way to get that was scripts/query-trace.py from a laptop with a Cloudflare
+  // token — so a dead ladder call was unreadable for anyone but the operator holding that token.
+  //
+  // Every filter is bound (?1..?5), never interpolated: a trace id is caller-supplied. Requires at
+  // least one filter — an unfiltered read of the whole log is what the analytics endpoint is for,
+  // and it would page through rows nobody asked for. `attempts` comes back as parsed JSON so the
+  // caller does not have to re-implement the parser.
+  if (request.method === 'GET' && url.pathname === '/v1/calls') {
+    const db = env.LADDER_TRACE_DB;
+    if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+    const q = url.searchParams;
+    const since = Math.min(Number(q.get('since_ms')) || Date.now() - 24 * 3600_000, Date.now());
+    const limit = Math.min(Math.max(Number(q.get('limit')) || 20, 1), 200);
+    const trace = q.get('trace'), user = q.get('user'), chat = q.get('chat'), session = q.get('session');
+    if (!trace && !user && !chat && !session) {
+      return oaError(400, 'one of trace, user, chat, session is required', 'invalid_request_error');
+    }
+    const CALLS_SQL =
+      'SELECT ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, '
+      + 'tokens_in, tokens_out, '
+      // json_valid in SQL, not in JS: one legacy row with a non-JSON blob must not be able to
+      // throw the whole read away (same guard the two analytics queries use).
+      + "CASE WHEN attempts IS NOT NULL AND json_valid(attempts) THEN attempts ELSE NULL END AS attempts "
+      + 'FROM ladder_calls WHERE ts >= ?1 '
+      + 'AND (?2 IS NULL OR trace_id = ?2) AND (?3 IS NULL OR user_id = ?3) '
+      + 'AND (?4 IS NULL OR chat_id = ?4) AND (?5 IS NULL OR session_id = ?5) '
+      + 'ORDER BY ts DESC LIMIT ?6';
+    try {
+      const { results = [] } = await db.prepare(CALLS_SQL)
+        .bind(since, trace, user, chat, session, limit).all();
+      const calls = results.map((r) => ({ ...r, ok: !!r.ok, attempts: r.attempts ? JSON.parse(r.attempts) : null }));
+      return json(200, { calls, count: calls.length, filters: { trace, user, chat, session }, since_ms: since });
+    } catch (e) {
+      return oaError(500, `calls query failed: ${e.message}`, 'server_error');
+    }
   }
 
   // Aggregates over the D1 trace for the hourly Telegram digest (vm-telegram-monitor):
