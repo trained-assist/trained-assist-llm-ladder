@@ -15,7 +15,7 @@ qs = m.queries(since)
 print(json.dumps({k: [sql, params] for k, (sql, params) in qs.items()}))`);
   const qs = JSON.parse(out);
   assert.deepEqual(Object.keys(qs).sort(),
-    ['totals', 'ladders', 'models', 'daily', 'depth', 'errors'].sort());
+    ['totals', 'ladders', 'models', 'rungs', 'daily', 'depth', 'errors'].sort());
   for (const [name, [sql, params]] of Object.entries(qs)) {
     assert.match(sql, /\?1/, `${name} must bind ?1`);
     assert.ok(Array.isArray(params) && params.length === 1, `${name} params`);

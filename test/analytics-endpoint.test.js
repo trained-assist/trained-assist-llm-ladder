@@ -7,7 +7,7 @@ const ENV = { LADDER_TOKEN: 't' };
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
 // canned rows for that statement — routed by SQL shape (agg / depth / errors), not
 // by call order, so the queries can be reordered or extended freely.
-function fakeD1({ aggRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
+function fakeD1({ aggRows = [], rungRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
   const calls = [];
   return {
     _calls: calls,
@@ -19,6 +19,7 @@ function fakeD1({ aggRows = [], depthRows = [], errorRows = [], fail = false } =
             if (fail) throw new Error('d1 down');
             if (sql.includes('json_array_length')) return { results: depthRows };
             if (sql.includes('json_each')) return { results: errorRows };
+            if (sql.includes('model LIKE')) return { results: rungRows };
             return { results: aggRows };
           } };
         },
@@ -43,20 +44,26 @@ test('GET /v1/analytics: requires auth', async () => {
 test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', async () => {
   const d1 = fakeD1({
     aggRows: [
-      // deepseek → service (alias #49), free-ladder → free, deepseek:build → service (default role)
+      // deepseek → service (alias #49), free-ladder → cheap, deepseek:build → service (default role)
       { ladder: 'deepseek', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
       { ladder: 'service', calls: 5, failed: 0, tin: 500, tout: 25, no_usage: 2 },
       { ladder: 'deepseek:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
-      { ladder: 'free-ladder', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
+      { ladder: 'cheap', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
       { ladder: 'deepseek:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
+    ],
+    rungRows: [
+      { ladder: 'deepseek', category: 'go_sub', calls: 10, tin: 1000, tout: 50 },
+      { ladder: 'deepseek', category: 'or_free', calls: 5, tin: 200, tout: 10 },
+      { ladder: 'cheap', category: 'go_sub', calls: 3, tin: 300, tout: 15 },
+      { ladder: 'cheap', category: 'or_paid', calls: 2, tin: 150, tout: 40 },
     ],
     depthRows: [
       { ladder: 'deepseek', depth: 3, calls: 1 },
       { ladder: 'deepseek', depth: 1, calls: 9 },
       { ladder: 'deepseek:build', depth: 1, calls: 7 },
       { ladder: 'service', depth: 1, calls: 5 },
-      { ladder: 'free-ladder', depth: 2, calls: 2 },
-      { ladder: 'free-ladder', depth: 1, calls: 1 },
+      { ladder: 'cheap', depth: 2, calls: 2 },
+      { ladder: 'cheap', depth: 1, calls: 1 },
     ],
   });
   const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
@@ -67,10 +74,10 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   assert.ok(Date.now() - b.since_ms <= 3_600_000 + 5_000, 'since covers ~1h');
   assert.ok(b.generated_ms <= Date.now() + 5_000);
 
-  // aliases merged: deepseek → service (#49), free-ladder → free; the default role
+  // aliases merged: deepseek → service (#49), free-ladder → cheap; the default role
   // (deepseek:build) collapses into 'service'; a non-default role stays separate.
   const names = b.ladders.map(l => l.ladder);
-  assert.deepEqual(names.sort(), ['free', 'service', 'service:review']);
+  assert.deepEqual(names.sort(), ['cheap', 'service', 'service:review']);
   const ds = b.ladders.find(l => l.ladder === 'service');
   assert.equal(ds.calls, 22, 'deepseek + deepseek:build merged into service');
   assert.equal(ds.failed, 1);
@@ -78,9 +85,15 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   assert.equal(ds.no_usage, 2);
   assert.deepEqual(ds.depth, [{ depth: 1, calls: 21 }, { depth: 3, calls: 1 }], 'depth sorted asc, per-bucket summed');
 
-  const free = b.ladders.find(l => l.ladder === 'free');
+  const free = b.ladders.find(l => l.ladder === 'cheap');
   assert.equal(free.calls, 3);
   assert.deepEqual(free.depth, [{ depth: 1, calls: 1 }, { depth: 2, calls: 2 }]);
+  // rung-category breakdown: go_sub burns the Go weekly allowance, or_paid bills per token —
+  // the owner reads these two to size limits (#80).
+  assert.deepEqual(free.rungs, [
+    { ladder: 'cheap', category: 'go_sub', calls: 3, tokens_in: 300, tokens_out: 15 },
+    { ladder: 'cheap', category: 'or_paid', calls: 2, tokens_in: 150, tokens_out: 40 },
+  ]);
 
   assert.deepEqual(b.totals, { calls: 27, failed: 4, tokens_in: 2400, tokens_out: 120, no_usage: 5 });
   // ladders sorted by calls desc
@@ -108,17 +121,19 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 3, 'all three queries issued');
+  assert.equal(d1._calls.length, 4, 'all four queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
     assert.ok(!sql.includes(String(since)), 'must not interpolate the timestamp');
   }
   assert.match(d1._calls[0].sql, /FROM ladder_calls WHERE ts >= \?1 GROUP BY ladder/);
-  assert.match(d1._calls[1].sql, /json_array_length\(attempts\)/);
-  assert.match(d1._calls[1].sql, /json_valid\(attempts\)/);
-  assert.match(d1._calls[2].sql, /json_each\(ladder_calls\.attempts\)/);
-  assert.match(d1._calls[2].sql, /GROUP BY err/);
+  assert.match(d1._calls[1].sql, /model LIKE/, 'rung-category breakdown');
+  assert.match(d1._calls[1].sql, /GROUP BY ladder, category/);
+  assert.match(d1._calls[2].sql, /json_array_length\(attempts\)/);
+  assert.match(d1._calls[2].sql, /json_valid\(attempts\)/);
+  assert.match(d1._calls[3].sql, /json_each\(ladder_calls\.attempts\)/);
+  assert.match(d1._calls[3].sql, /GROUP BY err/);
 });
 
 test('GET /v1/analytics: empty window → zero totals, no ladders', async () => {

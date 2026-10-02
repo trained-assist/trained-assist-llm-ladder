@@ -15,6 +15,16 @@ const ANALYTICS_AGG_SQL =
   + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
   + 'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
   + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY ladder';
+const ANALYTICS_RUNGS_SQL =
+  'SELECT ladder, '
+  + "CASE WHEN model LIKE 'opencode-go/%' AND model NOT LIKE '%-free' THEN 'go_sub' "
+  + "WHEN model LIKE 'opencode-go/%-free' THEN 'go_free' "
+  + "WHEN model LIKE 'opencode-zen/%' THEN 'zen' "
+  + "WHEN model LIKE 'openrouter/%%:free' THEN 'or_free' "
+  + "WHEN model LIKE 'openrouter/%' THEN 'or_paid' "
+  + "ELSE 'other' END AS category, "
+  + 'COUNT(*) AS calls, SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 GROUP BY ladder, category ORDER BY ladder, category';
 const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
   + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
@@ -269,20 +279,20 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const since = Date.now() - hours * 3_600_000;
     try {
       const aggRows = (await db.prepare(ANALYTICS_AGG_SQL).bind(since).all()).results || [];
+      const rungRows = (await db.prepare(ANALYTICS_RUNGS_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
-      const ladders = new Map();
-      const entry = (raw) => {
-        // Group the requested names by ladder: 'deepseek'→'service', 'free-ladder'→'free'
-        // (config.aliases: deepseek → service, #49), so the digest shows one line per ladder, not per alias.
-        // The default role is not a distinction: rungFor('deepseek:build') === rungFor('deepseek'),
-        // so 'X:build' collapses to 'X' — otherwise every default-role caller splits the
-        // ladder's numbers across two rows. Non-default roles (:review, :explore — different
-        // rung lists) stay separate.
+      // Canonical ladder name: 'deepseek'→'service', 'free-ladder'→'cheap' (config.aliases),
+      // the default role 'X:build' collapses to 'X'; non-default roles (:review, :explore) stay.
+      const canonName = (raw) => {
         const [base, role] = String(raw || '').split(':');
         const canon = config.aliases[base] || base;
-        const ladder = !role || role === 'build' ? canon : `${canon}:${role}`;
+        return !role || role === 'build' ? canon : `${canon}:${role}`;
+      };
+      const ladders = new Map();
+      const entry = (raw) => {
+        const ladder = canonName(raw);
         let e = ladders.get(ladder);
         if (!e) { e = { ladder, calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, depth: [] }; ladders.set(ladder, e); }
         return e;
@@ -304,10 +314,24 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         if (hit) hit.calls += calls;
         else e.depth.push({ depth, calls });
       }
+      const rungGroups = new Map();
+      for (const r of rungRows) {
+        const ladder = canonName(r.ladder); // alias-merge rung rows the same way as agg rows
+        const key = `${ladder}|${r.category}`;
+        if (!rungGroups.has(key)) rungGroups.set(key, { ladder, category: r.category, calls: 0, tokens_in: 0, tokens_out: 0 });
+        const e = rungGroups.get(key);
+        e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_out += num(r.tout);
+      }
+      const rungsByLadder = new Map();
+      for (const [, e] of rungGroups) {
+        if (!rungsByLadder.has(e.ladder)) rungsByLadder.set(e.ladder, []);
+        rungsByLadder.get(e.ladder).push(e);
+      }
       const totals = { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0 };
       const out = [...ladders.values()].sort((a, b) => b.calls - a.calls);
       for (const e of out) {
         e.depth.sort((a, b) => a.depth - b.depth);
+        e.rungs = rungsByLadder.get(e.ladder) || [];
         for (const k of Object.keys(totals)) totals[k] += e[k];
       }
       // Top errors, merged across all ladders: normalize first (digits masked), then

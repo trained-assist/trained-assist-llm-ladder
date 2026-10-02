@@ -12,7 +12,7 @@
 // Auth: `Authorization: Bearer <LADDER_TOKEN>`. Non-streaming → a normal chat.completion whose
 // `model` is the rung that answered (also in `x-ladder-model`). stream:true → SSE relayed from
 // the chosen rung (chosen before the first token; no failover after it) — how opencode uses the
-// `free-ladder` model. Tools pass through as is. Optional body fields: ladder_timeout_ms (per
+// `cheap` model. Tools pass through as is. Optional body fields: ladder_timeout_ms (per
 // rung, non-stream), ladder_ttfb_ms (stream: first-token window), ladder_total_timeout_ms,
 // ladder_rung (benchmarks: pin one rung of the ladder, no failover).
 //

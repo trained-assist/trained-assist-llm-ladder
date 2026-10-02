@@ -39,11 +39,22 @@ def queries(since):
             'SELECT ladder, COUNT(*) AS n, SUM(1 - ok) AS failed, ROUND(AVG(ms)) AS avg_ms '
             'FROM ladder_calls WHERE ts >= ?1 GROUP BY ladder ORDER BY n DESC', [since]),
         'models': (
-            'SELECT model, COUNT(*) AS n, ROUND(AVG(ms)) AS avg_ms, '
-            'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
-            'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
-            'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 '
-            'GROUP BY model ORDER BY n DESC', [since]),
+             'SELECT model, COUNT(*) AS n, ROUND(AVG(ms)) AS avg_ms, '
+             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
+             'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
+             'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 '
+             'GROUP BY model ORDER BY n DESC', [since]),
+        'rungs': (
+             'SELECT ladder, '
+             + "CASE WHEN model LIKE 'opencode-go/%' AND model NOT LIKE '%-free' THEN 'go_sub' "
+             + "WHEN model LIKE 'opencode-go/%-free' THEN 'go_free' "
+             + "WHEN model LIKE 'opencode-zen/%' THEN 'zen' "
+             + "WHEN model LIKE 'openrouter/%%:free' THEN 'or_free' "
+             + "WHEN model LIKE 'openrouter/%' THEN 'or_paid' "
+             + "ELSE 'other' END AS category, "
+             'COUNT(*) AS calls, SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout '
+             'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 '
+             'GROUP BY ladder, category ORDER BY ladder, category', [since]),
         'daily': (
             "SELECT date(ts / 1000, 'unixepoch') AS d, COUNT(*) AS n, SUM(1 - ok) AS failed, "
             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout '
@@ -126,6 +137,9 @@ def build_report(queries_out, pricing, days, now=None):
             total_cost += cost
             cost_known = True
         models.append({**row, 'cost': cost})
+    rungs = []
+    for row in queries_out.get('rungs', []) or []:
+        rungs.append({**row})
     merged_errors = {}
     for row in queries_out['errors']:
         key = normalize_error(row['err'])
@@ -147,6 +161,7 @@ def build_report(queries_out, pricing, days, now=None):
             'est_cost_usd': total_cost if cost_known else None,
         },
         'ladders': queries_out['ladders'],
+        'rungs': rungs,
         'models': models,
         'daily': queries_out['daily'],
         'depth': queries_out['depth'],

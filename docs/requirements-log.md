@@ -6,8 +6,9 @@
 - [отклонено] muse-spark-1.3-contributor в лестнице — владелец 27.09: «беда с моделью, удаляем из очереди» (падала на обоих ключах, privacy-гейт).
 - [реализовано] Два ключа OpenCode Go с ротацией; обе на паузе → Go-ступени пропускаются до оживания ключа, потом автоматически обратно на Go.
 - [реализовано] Бэкофф по модели: у каждой ступени свой отсчёт 15с → 30с → 60с …
-- [реализовано] Вторая лестница `free` (alias `free-ladder`) — перенос недоделанного free-ladder gateway из trained-assist-agent (#1526): Go cheap → OpenRouter :free, стриминг SSE (ступень выбирается до первого токена), tools как есть, ретрай без response_format на 400.
-- [реализовано] pr-autofix (фиксер) v1.6.0 ходит в `free-ladder`, своя копия лестницы удалена; потребители (trained-assist-agent, software-engineering-playbooks) передают org-секрет `LLM_LADDER_TOKEN`.
+- [реализовано] Вторая лестница `cheap` (alias `free-ladder`) — перенос недоделанного free-ladder gateway из trained-assist-agent (#1526): Go cheap → OpenRouter :free, стриминг SSE (ступень выбирается до первого токена), tools как есть, ретрай без response_format на 400. Название `cheap` вместо `free` — ранее `free` вводил в заблуждение: первый рунг deepseek-v4-flash жрал недельный лимит Go, хотя название подразумевало $0.
+- [реализовано] pr-autofix (фиксер) v1.6.0 ходит в `cheap`, своя копия лестницы удалена; потребители (trained-assist-agent, software-engineering-playbooks) передают org-секрет `LLM_LADDER_TOKEN`.
+- [реализовано] `free` (ранее `free_100percent`) — восемь рунгов только $0, жёсткий потолок $0 — для тестов с тяжёлым токен-объёмом или повторами, где траты невозможны.
 - [реализовано] opencode как клиент `free-ladder` проверен вживую: tool call `read` + ответ, 15 с.
 - [реализовано] Из trained-assist-agent выпилены локальные копии: in-process лестница service-llm, `llm-gateway.js`, `infra/llm-edge` (домен llm.trainedassist.store снят).
 - [реализовано] Постоянный бенч: trained-assist-free-models-benchmark `scripts/ladder-bench.mjs`, каждые 6 ч, каждая ступень через `ladder_rung` + лестницы целиком → issue #3. [планируется] по нему обновлять порядок ступеней.

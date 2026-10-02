@@ -7,6 +7,7 @@ import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } f
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.service.build; // primary key renamed in #49; 'deepseek' stays a legacy alias
+const CHEAP = config.ladders.cheap.build;
 const FREE = config.ladders.free.build;
 const CONVERSATIONS = config.ladders.conversations.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
@@ -75,11 +76,11 @@ test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid las
     'the eight free rungs sit in the tail before paid — a Go limit incident still stops there (#36)');
 });
 
-// #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
-// front of the 14 working rungs it would poison the main free fallback (trained-assist-agent#1899)
-// with four dead steps. This pin is what keeps zen out of deepseek and out of the free head.
-test('config: free = 13 working rungs + zen tail (#42)', () => {
-  assert.deepEqual(FREE, [
+// #42 (owner): zen lives in the cheap ladder only — and at its TAIL: the relay answers 404, so in
+// front of the 14 working rungs it would poison the main cheap fallback (trained-assist-agent#1899)
+// with four dead steps. This pin is what keeps zen out of deepseek and out of the cheap head.
+test('config: cheap = 13 working rungs + zen tail (#42)', () => {
+  assert.deepEqual(CHEAP, [
     'opencode-go/deepseek-v4-flash',
     'opencode-go/longcat-2.5-preview-free',
     'opencode-go/qwen3.8-flash',
@@ -98,15 +99,15 @@ test('config: free = 13 working rungs + zen tail (#42)', () => {
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ]);
-  assert.equal(FREE.length, 17, '13 working rungs + 4 zen');
-  assert.deepEqual(FREE.slice(13), [
+  assert.equal(CHEAP.length, 17, '13 working rungs + 4 zen');
+  assert.deepEqual(CHEAP.slice(13), [
     'opencode-zen/mimo-v2.6-flash-free',
     'opencode-zen/mimo-v2.5-free',
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ], 'zen is the tail — never ahead of a working rung while the relay is 404');
-  assert.ok(FREE.slice(0, 13).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
-  assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
+  assert.ok(CHEAP.slice(0, 13).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
+  assert.deepEqual(config.ladders.cheap, { build: CHEAP }, 'cheap is the build-role ladder');
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -424,11 +425,11 @@ async function readAll(stream) {
   for (;;) { const { value, done } = await r.read(); if (done) return out; out += dec.decode(value); }
 }
 
-test('free-ladder alias resolves; stream answered by the first rung with output, bytes replayed intact', async () => {
+test('cheap alias resolves; stream answered by the first rung with output, bytes replayed intact', async () => {
   const calls = [];
-  const r = await run({ model: 'free-ladder', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
+  const r = await run({ model: 'cheap', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, FREE[0]);
+  assert.equal(r.model, CHEAP[0]);
   assert.equal(calls[0].body.stream, true);
   const text = await readAll(r.stream);
   assert.match(text, /"role":"assistant"/, 'the buffered role frame is replayed');
@@ -517,11 +518,11 @@ test('config: conversations = hh-skill writing — gemini-3.1-flash-lite-preview
 // #71 (owner 2026-10-02, уточнение №2): уровень = отдельная лестница, «нет эскалации — это не
 // задача лестницы, задача лестницы ретраи». Лестницы-уровни: build (base free ×3 + платный хвост,
 // без mimo), build advanced (mimo + платный хвост), plan/general/review = advanced-first,
-// explore = big-ctx only, picture* = гемини-стек (multimodal 1M), free_100percent = только
+// explore = big-ctx only, picture* = гемини-стек (multimodal 1M), free = только
 // бесплатное ($0-потолок для тяжёлых тестов). Два конструктора: single-model профили API
 // (service/conversations — как есть) и сборка из четырёх лестниц для opencode (профили
-// free_100percent / master / advanced).
-test('config: tier ladders — build=base, build advanced=mimo, picture gemini, free_100percent $0 (#71)', () => {
+// free / master / advanced).
+test('config: tier ladders — build=base, build advanced=mimo, picture gemini, free $0 (#71)', () => {
   const paid = [
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
@@ -559,8 +560,8 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     'openrouter/google/gemini-3.8-flash',
   ], 'picture advanced = gemini advanced (0.30/2.50 → 0.75/3.75)');
 
-  // free_100percent: потолок $0 — ни подписки, ни платного (для тестов с объёмом/повторами)
-  const f100 = config.ladders.free_100percent.build;
+  // free: потолок $0 — ни подписки, ни платного (для тестов с объёмом/повторами)
+  const f100 = config.ladders.free.build;
   assert.equal(f100.length, 8, 'eight free rungs');
   assert.ok(f100.every(m => m.endsWith('-free') || m.endsWith(':free')), 'every rung is $0');
   assert.ok(!f100.some(m => m === 'opencode-go/mimo-v2.6-flash'), 'no subscription rung');
