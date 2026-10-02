@@ -1,4 +1,14 @@
-// One chat completion walked down a named model ladder: OpenCode Go rungs first, paid OpenRouter
+// Round-robin counter for Go free-tier rungs: even though they are Unlimited
+// they share the same key pool, so cycling distributes load across accounts
+// and prevents one key from being hammered while others sit idle.
+let freeGoKeyCursor = 0;
+
+export function resetFreeGoKeyCursor() { freeGoKeyCursor = 0; }
+
+export function nextFreeGoKeyIndex(poolSize) {
+  freeGoKeyCursor = (freeGoKeyCursor + 1) % poolSize;
+  return freeGoKeyCursor;
+}
 // last. Non-streaming, for small service calls (buttons, formatting, classifiers, summaries)
 // where reliability beats everything else.
 //
@@ -111,7 +121,7 @@ export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
 
-// "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
+// "service" (legacy alias "deepseek"), "service:review" or an alias ("cheap") → rungs, null if unknown.
 export function rungsFor(config, name) {
   let [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
   if (config.aliases && config.aliases[ladderName]) ladderName = config.aliases[ladderName];
@@ -324,7 +334,7 @@ function attempt(env, model, body, keyIndex, opts) {
 
 /**
  * @param {object} body   OpenAI chat.completions body; `model` = ladder name ("service",
- *                        legacy alias "deepseek", "service:review", alias "free-ladder"). stream:true → SSE (rung chosen
+ *                        legacy alias "deepseek", "service:review", alias "cheap"). stream:true → SSE (rung chosen
  *                        before the first token); tools / tool_choice passed through as is.
  * @param {object} ctx    { env, config, store, fetchImpl, timeoutMs=20000, totalTimeoutMs, now,
  *                          pinRung, conversation, appSlug, appTitle }
@@ -420,9 +430,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
     // #69: a full-key park (weekly limit on every key) skips only the PAID Go rungs — a free
-    // Go rung keeps serving, it does not consume the allowance and must not die in the incident.
-    if (isGo && goParked && !model.endsWith('-free')) continue;
-    const left = deadline - Date.now();
+     // Go rung keeps serving, it does not consume the allowance and must not die in the incident.
+     if (isGo && goParked && !model.endsWith('-free')) continue;
+     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
     const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation, appSlug, appTitle };
     let key = keyIndex;
@@ -488,8 +498,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       } else {
         await store.recordSuccess(model);
       }
-      attempts.push({ model, outcome: 'ok', key });
-      return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState };
+       attempts.push({ model, outcome: 'ok', key });
+       if (isGo && model.endsWith('-free')) keyIndex = nextFreeGoKeyIndex(pool.length);
+       return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     if (!goParked) {

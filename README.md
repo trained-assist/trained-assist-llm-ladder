@@ -86,7 +86,7 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   are recorded JSONL on the hh-skill side for later benching.
 
 - **`build` / `build advanced` / `plan` / `explore` / `general` / `review` / `picture` /
-  `picture advanced` / `free_100percent`** — interactive agent work; the role/level model
+  `picture advanced` / `free`** — interactive agent work; the role/level model
   (issue #71, owner 2026-10-02): **level = a ladder of its own, no escalation between them** —
   «нет эскалации, это не задача лестницы, задача лестницы — ретраи» (a ladder retries down its
   own rungs; moving between levels is the caller's decision, e.g. an opencode profile).
@@ -107,7 +107,7 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   **Constructors** (#71): (1) plain LLM callers keep the single-model profiles as-is
   (`service`, `conversations` — role suffixes); (2) opencode launches in the agent get a
   four-ladder assembly (`build`/`plan`/`explore`/`general`) — three ready profiles in
-  `~/.config/opencode/profiles/`: `free_100percent` (everything on the $0 ladder), `master`
+  `~/.config/opencode/profiles/`: `free` (everything on the $0 ladder), `master`
   (build=base ladder, roles on advanced), `advanced` (build→`build advanced`).
   Vision is no longer taxonomy-only: `picture*` ladders exist; legacy callers still keep
   Gemini in-process (#71).
@@ -142,7 +142,7 @@ Rungs are tried top-down:
   `usage.completion_tokens_details.reasoning_tokens` read — 24 of 26 unique rungs reason,
   including the four zen tail rungs of `free` (measured 2026-09-30 through the relay, #42:
   17/15/255/43 reasoning_tokens); `openrouter/google/gemini-2.5-flash-lite` reads 0 and stays at
-  1500, `ling-3.0-flash-fin:free` was a dead rung (no data; removed from the free ladder 2026-09-30 —
+  1500, `ling-3.0-flash-fin:free` was a dead rung (no data; removed from the cheap ladder 2026-09-30 —
   34×404/day in the hourly digest). The #34 guard diagnostic prints the
   floor that actually went upstream.
 
@@ -177,8 +177,8 @@ the URL *is* the application id in the OpenRouter "Application" analytics cut �
 analytics kept). A garbage/absent slug falls back to `llm-ladder`, never a half-repaired one.
 `opencode-go/*` rungs get none of these (not an OpenRouter concept there).
 
-opencode provider (free ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
-`apiKey = <LADDER_TOKEN>`, model `free-ladder`. Response = the upstream `chat.completion` with `model`
+opencode provider (cheap ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
+`apiKey = <LADDER_TOKEN>`, model `cheap`. Response = the upstream `chat.completion` with `model`
 set to the rung that answered, plus headers `x-ladder-model` / `x-ladder-attempts`.
 Failure: `502 {error:{type:"ladder_error", attempts:[…]}}`.
 
@@ -193,11 +193,11 @@ Clients:
 - `trained-assist-agent` `src/service-llm.js` — all small service calls (sends `deepseek`, the
   legacy alias of `service` — no agent change needed, issue #49); the only implementation, no
   in-process copy.
-- `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder`), token via org secret `LLM_LADDER_TOKEN`.
+- `pr-autofix` ≥ v1.6.0 — every stage (`cheap`), token via org secret `LLM_LADDER_TOKEN`.
 - `trained-assist-hh-skill` `src/conversation-generation.js` — candidate-message writing
-  (`conversations` ladder), ATS evaluation (`free-ladder`), funnel planner (`service`); token via
+  (`conversations` ladder), ATS evaluation (`cheap`), funnel planner (`service`); token via
   `LLM_LADDER_TOKEN` / `$AGENT_TOKENS_DIR/llm-ladder/token`.
-- opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free-ladder`.
+- opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `cheap`.
 
 ## Pool endpoints
 
