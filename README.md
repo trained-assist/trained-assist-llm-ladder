@@ -85,6 +85,16 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   (or per-call via `ladder_rung` for A/B and bench pins); the last N question/answer exchanges
   are recorded JSONL on the hh-skill side for later benching.
 
+- **`build`** — interactive coding/agent work; the role/level model (issue #71, owner 2026-10-02).
+  Role `build` is the only two-level role so far: **base** (`space-bunny-free` →
+  `longcat-2.5-preview-free` → `ling-3.0-flash-sante:free`, $0) escalates to **advanced**
+  (`opencode-go/mimo-v2.6-flash` → paid `ling-3.0-flash` → paid `xiaomi mimo-v2.6-flash`) via the
+  normal failover — «базик плохо сработал → перевызов на advanced», no caller-side logic needed.
+  `plan` / `explore` / `review` / `general` open on advanced (owner: «все кроме build на mimo»);
+  explore keeps mimo first for its 1M context. The opencode build agent uses it as
+  `ladder/build` (profile `deepseek-go`); vision is taxonomy only for now — image calls stay on
+  Gemini in their callers (#71).
+
 Rungs are tried top-down:
 
 - **Model health** — a failing rung is skipped for everyone: transient faults back off per model

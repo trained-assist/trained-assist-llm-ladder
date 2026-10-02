@@ -503,6 +503,33 @@ test('config: conversations = hh-skill writing — gemini-3.1-flash-lite-preview
   assert.deepEqual(config.ladders.conversations, { build: expected }, 'conversations is the build-role ladder');
 });
 
+// #71 (owner 2026-10-02): the role/level model — build is the only two-level role so far:
+// base (free ×3) escalates to advanced (mimo → paid tail) through the normal failover;
+// every other role opens on advanced per the owner's «все кроме build на mimo».
+// vision is taxonomy only for now (Gemini in the callers, not through this service).
+test('config: build ladder — role/level: base free ×3 → advanced mimo → paid; other roles advanced-first (#71)', () => {
+  const B = config.ladders.build;
+  const base = [
+    'opencode-go/space-bunny-free',
+    'opencode-go/longcat-2.5-preview-free',
+    'openrouter/inclusionai/ling-3.0-flash-sante:free',
+  ];
+  const advanced = [
+    'opencode-go/mimo-v2.6-flash',
+    'openrouter/inclusionai/ling-3.0-flash',
+    'openrouter/xiaomi/mimo-v2.6-flash',
+  ];
+  assert.deepEqual(B.build, [...base, ...advanced], 'build = base level then advanced level');
+  assert.deepEqual(B.general, advanced, 'general opens on advanced (owner: всё кроме build на mimo)');
+  for (const role of ['plan', 'explore', 'review']) {
+    assert.deepEqual(B[role], advanced, `${role} advanced-first (#71)`);
+  }
+  assert.ok(B.build.findIndex(m => m.endsWith('-free') || m.endsWith(':free')) === 0, 'base level is the head');
+  assert.equal(B.build.findIndex(m => m === 'opencode-go/mimo-v2.6-flash'), 3, 'advanced starts after base');
+  assert.ok(!JSON.stringify(B).includes('opencode-zen/'), 'zen stays out of build (#42)');
+  assert.ok(!JSON.stringify(B).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in the build base');
+});
+
 test('ladder: conversations walks top-down — 3.1-flash-lite-preview answers, 2.5-flash only on its failure', async () => {
   const calls = [];
   const beh = { [short(CONVERSATIONS[0])]: () => ({ status: 500, error: 'boom' }) };
