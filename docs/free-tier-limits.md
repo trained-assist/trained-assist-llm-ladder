@@ -103,7 +103,7 @@ no published number).
 
 ---
 
-## Go `*-free` — genuinely unlimited
+## Go `*-free` — unlimited allowance, but still needs a valid key
 
 `opencode-go/space-bunny-free` and `opencode-go/longcat-2.5-preview-free` are
 listed in the Go docs as **Free / Unlimited (limited time)**. They never consume
@@ -111,9 +111,37 @@ the model's $-allowance, which is why the ladder keeps serving them while every
 paid Go rung is parked during a limit incident (#69). The key carousel (#81)
 only spreads load across accounts — there is no allowance to protect.
 
+**But "unlimited" is about the allowance, not about auth.** A `*-free` rung still
+sends a pooled key, so it dies with the key: `401 AuthError: Invalid API key`
+kills free and paid Go rungs alike. Revoking a key "to save the last percent of
+the limit" therefore backfires — the paid allowance is already spent, free models
+don't touch it, and revoking only removes the one free option that was still
+serving.
+
 For the paid Go rungs the structure is completely different: USD per model per
 month, windows 5h 20% / week 50% / month 100%, shared per workspace
 (`workspace: wrk_…` in the error). Details in issue #84.
+
+## The cascade that pushed traffic onto the paid OpenRouter tail (2026-10-02)
+
+Reproduced from the D1 trace — the sequence matters, each step alone is survivable:
+
+1. **17:52** — paid Go weekly allowance hit (`GoUsageLimitError` on
+   `deepseek-v4-flash`) → paid Go rungs parked.
+2. **17:52–19:23** — **free Go rungs kept serving** (484 successful in the 18:00
+   hour). This is #69 working: the paid limit does *not* kill `*-free`.
+3. **19:23 — the key was revoked** → every Go rung, free included, began returning
+   `401 AuthError: Invalid API key` (2490 calls until 22:10).
+4. OR `:free` was already at `used: 1060 / limit: 1000` (429) and zen was 429.
+5. → the **paid OpenRouter tail** took the load: `build` 803, `service`/`deepseek`
+   561, `research:explore` 15 successful paid calls in the window.
+
+**mcp-eval itself never reached paid OpenRouter.** It ran on the `free` ladder
+(now `cheap`), which has no paid tail; it burned the *paid Go* allowance because
+the `free` ladder's head rung was `opencode-go/deepseek-v4-flash` — the naming
+bug fixed in #79. The paid OpenRouter traffic came from the *other* ladders
+(`build`, `service`, …), which do have paid tails, once step 3 removed their last
+free Go rung.
 
 ---
 
@@ -130,3 +158,7 @@ month, windows 5h 20% / week 50% / month 100%, shared per workspace
 4. **When all three free tiers are exhausted, the paid tail is what takes the
    load.** That is by design (reliability beats price), but it makes the paid
    spend a function of how long the free tiers stay dark.
+5. **Never revoke a Go key to "save allowance" mid-incident.** Free Go rungs are
+   the fallback that survives a paid-limit hit; revoking the key takes them down
+   too and routes the fleet straight to the paid OpenRouter tail. The allowance
+   is not saved — free models never consumed it.
