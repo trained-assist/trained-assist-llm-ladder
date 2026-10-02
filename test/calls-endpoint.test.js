@@ -83,7 +83,8 @@ test('GET /v1/calls: window and limit are clamped', async () => {
   const { sql, params } = d1._calls[0];
   assert.match(sql, /LIMIT \?6/, 'limit stays a bound parameter');
   assert.equal(params[5], 200, 'limit clamped to 200');
-  assert.ok(params[0] <= now, 'a since_ms in the future is pulled back to now');
+  assert.ok(params[0] < now + 60_000, 'a since_ms in the future is pulled back to now');
+  assert.ok(params[0] <= Date.now(), 'clamped to handler time, never past it');
 });
 
 test('GET /v1/calls: no trace database → 503; a D1 failure → 500, never a throw', async () => {
