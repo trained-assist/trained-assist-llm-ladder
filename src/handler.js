@@ -2,7 +2,7 @@
 // `node --test` (the sandbox imports it), while src/index.js remains the Worker entry: it wraps this
 // handler and exports the LadderState Durable Object for the platform binding.
 
-import { run, readPool, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
+import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
 import config from '../config/ladders.json' with { type: 'json' };
 
@@ -226,6 +226,12 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const s = await (store || makeStore(env)).snapshot();
     s.pins = await (store || makeStore(env)).pinStats();
     return json(200, s);
+  }
+
+  // GET /v1/go-usage — remaining Go allowance per pool key (unified rolling/weekly/monthly
+  // percent, issue #91). The raw key never appears in the response or the logs.
+  if (request.method === 'GET' && url.pathname === '/v1/go-usage') {
+    return json(200, { keys: await fetchGoUsage(env, { fetchImpl }) });
   }
 
   // GET /v1/calls — the per-CALL trace log, the read side /v1/analytics has no counterpart for.
