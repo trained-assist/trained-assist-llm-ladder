@@ -6,7 +6,8 @@
 //   * Go key pool — a key-level fault rotates to the spare key and the rung is retried; a rung
 //     that fails for a NON-key reason also gets ONE spare-key probe per call before the ladder
 //     leaves Go for paid OpenRouter (a silently throttled key looks like a slow model); once
-//     every key is parked, all Go rungs are skipped until the earliest key heals;
+//     every key is parked, the PAID Go rungs are skipped until the earliest key heals — free
+//     Go rungs (`*-free`) keep serving, they do not eat the allowance (#69, #36);
 //   * guard — empty content, or non-JSON when JSON was requested, fails the rung.
 //
 // Pure apart from `fetchImpl` and `store`, so it runs the same in the Worker (store = Durable
@@ -418,7 +419,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const attempts = [];
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
-    if (isGo && goParked) continue;
+    // #69: a full-key park (weekly limit on every key) skips only the PAID Go rungs — a free
+    // Go rung keeps serving, it does not consume the allowance and must not die in the incident.
+    if (isGo && goParked && !model.endsWith('-free')) continue;
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
     const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation, appSlug, appTitle };
@@ -443,7 +446,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       if (fault) {
         const rot = await store.rotateKey(pool.length, fault.ttlMs, key);
         if (!rot.rotated) {
-          await store.park(all.filter(m => m.startsWith('opencode-go/')), rot.retryAt);
+          // #69: never park free Go rungs here — the allowance they don't consume is exactly
+          // what the ladder must fall back on while every key is limited.
+          await store.park(all.filter(m => m.startsWith('opencode-go/') && !m.endsWith('-free')), rot.retryAt);
           goParked = true;
           break;
         }
