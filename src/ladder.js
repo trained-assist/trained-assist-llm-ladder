@@ -111,6 +111,18 @@ export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
 
+export function readOpenRouterKeys(env) {
+  const raw = env.OPENROUTER_KEYS_JSON;
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function resolveOpenRouterKey(env, appSlug) {
+  const keys = readOpenRouterKeys(env);
+  if (!keys) return env.OPENROUTER_API_KEY;
+  return keys[appSlug] || keys['*'] || env.OPENROUTER_API_KEY;
+}
+
 // "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
 export function rungsFor(config, name) {
   let [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
@@ -172,7 +184,7 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
   const pool = readPool(env);
   // Zen (#36): single shared relay token — no key pool, no rotation. Missing token → null →
   // the rung is treated as keyless and skipped, so an unconfigured worker just skips zen.
-  const key = isGo ? pool[keyIndex] : isZen ? env.OPENCODE_ZEN_RELAY_TOKEN : env.OPENROUTER_API_KEY;
+  const key = isGo ? pool[keyIndex] : isZen ? env.OPENCODE_ZEN_RELAY_TOKEN : resolveOpenRouterKey(env, appSlug);
   if (!key) return null;
   const headers = { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' };
   // Keyed calls carry a stable per-conversation id so the provider-side prompt cache survives

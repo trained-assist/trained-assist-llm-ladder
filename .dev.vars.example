@@ -9,6 +9,10 @@ LADDER_TOKEN=local-dev
 # Upstream keys — copy from the worker secrets (wrangler secret list / your password manager).
 OPENCODE_GO_API_KEYS=oc_xxx,oc_yyy
 OPENROUTER_API_KEY=sk-or-xxx
+# Per-app OpenRouter keys: JSON map of {appSlug: key, "*": defaultKey}.
+# When set, the worker picks the key by the caller's x-ladder-app slug.
+# Missing/unmatched slug falls back to OPENROUTER_API_KEY.
+# OPENROUTER_KEYS_JSON='{"hh-skill":"sk-or-...","agent":"sk-or-...","*":"sk-or-..."}'
 # Pool endpoints (/pool/trigger): its own bearer + the GitHub dispatch token. Missing either
 # locally → 503 CONFIG, same as in prod.
 POOL_TRIGGER_TOKEN=local-pool

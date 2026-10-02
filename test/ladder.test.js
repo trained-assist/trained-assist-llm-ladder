@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, readOpenRouterKeys } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
@@ -652,6 +652,47 @@ test('app attribution defaults: no slug → llm-ladder, no title → Trained Ass
   assert.equal(or.headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`);
   assert.equal(or.headers['X-OpenRouter-Title'], DEFAULT_APP_TITLE);
   assert.equal(or.headers['X-OpenRouter-App-Visibility'], 'hidden');
+});
+
+// ── OPENROUTER_KEYS_JSON — per-app key selection ────────────────────────────────────────
+test('readOpenRouterKeys: returns null when env var absent', () => {
+  assert.equal(readOpenRouterKeys({}), null);
+});
+
+test('readOpenRouterKeys: returns null on invalid JSON', () => {
+  assert.equal(readOpenRouterKeys({ OPENROUTER_KEYS_JSON: 'not-json' }), null);
+});
+
+test('readOpenRouterKeys: parses valid JSON map', () => {
+  const keys = readOpenRouterKeys({ OPENROUTER_KEYS_JSON: '{"hh-skill":"sk-hh","*":"sk-default"}' });
+  assert.equal(keys['hh-skill'], 'sk-hh');
+  assert.equal(keys['*'], 'sk-default');
+});
+
+test('upstreamRequest: picks key by appSlug from OPENROUTER_KEYS_JSON', () => {
+  const keysEnv = { ...env, OPENROUTER_KEYS_JSON: '{"hh-skill":"sk-hh","agent":"sk-agent","*":"sk-default"}' };
+  const r = upstreamRequest(keysEnv, 'openrouter/x/y', msg, 0, { appSlug: 'hh-skill' });
+  assert.equal(r.headers.Authorization, 'Bearer sk-hh');
+});
+
+test('upstreamRequest: falls back to "*" default key when slug not in map', () => {
+  const keysEnv = { ...env, OPENROUTER_KEYS_JSON: '{"hh-skill":"sk-hh","*":"sk-default"}' };
+  const r = upstreamRequest(keysEnv, 'openrouter/x/y', msg, 0, { appSlug: 'unknown' });
+  assert.equal(r.headers.Authorization, 'Bearer sk-default');
+});
+
+test('upstreamRequest: falls back to OPENROUTER_API_KEY when OPENROUTER_KEYS_JSON has no match and no "*"', () => {
+  const keysEnv = { ...env, OPENROUTER_KEYS_JSON: '{"hh-skill":"sk-hh"}' };
+  const r = upstreamRequest(keysEnv, 'openrouter/x/y', msg, 0, { appSlug: 'agent' });
+  assert.equal(r.headers.Authorization, 'Bearer or_key');
+});
+
+test('upstreamRequest: OPENROUTER_KEYS_JSON does not affect Go or zen rungs', () => {
+  const keysEnv = { ...env, OPENROUTER_KEYS_JSON: '{"hh-skill":"sk-hh"}' };
+  const go = upstreamRequest(keysEnv, 'opencode-go/mimo-v2.6-flash', msg, 0, { appSlug: 'hh-skill' });
+  assert.equal(go.headers.Authorization, 'Bearer oc_a');
+  const zen = upstreamRequest({ ...keysEnv, OPENCODE_ZEN_RELAY_TOKEN: 'zr_t' }, 'opencode-zen/mimo-v2.6-flash-free', msg, 0, { appSlug: 'hh-skill' });
+  assert.equal(zen.headers.Authorization, 'Bearer zr_t');
 });
 
 test('sanitize: garbage slug falls back to llm-ladder (never a half-repaired one)', () => {
