@@ -46,16 +46,27 @@ test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid las
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    'opencode-zen/mimo-v2.6-flash-free',
+    'opencode-zen/mimo-v2.5-free',
+    'opencode-zen/big-pickle',
+    'opencode-zen/nemotron-3.5-lightning-free',
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ]);
-  assert.ok(LADDER.every(m => !m.startsWith('opencode-zen/')), 'zen rungs left deepseek for free (#42)');
+  // The #42 ban on zen in `service` is lifted: its reason was the relay answering 404, and that
+  // stopped on 2026-09-30 (last zen 404 in D1 at 16:03, 198 successful zen calls since). Zen is
+  // free and answers in ~7s, so it belongs in front of paid OpenRouter as a tail — during the
+  // 2026-10-02 Go-provider incident a dead head is exactly what the tail exists for.
+  const zen = LADDER.filter(m => m.startsWith('opencode-zen/'));
+  assert.equal(zen.length, 4, 'the four working zen rungs');
+  assert.ok(LADDER.indexOf(zen[0]) > LADDER.findIndex(m => m.endsWith(':free')),
+    'zen stays behind every working free rung — a 404 relay must not stand in front of them');
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) {
     assert.deepEqual(config.ladders.service[role], LADDER, role);
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 9, 'paid OpenRouter only after Go mimo and all eight free rungs');
+  assert.ok(firstPaid === 13, 'paid OpenRouter only after Go mimo, all eight free rungs and zen');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
   assert.ok(firstGoPaid === 0, 'Pareto-first: the Go subscription rung opens the ladder (#67)');
