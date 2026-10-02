@@ -210,3 +210,27 @@ test('S8: GET /v1/state exposes pin stats alongside health and keys', async () =
   assert.deepEqual(body.pins, { count: 1, byRung: { [R0]: 1 } });
   assert.ok(body.health !== undefined && body.keys !== undefined, 'existing state fields untouched');
 });
+
+test('S8: GET /v1/go-usage polls every pool key; the raw key never reaches the response (#91)', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    assert.match(url, /\/zen\/go\/v1\/usage$/, 'polls the Go usage endpoint');
+    const key = init.headers.Authorization.replace('Bearer ', '');
+    seen.push(key);
+    return { ok: true, status: 200, json: async () => ({ usage: {
+      rolling: { status: 'ok', percent: key === 'oc_a' ? 3 : 7, resetsAt: '2026-10-03T03:07:05Z' },
+      weekly: { status: 'rate-limited', percent: 100, resetsAt: '2026-10-05T00:00:00Z' },
+      monthly: { status: 'ok', percent: 50, resetsAt: '2026-11-02T19:07:56Z' },
+    } }) };
+  };
+  const r = await handle(new Request('https://l.test/v1/go-usage', {
+    headers: { authorization: 'Bearer t' },
+  }), ENV, { fetchImpl });
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.deepEqual(seen.sort(), ['oc_a', 'oc_b'], 'one poll per pool key');
+  assert.equal(body.keys.length, 2);
+  assert.deepEqual(body.keys[0], { keyIndex: 0, rolling: { status: 'ok', percent: 3, resetsAt: '2026-10-03T03:07:05Z' }, weekly: { status: 'rate-limited', percent: 100, resetsAt: '2026-10-05T00:00:00Z' }, monthly: { status: 'ok', percent: 50, resetsAt: '2026-11-02T19:07:56Z' } });
+  const raw = JSON.stringify(body);
+  assert.ok(!raw.includes('oc_a') && !raw.includes('oc_b'), 'keys are never serialized into the response');
+});

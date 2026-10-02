@@ -121,6 +121,30 @@ export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
 
+// Remaining Go allowance per pool key: GET /zen/go/v1/usage returns ONE unified percent per
+// window — rolling (~5h) / weekly / monthly — not a per-model breakdown (owner observation
+// 2026-10-03, issue #91). The raw key never leaves this function: callers see only the pool index.
+export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+  const pool = readPool(env);
+  const base = env.OPENCODE_GO_BASE_URL || 'https://opencode.ai/zen/go/v1';
+  const one = async (key, keyIndex) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(`${base}/usage`, { headers: { Authorization: `Bearer ${key}` }, signal: ctrl.signal });
+      if (!res.ok) return { keyIndex, error: `HTTP ${res.status}` };
+      const u = (await res.json()).usage || {};
+      const win = (w) => (w ? { status: w.status ?? null, percent: w.percent ?? null, resetsAt: w.resetsAt ?? null } : null);
+      return { keyIndex, rolling: win(u.rolling), weekly: win(u.weekly), monthly: win(u.monthly) };
+    } catch (e) {
+      return { keyIndex, error: e && e.name === 'AbortError' ? 'timeout' : String((e && e.message) || e) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return Promise.all(pool.map(one));
+}
+
 // "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
 export function rungsFor(config, name) {
   let [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
