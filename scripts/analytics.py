@@ -45,16 +45,18 @@ def queries(since):
              'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 '
              'GROUP BY model ORDER BY n DESC', [since]),
         'rungs': (
-             'SELECT ladder, '
-             + "CASE WHEN model LIKE 'opencode-go/%' AND model NOT LIKE '%-free' THEN 'go_sub' "
-             + "WHEN model LIKE 'opencode-go/%-free' THEN 'go_free' "
-             + "WHEN model LIKE 'opencode-zen/%' THEN 'zen' "
-             + "WHEN model LIKE 'openrouter/%%:free' THEN 'or_free' "
-             + "WHEN model LIKE 'openrouter/%' THEN 'or_paid' "
-             + "ELSE 'other' END AS category, "
-             'COUNT(*) AS calls, SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout '
+             'SELECT ladder, model, COUNT(*) AS calls, '
+             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+             'SUM(COALESCE(tokens_out, 0)) AS tout '
              'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 '
-             'GROUP BY ladder, category ORDER BY ladder, category', [since]),
+             'GROUP BY ladder, model ORDER BY ladder, calls DESC', [since]),
+        'hourly': (
+             "SELECT strftime('%Y-%m-%dT%H:00Z', ts / 1000, 'unixepoch') AS hour, ladder, model, "
+             'COUNT(*) AS calls, SUM(ok) AS ok_n, '
+             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+             'SUM(COALESCE(tokens_out, 0)) AS tout '
+             'FROM ladder_calls WHERE ts >= ?1 '
+             'GROUP BY hour, ladder, model ORDER BY hour DESC, calls DESC', [since]),
         'daily': (
             "SELECT date(ts / 1000, 'unixepoch') AS d, COUNT(*) AS n, SUM(1 - ok) AS failed, "
             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout '
@@ -113,6 +115,15 @@ def fetch_pricing(opener=None):
     return out
 
 
+def load_prices():
+    """config/prices.json → {model: [in, out, cachedRead]} per 1M tokens. {} on failure."""
+    try:
+        with open(os.path.join(os.path.dirname(__file__), '..', 'config', 'prices.json')) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def est_cost(model, tin, tout, pricing):
     """$ for one served-model row. None = not per-token-billable here (Go) or price unknown."""
     oid = openrouter_id(model)
@@ -124,22 +135,43 @@ def est_cost(model, tin, tout, pricing):
     return tin * p['prompt'] + tout * p['completion']
 
 
+def est_cost_cached(model, tin, tcached, tout, prices):
+    """$ with the cache split (#94): (in-cached)×in + out×out + cached×cachedRead, per 1M.
+    None = unknown price and not an obvious $0 rung."""
+    if not model:
+        return None
+    p = prices.get(model)
+    if not p:
+        if model.startswith('opencode-zen/') or model.endswith('-free') or model.endswith(':free'):
+            return 0
+        return None
+    fresh = max(0, (tin or 0) - (tcached or 0))
+    return (fresh * p[0] + (tout or 0) * p[1] + (tcached or 0) * p[2]) / 1e6
+
+
 def build_report(queries_out, pricing, days, now=None):
     """Pure: SQL rows + pricing → a plain dict the renderers consume."""
     now = now or time.gmtime()
     t = queries_out['totals'][0] if queries_out['totals'] else {}
+    prices = load_prices()
     models = []
     total_cost = 0.0
     cost_known = False
     for row in queries_out['models']:
-        cost = est_cost(row['model'], row['tin'] or 0, row['tout'] or 0, pricing)
+        cost = est_cost_cached(row['model'], row['tin'] or 0, row.get('tcached') or 0, row['tout'] or 0, prices)
         if cost is not None:
             total_cost += cost
             cost_known = True
         models.append({**row, 'cost': cost})
     rungs = []
     for row in queries_out.get('rungs', []) or []:
-        rungs.append({**row})
+        cost = est_cost_cached(row['model'], row['tin'] or 0, row.get('tcached') or 0, row['tout'] or 0, prices)
+        rungs.append({**row, 'cost': cost})  # same calls as `models`, grouped by ladder — NOT summed again
+    hourly = []
+    for row in queries_out.get('hourly', []) or []:
+        cost = est_cost_cached(row['model'], row['tin'] or 0, row.get('tcached') or 0, row['tout'] or 0, prices)
+        hourly.append({**row, 'cost': cost, 'tokens_in': row.get('tin') or 0,
+                       'tokens_cached': row.get('tcached') or 0, 'tokens_out': row.get('tout') or 0})
     merged_errors = {}
     for row in queries_out['errors']:
         key = normalize_error(row['err'])
@@ -162,6 +194,7 @@ def build_report(queries_out, pricing, days, now=None):
         },
         'ladders': queries_out['ladders'],
         'rungs': rungs,
+        'hourly': hourly,
         'models': models,
         'daily': queries_out['daily'],
         'depth': queries_out['depth'],
@@ -215,6 +248,12 @@ def render_markdown(r):
         lines.append(
             f'| `{m["model"]}` | {m["n"]} | {fmt_tokens(m["tin"])} / {fmt_tokens(m["tout"])} '
             f'| {m["avg_ms"] or "—"} | {fmt_money(m["cost"])} |')
+    lines += ['', '## Hourly (UTC)', '', '| hour | ladder | model | calls | tokens in/cached/out | est $ |', '|---|---|---|---:|---:|---:|']
+    for h in r.get('hourly', []) or []:
+        lines.append(
+            f'| {h["hour"]} | `{h["ladder"]}` | `{h["model"]}` | {h["calls"]} | '
+            f'{fmt_tokens(h["tokens_in"])} / {fmt_tokens(h["tokens_cached"])} / {fmt_tokens(h["tokens_out"])} '
+            f'| {fmt_money(h["cost"])} |')
     lines += ['', '## Daily', '', '| day | calls | ok% | tokens in/out |', '|---|---:|---:|---:|']
     for d in r['daily']:
         okp = 100.0 * (d['n'] - d['failed']) / d['n'] if d['n'] else 0.0

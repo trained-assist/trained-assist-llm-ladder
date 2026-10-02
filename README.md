@@ -157,7 +157,7 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/v1/models` | ladders as model ids (`service`, `service:review`, …) |
 | GET | `/v1/state` | model health + key rotation snapshot |
 | GET | `/v1/go-usage` | remaining Go allowance per pool key: polls `opencode.ai/zen/go/v1/usage` for each key → unified `rolling`/`weekly`/`monthly` percent + `resetsAt` (issue #91). Raw keys never appear in the response |
-| GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens, attempts-depth histogram and merged top-20 errors (digit-normalized, same grouping as `scripts/analytics.py`); N = window in hours, 1–168, default 24. What the hourly Telegram digest in `vm-telegram-monitor` renders |
+| GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens, per-ladder×**model** rungs with a fresh/cached/output token split and an estimated `cost_usd` (`config/prices.json`), an **hourly** cut (UTC hour × ladder × model × cost), attempts-depth histogram and merged top-20 errors; N = window in hours, 1–168, default 24. What the hourly Telegram digest in `vm-telegram-monitor` renders |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `service`, legacy alias `deepseek`); `stream: true` → SSE; `tools` passed through |
 
 Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),

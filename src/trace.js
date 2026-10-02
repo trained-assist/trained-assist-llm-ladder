@@ -22,15 +22,18 @@ export function makeTrace(request) {
 }
 
 const TRACE_SQL = `INSERT INTO ladder_calls
-  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`;
+  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`;
 
 // Best-effort D1 append: never fails the call, never throws. Non-stream responses carry
 // usage.prompt_tokens/completion_tokens → stored for "how many tokens did this call burn".
+// tokens_cached (#94) = usage.prompt_tokens_details.cached_tokens — a subset of tokens_in,
+// priced ~50x cheaper, so cost = (in-cached)*in_price + out*out_price + cached*cache_price.
 export async function logCall(env, trace, ladder, r, started) {
   const db = env.LADDER_TRACE_DB;
   if (!db) return;
   const usage = !r.stream && r.data && r.data.usage ? r.data.usage : null;
+  const cached = usage && usage.prompt_tokens_details ? usage.prompt_tokens_details.cached_tokens : null;
   try {
     await db.prepare(TRACE_SQL).bind(
       Date.now(),
@@ -39,6 +42,7 @@ export async function logCall(env, trace, ladder, r, started) {
       JSON.stringify(r.attempts || []),
       usage ? usage.prompt_tokens ?? null : null,
       usage ? usage.completion_tokens ?? null : null,
+      cached ?? null,
     ).run();
   } catch (e) {
     console.error('trace d1 insert failed:', e.message);
