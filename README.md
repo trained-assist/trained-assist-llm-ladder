@@ -85,15 +85,20 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   (or per-call via `ladder_rung` for A/B and bench pins); the last N question/answer exchanges
   are recorded JSONL on the hh-skill side for later benching.
 
-- **`build`** — interactive coding/agent work; the role/level model (issue #71, owner 2026-10-02).
-  Role `build` is the only two-level role so far: **base** (`space-bunny-free` →
+- **`build` / `plan` / `explore` / `general` / `review`** — interactive agent work; the
+  role/level model (issue #71, owner 2026-10-02): **role = a ladder of its own** — the agent
+  calls `ladder/build`, `ladder/plan`, … directly (split by roles, not `build:plan` groups).
+  Role `build` is the only two-level ladder so far: **base** (`space-bunny-free` →
   `longcat-2.5-preview-free` → `ling-3.0-flash-sante:free`, $0) escalates to **advanced**
   (`opencode-go/mimo-v2.6-flash` → paid `ling-3.0-flash` → paid `xiaomi mimo-v2.6-flash`) via the
-  normal failover — «базик плохо сработал → перевызов на advanced», no caller-side logic needed.
-  `plan` / `explore` / `review` / `general` open on advanced (owner: «все кроме build на mimo»);
-  explore keeps mimo first for its 1M context. The opencode build agent uses it as
-  `ladder/build` (profile `deepseek-go`); vision is taxonomy only for now — image calls stay on
-  Gemini in their callers (#71).
+  normal failover — «базик плохо сработал → перевызов на advanced», no caller-side logic needed;
+  an opencode profile can pin advanced for a harder task (e.g. code review).
+  `plan` / `general` / `review` open on advanced (owner: «все кроме build на mimo»).
+  `explore` has **≥1M context on every rung** — mimo (1M) → `gemini-2.5-flash-lite` (1048576)
+  → `xiaomi/mimo-v2.6-flash` (1050000), contexts measured on OpenRouter `/v1/models` 2026-10-02;
+  Hermes takes this ladder whole for research reads (tail follows research:explore, #28).
+  The opencode agents map 1:1 to `ladder/<role>` (profile `deepseek-go`); vision is taxonomy only
+  for now — image calls stay on Gemini in their callers (#71).
 
 Rungs are tried top-down:
 

@@ -503,31 +503,39 @@ test('config: conversations = hh-skill writing — gemini-3.1-flash-lite-preview
   assert.deepEqual(config.ladders.conversations, { build: expected }, 'conversations is the build-role ladder');
 });
 
-// #71 (owner 2026-10-02): the role/level model — build is the only two-level role so far:
-// base (free ×3) escalates to advanced (mimo → paid tail) through the normal failover;
-// every other role opens on advanced per the owner's «все кроме build на mimo».
-// vision is taxonomy only for now (Gemini in the callers, not through this service).
-test('config: build ladder — role/level: base free ×3 → advanced mimo → paid; other roles advanced-first (#71)', () => {
-  const B = config.ladders.build;
-  const base = [
-    'opencode-go/space-bunny-free',
-    'opencode-go/longcat-2.5-preview-free',
-    'openrouter/inclusionai/ling-3.0-flash-sante:free',
-  ];
+// #71 (owner 2026-10-02): роль = отдельная лестница — агент вызывает из лестницы просто
+// build / plan / explore / general / review (распил по ролям, не по группам вида build:plan).
+// build — единственная пока двухуровневая: base (free ×3) эскалируется в advanced (mimo → paid)
+// штатным failover; plan/general/review — advanced-first («все кроме build на mimo»);
+// explore — только большие контексты (Hermes в ресёрче берёт её целиком, владелец 2026-10-02).
+test('config: role ladders — build base→advanced, plan/general/review advanced-first, explore big-ctx only (#71)', () => {
   const advanced = [
     'opencode-go/mimo-v2.6-flash',
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ];
-  assert.deepEqual(B.build, [...base, ...advanced], 'build = base level then advanced level');
-  assert.deepEqual(B.general, advanced, 'general opens on advanced (owner: всё кроме build на mimo)');
-  for (const role of ['plan', 'explore', 'review']) {
-    assert.deepEqual(B[role], advanced, `${role} advanced-first (#71)`);
+  const base = [
+    'opencode-go/space-bunny-free',
+    'opencode-go/longcat-2.5-preview-free',
+    'openrouter/inclusionai/ling-3.0-flash-sante:free',
+  ];
+  assert.deepEqual(config.ladders.build.build, [...base, ...advanced], 'build = base level then advanced level');
+  for (const role of ['plan', 'general', 'review']) {
+    assert.deepEqual(config.ladders[role], { build: advanced }, `${role} advanced-first — роль=лестница (#71)`);
   }
-  assert.ok(B.build.findIndex(m => m.endsWith('-free') || m.endsWith(':free')) === 0, 'base level is the head');
-  assert.equal(B.build.findIndex(m => m === 'opencode-go/mimo-v2.6-flash'), 3, 'advanced starts after base');
-  assert.ok(!JSON.stringify(B).includes('opencode-zen/'), 'zen stays out of build (#42)');
-  assert.ok(!JSON.stringify(B).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in the build base');
+  // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
+  // gemini-2.5-flash-lite 1048576, xiaomi mimo 1050000; ling-3.0-flash = 262144 и не годится.
+  const explore = config.ladders.explore.build;
+  assert.deepEqual(explore, [
+    'opencode-go/mimo-v2.6-flash',
+    'openrouter/google/gemini-2.5-flash-lite',
+    'openrouter/xiaomi/mimo-v2.6-flash',
+  ], 'explore = big-ctx only (1M+), tail follows research:explore #28');
+  assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
+  assert.ok(!JSON.stringify(config.ladders.build).includes('opencode-zen/'), 'zen stays out (#42)');
+  assert.ok(!JSON.stringify(config.ladders.build).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in base');
+  // контракт #67 не тронут
+  assert.equal(config.ladders.service.build[0], 'opencode-go/mimo-v2.6-flash', 'service stays Pareto-first');
 });
 
 test('ladder: conversations walks top-down — 3.1-flash-lite-preview answers, 2.5-flash only on its failure', async () => {
