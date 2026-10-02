@@ -137,7 +137,7 @@ Reproduced from the D1 trace — the sequence matters, each step alone is surviv
    561, `research:explore` 15 successful paid calls in the window.
 
 **mcp-eval itself never reached paid OpenRouter.** It ran on the `free` ladder
-(now `cheap`), which has no paid tail; it burned the *paid Go* allowance because
+(now folded into `free`), which has no paid tail; it burned the *paid Go* allowance because
 the `free` ladder's head rung was `opencode-go/deepseek-v4-flash` — the naming
 bug fixed in #79. The paid OpenRouter traffic came from the *other* ladders
 (`build`, `service`, …), which do have paid tails, once step 3 removed their last

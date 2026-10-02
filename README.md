@@ -69,24 +69,21 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   Code 71.7%), then *stronger* Go models instead of cheaper ones — `qwen3.7-plus` → `deepseek-v4-pro`
   (`qwen3.8-max` dropped — far too expensive) — and paid OpenRouter `xiaomi/mimo-v2.6-flash` last.
 
-- **`free`** (alias `free-ladder`) — cheap/free rungs for agents that run on weak models
-  (opencode as a client, pr-autofix): OpenCode Go cheap models first, OpenRouter `:free`
-  fallback; order from the pr-autofix bench (2026-09-26). Streaming + tools supported.
-  Zen tail (owner decision 2026-09-30, issue #42) — **хвост до починки релея #42**: 14 working
-  rungs, then `opencode-zen/mimo-v2.6-flash-free` → `opencode-zen/mimo-v2.5-free` →
-  `opencode-zen/big-pickle` → `opencode-zen/nemotron-3.5-lightning-free`. The relay answers 404
-  right now, so zen may not be moved ahead of the working rungs — it would break the main free
-  fallback (trained-assist-agent#1899) with four dead steps; revisit the order once the relay is up.
+- **`free`** (aliases `free-ladder`, `cheap`) — the hard **$0 ceiling**: Go free
+  (`space-bunny-free`, `longcat-2.5-preview-free`) → OpenRouter `:free` ×6 → zen tail
+  (`mimo-v2.6-flash-free` → `mimo-v2.5-free` → `big-pickle` → `nemotron-3.5-lightning-free`).
+  No Go subscription rung, no paid OpenRouter — spending is impossible. Used by opencode as a
+  client, pr-autofix, and heavy tests (issue #79 alignment). Streaming + tools supported.
 
-- **`conversations`** — candidate-message writing from trained-assist-hh-skill
-  (`src/conversation-generation.js`, owner 2026-10-01): `openrouter/google/gemini-3.1-flash-lite-preview`
-  (first: newer and cheaper than `gemini-2.5-flash`, $0.25/$1.50 vs $0.30/$2.50) →
-  `openrouter/google/gemini-2.5-flash` → `opencode-go/mimo-v2.6-flash`. Model swaps happen here
-  (or per-call via `ladder_rung` for A/B and bench pins); the last N question/answer exchanges
-  are recorded JSONL on the hh-skill side for later benching.
+- **`conversation`** (alias `conversations`) — candidate-message writing from
+  trained-assist-hh-skill (`src/conversation-generation.js`, owner 2026-10-01):
+  `openrouter/google/gemini-3.1-flash-lite-preview` (first: newer and cheaper than
+  `gemini-2.5-flash`, $0.25/$1.50 vs $0.30/$2.50) → `openrouter/google/gemini-2.5-flash` →
+  `opencode-go/mimo-v2.6-flash`. Model swaps happen here (or per-call via `ladder_rung` for A/B
+  and bench pins); the last N question/answer exchanges are recorded JSONL on the hh-skill side.
 
-- **`build` / `build advanced` / `plan` / `explore` / `general` / `review` / `picture` /
-  `picture advanced` / `free`** — interactive agent work; the role/level model
+- **`build` / `build advanced` / `plan` / `explore` / `general` / `review` / `vision` /
+  `vision advanced`** — interactive agent work; the role/level model
   (issue #71, owner 2026-10-02): **level = a ladder of its own, no escalation between them** —
   «нет эскалации, это не задача лестницы, задача лестницы — ретраи» (a ladder retries down its
   own rungs; moving between levels is the caller's decision, e.g. an opencode profile).
@@ -98,18 +95,17 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   - `explore` — **≥1M context on every rung**: mimo (1M) → `gemini-2.5-flash-lite` (1048576) →
     `xiaomi/mimo-v2.6-flash` (1050000), contexts measured on OpenRouter `/v1/models` 2026-10-02;
     Hermes takes this ladder whole for research reads (tail follows research:explore, #28).
-  - `picture` / `picture advanced` — the vision stack, all multimodal image+text with 1M ctx
-    (OpenRouter architecture 2026-10-02): `gemini-2.5-flash-lite` ($0.10/$0.40) →
-    `gemini-2.5-flash` ($0.30/$2.50); advanced: `gemini-2.5-flash` → `gemini-3.8-flash` ($0.75/$3.75).
-  - `free_100percent` — **eight free rungs only, a hard $0 ceiling** — for tests with heavy
-    token counts or many repeats, where spending must be impossible.
+  - `vision` / `vision advanced` (alias `picture` / `picture advanced`) — the vision stack,
+    picture recognition, all multimodal image+text with 1M ctx (OpenRouter architecture
+    2026-10-02): `gemini-2.5-flash-lite` ($0.10/$0.40) → `gemini-2.5-flash` ($0.30/$2.50);
+    advanced: `gemini-2.5-flash` → `gemini-3.8-flash` ($0.75/$3.75).
 
   **Constructors** (#71): (1) plain LLM callers keep the single-model profiles as-is
-  (`service`, `conversations` — role suffixes); (2) opencode launches in the agent get a
-  four-ladder assembly (`build`/`plan`/`explore`/`general`) — three ready profiles in
+  (`service`, `conversation` — role suffixes); (2) opencode launches in the agent get a
+  four-ladder assembly (`build`/`plan`/`explore`/`general`) — ready profiles in
   `~/.config/opencode/profiles/`: `free` (everything on the $0 ladder), `master`
-  (build=base ladder, roles on advanced), `advanced` (build→`build advanced`).
-  Vision is no longer taxonomy-only: `picture*` ladders exist; legacy callers still keep
+  (build=base ladder, roles on advanced), `phd` (build→`build advanced`).
+  Vision is no longer taxonomy-only: `vision*` ladders exist; legacy callers still keep
   Gemini in-process (#71).
 
 Rungs are tried top-down:
@@ -142,7 +138,7 @@ Rungs are tried top-down:
   `usage.completion_tokens_details.reasoning_tokens` read — 24 of 26 unique rungs reason,
   including the four zen tail rungs of `free` (measured 2026-09-30 through the relay, #42:
   17/15/255/43 reasoning_tokens); `openrouter/google/gemini-2.5-flash-lite` reads 0 and stays at
-  1500, `ling-3.0-flash-fin:free` was a dead rung (no data; removed from the cheap ladder 2026-09-30 —
+  1500, `ling-3.0-flash-fin:free` was a dead rung (no data; removed from the free-tier ladder 2026-09-30 —
   34×404/day in the hourly digest). The #34 guard diagnostic prints the
   floor that actually went upstream.
 
@@ -177,8 +173,8 @@ the URL *is* the application id in the OpenRouter "Application" analytics cut �
 analytics kept). A garbage/absent slug falls back to `llm-ladder`, never a half-repaired one.
 `opencode-go/*` rungs get none of these (not an OpenRouter concept there).
 
-opencode provider (cheap ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
-`apiKey = <LADDER_TOKEN>`, model `cheap`. Response = the upstream `chat.completion` with `model`
+opencode provider (free ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
+`apiKey = <LADDER_TOKEN>`, model `free` (legacy ids `free-ladder` / `cheap` also resolve). Response = the upstream `chat.completion` with `model`
 set to the rung that answered, plus headers `x-ladder-model` / `x-ladder-attempts`.
 Failure: `502 {error:{type:"ladder_error", attempts:[…]}}`.
 
@@ -193,11 +189,11 @@ Clients:
 - `trained-assist-agent` `src/service-llm.js` — all small service calls (sends `deepseek`, the
   legacy alias of `service` — no agent change needed, issue #49); the only implementation, no
   in-process copy.
-- `pr-autofix` ≥ v1.6.0 — every stage (`cheap`), token via org secret `LLM_LADDER_TOKEN`.
+- `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder` → `free`), token via org secret `LLM_LADDER_TOKEN`.
 - `trained-assist-hh-skill` `src/conversation-generation.js` — candidate-message writing
-  (`conversations` ladder), ATS evaluation (`cheap`), funnel planner (`service`); token via
+  (`conversation` ladder), ATS evaluation (`cheap` → `free`), funnel planner (`service`); token via
   `LLM_LADDER_TOKEN` / `$AGENT_TOKENS_DIR/llm-ladder/token`.
-- opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `cheap`.
+- opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free`.
 
 ## Pool endpoints
 

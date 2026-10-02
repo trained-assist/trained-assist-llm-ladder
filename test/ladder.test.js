@@ -7,9 +7,8 @@ import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } f
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
 const LADDER = config.ladders.service.build; // primary key renamed in #49; 'deepseek' stays a legacy alias
-const CHEAP = config.ladders.cheap.build;
 const FREE = config.ladders.free.build;
-const CONVERSATIONS = config.ladders.conversations.build;
+const CONVERSATION = config.ladders.conversation.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 
@@ -76,38 +75,53 @@ test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid las
     'the eight free rungs sit in the tail before paid — a Go limit incident still stops there (#36)');
 });
 
-// #42 (owner): zen lives in the cheap ladder only — and at its TAIL: the relay answers 404, so in
-// front of the 14 working rungs it would poison the main cheap fallback (trained-assist-agent#1899)
-// with four dead steps. This pin is what keeps zen out of deepseek and out of the cheap head.
-test('config: cheap = 13 working rungs + zen tail (#42)', () => {
-  assert.deepEqual(CHEAP, [
-    'opencode-go/deepseek-v4-flash',
+// #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
+// front of the eight working $0 rungs it would poison the free fallback (trained-assist-agent#1899)
+// with four dead steps. This pin keeps zen out of `service` and out of the free head.
+test('config: free = 8 $0 rungs + zen tail (#42)', () => {
+  assert.deepEqual(FREE, [
+    'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
-    'opencode-go/qwen3.8-flash',
-    'opencode-go/mimo-v2.6-flash',
-    'opencode-go/deepseek-flash',
-    'opencode-go/glm-5.3-flash',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/cohere/north-mini-code:free',
-    'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'openrouter/poolside/laguna-xs-2.1:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
+    'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     'opencode-zen/mimo-v2.6-flash-free',
     'opencode-zen/mimo-v2.5-free',
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ]);
-  assert.equal(CHEAP.length, 17, '13 working rungs + 4 zen');
-  assert.deepEqual(CHEAP.slice(13), [
+  assert.equal(FREE.length, 12, '8 $0 rungs + 4 zen');
+  assert.ok(FREE.every(m => m.startsWith('opencode-zen/') || m.endsWith('-free') || m.endsWith(':free')),
+    'every free rung is $0 — no Go subscription, no paid OpenRouter');
+  assert.deepEqual(FREE.slice(8), [
     'opencode-zen/mimo-v2.6-flash-free',
     'opencode-zen/mimo-v2.5-free',
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
-  ], 'zen is the tail — never ahead of a working rung while the relay is 404');
-  assert.ok(CHEAP.slice(0, 13).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
-  assert.deepEqual(config.ladders.cheap, { build: CHEAP }, 'cheap is the build-role ladder');
+  ], 'zen is the tail — never ahead of a working rung while the relay can 404');
+  assert.ok(FREE.slice(0, 8).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
+  assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
+});
+
+test('config: aliases resolve to the designed ladders (#79 design alignment)', () => {
+  assert.deepEqual(config.aliases, {
+    deepseek: 'service',
+    'free-ladder': 'free',
+    cheap: 'free',
+    conversations: 'conversation',
+    picture: 'vision',
+    'picture advanced': 'vision advanced',
+  });
+  // removed as artifacts — the names must not be real ladders anymore
+  for (const gone of ['cheap', 'free_100percent', 'picture', 'picture advanced', 'conversations']) {
+    assert.equal(config.ladders[gone], undefined, `${gone} is not a ladder`);
+  }
+  for (const keep of ['free', 'vision', 'vision advanced', 'conversation', 'build', 'build advanced', 'plan', 'explore', 'general', 'review', 'service', 'doctor', 'research']) {
+    assert.ok(config.ladders[keep], `${keep} exists`);
+  }
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -425,11 +439,11 @@ async function readAll(stream) {
   for (;;) { const { value, done } = await r.read(); if (done) return out; out += dec.decode(value); }
 }
 
-test('cheap alias resolves; stream answered by the first rung with output, bytes replayed intact', async () => {
+test('free-ladder alias resolves to free; stream answered by the first rung with output, bytes replayed intact', async () => {
   const calls = [];
-  const r = await run({ model: 'cheap', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
+  const r = await run({ model: 'free-ladder', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, CHEAP[0]);
+  assert.equal(r.model, FREE[0]);
   assert.equal(calls[0].body.stream, true);
   const text = await readAll(r.stream);
   assert.match(text, /"role":"assistant"/, 'the buffered role frame is replayed');
@@ -505,14 +519,14 @@ test('config: research is split by role — Go reads first, paid Gemini tail (ow
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
 });
 
-test('config: conversations = hh-skill writing — gemini-3.1-flash-lite-preview first (owner 2026-10-01)', () => {
+test('config: conversation = hh-skill writing — gemini-3.1-flash-lite-preview first (owner 2026-10-01)', () => {
   const expected = [
     'openrouter/google/gemini-3.1-flash-lite-preview',
     'openrouter/google/gemini-2.5-flash',
     'opencode-go/mimo-v2.6-flash',
   ];
-  assert.deepEqual(CONVERSATIONS, expected);
-  assert.deepEqual(config.ladders.conversations, { build: expected }, 'conversations is the build-role ladder');
+  assert.deepEqual(CONVERSATION, expected);
+  assert.deepEqual(config.ladders.conversation, { build: expected }, 'conversation is the build-role ladder');
 });
 
 // #71 (owner 2026-10-02, уточнение №2): уровень = отдельная лестница, «нет эскалации — это не
@@ -550,20 +564,19 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   ], 'explore = big-ctx only (1M+), tail follows research:explore #28');
   assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
 
-  // picture: всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
-  assert.deepEqual(config.ladders.picture.build, [
+  // vision (распознавание картинок): всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
+  assert.deepEqual(config.ladders.vision.build, [
     'openrouter/google/gemini-2.5-flash-lite',
     'openrouter/google/gemini-2.5-flash',
-  ], 'picture = gemini base (0.10/0.40 → 0.30/2.50)');
-  assert.deepEqual(config.ladders['picture advanced'].build, [
+  ], 'vision = gemini base (0.10/0.40 → 0.30/2.50)');
+  assert.deepEqual(config.ladders['vision advanced'].build, [
     'openrouter/google/gemini-2.5-flash',
     'openrouter/google/gemini-3.8-flash',
-  ], 'picture advanced = gemini advanced (0.30/2.50 → 0.75/3.75)');
+  ], 'vision advanced = gemini advanced (0.30/2.50 → 0.75/3.75)');
 
   // free: потолок $0 — ни подписки, ни платного (для тестов с объёмом/повторами)
   const f100 = config.ladders.free.build;
-  assert.equal(f100.length, 8, 'eight free rungs');
-  assert.ok(f100.every(m => m.endsWith('-free') || m.endsWith(':free')), 'every rung is $0');
+  assert.ok(f100.every(m => m.startsWith('opencode-zen/') || m.endsWith('-free') || m.endsWith(':free')), 'every rung is $0');
   assert.ok(!f100.some(m => m === 'opencode-go/mimo-v2.6-flash'), 'no subscription rung');
   assert.ok(!f100.some(m => m.startsWith('openrouter/') && !m.endsWith(':free')), 'no paid rung');
 
@@ -573,23 +586,23 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.equal(config.ladders.service.build[0], 'opencode-go/mimo-v2.6-flash', 'service stays Pareto-first');
 });
 
-test('ladder: conversations walks top-down — 3.1-flash-lite-preview answers, 2.5-flash only on its failure', async () => {
+test('ladder: conversation walks top-down — 3.1-flash-lite-preview answers, 2.5-flash only on its failure', async () => {
   const calls = [];
-  const beh = { [short(CONVERSATIONS[0])]: () => ({ status: 500, error: 'boom' }) };
-  const r = await run({ model: 'conversations', messages: [{ role: 'user', content: 'hi' }] },
+  const beh = { [short(CONVERSATION[0])]: () => ({ status: 500, error: 'boom' }) };
+  const r = await run({ model: 'conversation', messages: [{ role: 'user', content: 'hi' }] },
     { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, CONVERSATIONS[1]);
+  assert.equal(r.model, CONVERSATION[1]);
   // upstream sees the provider prefix stripped (openrouter/ is routing, not part of the id)
-  assert.deepEqual(calls.map(c => c.model), [short(CONVERSATIONS[0]), short(CONVERSATIONS[1])]);
+  assert.deepEqual(calls.map(c => c.model), [short(CONVERSATION[0]), short(CONVERSATION[1])]);
 });
 
-test('ladder: conversations ladder_rung pins the requested model without failover (model switch / bench)', async () => {
+test('ladder: conversation ladder_rung pins the requested model without failover (model switch / bench)', async () => {
   const calls = [];
-  const r = await run({ model: 'conversations', messages: [{ role: 'user', content: 'hi' }] },
-    { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls), pinRung: CONVERSATIONS[1] });
+  const r = await run({ model: 'conversation', messages: [{ role: 'user', content: 'hi' }] },
+    { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls), pinRung: CONVERSATION[1] });
   assert.equal(r.ok, true);
-  assert.equal(r.model, CONVERSATIONS[1]);
+  assert.equal(r.model, CONVERSATION[1]);
   assert.equal(calls.length, 1, 'pinned rung, no walk');
 });
 
