@@ -503,14 +503,15 @@ test('config: conversations = hh-skill writing — gemini-3.1-flash-lite-preview
   assert.deepEqual(config.ladders.conversations, { build: expected }, 'conversations is the build-role ladder');
 });
 
-// #71 (owner 2026-10-02): роль = отдельная лестница — агент вызывает из лестницы просто
-// build / plan / explore / general / review (распил по ролям, не по группам вида build:plan).
-// build — единственная пока двухуровневая: base (free ×3) эскалируется в advanced (mimo → paid)
-// штатным failover; plan/general/review — advanced-first («все кроме build на mimo»);
-// explore — только большие контексты (Hermes в ресёрче берёт её целиком, владелец 2026-10-02).
-test('config: role ladders — build base→advanced, plan/general/review advanced-first, explore big-ctx only (#71)', () => {
-  const advanced = [
-    'opencode-go/mimo-v2.6-flash',
+// #71 (owner 2026-10-02, уточнение №2): уровень = отдельная лестница, «нет эскалации — это не
+// задача лестницы, задача лестницы ретраи». Лестницы-уровни: build (base free ×3 + платный хвост,
+// без mimo), build advanced (mimo + платный хвост), plan/general/review = advanced-first,
+// explore = big-ctx only, picture* = гемини-стек (multimodal 1M), free_100percent = только
+// бесплатное ($0-потолок для тяжёлых тестов). Два конструктора: single-model профили API
+// (service/conversations — как есть) и сборка из четырёх лестниц для opencode (профили
+// free_100percent / master / advanced).
+test('config: tier ladders — build=base, build advanced=mimo, picture gemini, free_100percent $0 (#71)', () => {
+  const paid = [
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ];
@@ -519,10 +520,14 @@ test('config: role ladders — build base→advanced, plan/general/review advanc
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
   ];
-  assert.deepEqual(config.ladders.build.build, [...base, ...advanced], 'build = base level then advanced level');
+  const advanced = ['opencode-go/mimo-v2.6-flash', ...paid];
+
+  assert.deepEqual(config.ladders.build.build, [...base, ...paid], 'build = base free ×3 + платный хвост, без mimo');
+  assert.deepEqual(config.ladders['build advanced'].build, advanced, 'build advanced = mimo + платный хвост');
   for (const role of ['plan', 'general', 'review']) {
     assert.deepEqual(config.ladders[role], { build: advanced }, `${role} advanced-first — роль=лестница (#71)`);
   }
+
   // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
   // gemini-2.5-flash-lite 1048576, xiaomi mimo 1050000; ling-3.0-flash = 262144 и не годится.
   const explore = config.ladders.explore.build;
@@ -532,8 +537,26 @@ test('config: role ladders — build base→advanced, plan/general/review advanc
     'openrouter/xiaomi/mimo-v2.6-flash',
   ], 'explore = big-ctx only (1M+), tail follows research:explore #28');
   assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
+
+  // picture: всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
+  assert.deepEqual(config.ladders.picture.build, [
+    'openrouter/google/gemini-2.5-flash-lite',
+    'openrouter/google/gemini-2.5-flash',
+  ], 'picture = gemini base (0.10/0.40 → 0.30/2.50)');
+  assert.deepEqual(config.ladders['picture advanced'].build, [
+    'openrouter/google/gemini-2.5-flash',
+    'openrouter/google/gemini-3.8-flash',
+  ], 'picture advanced = gemini advanced (0.30/2.50 → 0.75/3.75)');
+
+  // free_100percent: потолок $0 — ни подписки, ни платного (для тестов с объёмом/повторами)
+  const f100 = config.ladders.free_100percent.build;
+  assert.equal(f100.length, 8, 'eight free rungs');
+  assert.ok(f100.every(m => m.endsWith('-free') || m.endsWith(':free')), 'every rung is $0');
+  assert.ok(!f100.some(m => m === 'opencode-go/mimo-v2.6-flash'), 'no subscription rung');
+  assert.ok(!f100.some(m => m.startsWith('openrouter/') && !m.endsWith(':free')), 'no paid rung');
+
   assert.ok(!JSON.stringify(config.ladders.build).includes('opencode-zen/'), 'zen stays out (#42)');
-  assert.ok(!JSON.stringify(config.ladders.build).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in base');
+  assert.ok(!JSON.stringify(config.ladders.build).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in build base');
   // контракт #67 не тронут
   assert.equal(config.ladders.service.build[0], 'opencode-go/mimo-v2.6-flash', 'service stays Pareto-first');
 });

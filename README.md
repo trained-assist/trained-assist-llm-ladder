@@ -85,20 +85,32 @@ caller sent none) and aggregates SSE → JSON for non-streaming callers.
   (or per-call via `ladder_rung` for A/B and bench pins); the last N question/answer exchanges
   are recorded JSONL on the hh-skill side for later benching.
 
-- **`build` / `plan` / `explore` / `general` / `review`** — interactive agent work; the
-  role/level model (issue #71, owner 2026-10-02): **role = a ladder of its own** — the agent
-  calls `ladder/build`, `ladder/plan`, … directly (split by roles, not `build:plan` groups).
-  Role `build` is the only two-level ladder so far: **base** (`space-bunny-free` →
-  `longcat-2.5-preview-free` → `ling-3.0-flash-sante:free`, $0) escalates to **advanced**
-  (`opencode-go/mimo-v2.6-flash` → paid `ling-3.0-flash` → paid `xiaomi mimo-v2.6-flash`) via the
-  normal failover — «базик плохо сработал → перевызов на advanced», no caller-side logic needed;
-  an opencode profile can pin advanced for a harder task (e.g. code review).
-  `plan` / `general` / `review` open on advanced (owner: «все кроме build на mimo»).
-  `explore` has **≥1M context on every rung** — mimo (1M) → `gemini-2.5-flash-lite` (1048576)
-  → `xiaomi/mimo-v2.6-flash` (1050000), contexts measured on OpenRouter `/v1/models` 2026-10-02;
-  Hermes takes this ladder whole for research reads (tail follows research:explore, #28).
-  The opencode agents map 1:1 to `ladder/<role>` (profile `deepseek-go`); vision is taxonomy only
-  for now — image calls stay on Gemini in their callers (#71).
+- **`build` / `build advanced` / `plan` / `explore` / `general` / `review` / `picture` /
+  `picture advanced` / `free_100percent`** — interactive agent work; the role/level model
+  (issue #71, owner 2026-10-02): **level = a ladder of its own, no escalation between them** —
+  «нет эскалации, это не задача лестницы, задача лестницы — ретраи» (a ladder retries down its
+  own rungs; moving between levels is the caller's decision, e.g. an opencode profile).
+  - `build` — base: `space-bunny-free` → `longcat-2.5-preview-free` → `ling-3.0-flash-sante:free`
+    → paid tail (`ling-3.0-flash` → `xiaomi mimo-v2.6-flash`); **no mimo inside**.
+  - `build advanced` — advanced head: `opencode-go/mimo-v2.6-flash` → the same paid tail
+    (pin it from a profile for a harder task, e.g. code review).
+  - `plan` / `general` / `review` — advanced-first: mimo → paid tail (owner: «все кроме build на mimo»).
+  - `explore` — **≥1M context on every rung**: mimo (1M) → `gemini-2.5-flash-lite` (1048576) →
+    `xiaomi/mimo-v2.6-flash` (1050000), contexts measured on OpenRouter `/v1/models` 2026-10-02;
+    Hermes takes this ladder whole for research reads (tail follows research:explore, #28).
+  - `picture` / `picture advanced` — the vision stack, all multimodal image+text with 1M ctx
+    (OpenRouter architecture 2026-10-02): `gemini-2.5-flash-lite` ($0.10/$0.40) →
+    `gemini-2.5-flash` ($0.30/$2.50); advanced: `gemini-2.5-flash` → `gemini-3.8-flash` ($0.75/$3.75).
+  - `free_100percent` — **eight free rungs only, a hard $0 ceiling** — for tests with heavy
+    token counts or many repeats, where spending must be impossible.
+
+  **Constructors** (#71): (1) plain LLM callers keep the single-model profiles as-is
+  (`service`, `conversations` — role suffixes); (2) opencode launches in the agent get a
+  four-ladder assembly (`build`/`plan`/`explore`/`general`) — three ready profiles in
+  `~/.config/opencode/profiles/`: `free_100percent` (everything on the $0 ladder), `master`
+  (build=base ladder, roles on advanced), `advanced` (build→`build advanced`).
+  Vision is no longer taxonomy-only: `picture*` ladders exist; legacy callers still keep
+  Gemini in-process (#71).
 
 Rungs are tried top-down:
 
