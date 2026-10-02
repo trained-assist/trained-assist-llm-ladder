@@ -512,7 +512,7 @@ test('config: doctor = Go MiMo first, then stronger Go models, paid OpenRouter m
 });
 
 test('config: research is split by role — Go reads first, paid Gemini tail (owner 2026-09-30, issue #28)', () => {
-  const reader = ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/google/gemini-2.5-flash-lite'];
+  const reader = ['opencode-go/mimo-v2.6-flash', 'openrouter/google/gemini-2.5-flash-lite'];
   const thinker = ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/xiaomi/mimo-v2.6-flash'];
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);

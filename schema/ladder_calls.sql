@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS ladder_calls (
   ms INTEGER NOT NULL,
   attempts TEXT,
   tokens_in INTEGER,
-  tokens_out INTEGER
+  tokens_out INTEGER,
+  tokens_cached INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_ladder_calls_trace ON ladder_calls (trace_id, ts);

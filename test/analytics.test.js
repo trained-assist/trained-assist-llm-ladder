@@ -15,7 +15,7 @@ qs = m.queries(since)
 print(json.dumps({k: [sql, params] for k, (sql, params) in qs.items()}))`);
   const qs = JSON.parse(out);
   assert.deepEqual(Object.keys(qs).sort(),
-    ['totals', 'ladders', 'models', 'rungs', 'daily', 'depth', 'errors'].sort());
+    ['totals', 'ladders', 'models', 'rungs', 'hourly', 'daily', 'depth', 'errors'].sort());
   for (const [name, [sql, params]] of Object.entries(qs)) {
     assert.match(sql, /\?1/, `${name} must bind ?1`);
     assert.ok(Array.isArray(params) && params.length === 1, `${name} params`);
@@ -60,48 +60,50 @@ print(f'{paid:.6f} {free:.6f} {go} {unk} {m.openrouter_id("opencode-go/x")} {m.o
   assert.equal(orId, 'a/b');
 });
 
-test('analytics: build_report totals, cost rollup, error merge, missing pricing degrades', () => {
+test('analytics: build_report totals, cache-aware cost rollup, hourly cut, error merge', () => {
   const out = run(`
 rows = {
   'totals': [{'n': 10, 'failed': 2, 'avg_ms': 4000, 'tin': 1000, 'tout': 500,
               'ok_n': 8, 'ok_no_usage': 3}],
-  'ladders': [{'ladder': 'deepseek', 'n': 10, 'failed': 2, 'avg_ms': 4000}],
-  'models': [{'model': 'openrouter/deepseek/deepseek-v4-flash-0731', 'n': 4, 'avg_ms': 3000,
-              'tin': 1000000, 'tout': 500000, 'no_usage': 0},
-             {'model': 'opencode-go/mimo-v2.6-flash', 'n': 4, 'avg_ms': 5000,
-              'tin': 10, 'tout': 5, 'no_usage': 3}],
+  'ladders': [{'ladder': 'service', 'n': 10, 'failed': 2, 'avg_ms': 4000}],
+  'models': [{'model': 'opencode-go/mimo-v2.6-flash', 'n': 4, 'avg_ms': 5000,
+              'tin': 1000000, 'tcached': 400000, 'tout': 500000, 'no_usage': 3},
+             {'model': 'opencode-go/space-bunny-free', 'n': 6, 'avg_ms': 3000,
+              'tin': 10**9, 'tcached': 0, 'tout': 10**8, 'no_usage': 0}],
+  'rungs': [{'ladder': 'service', 'model': 'opencode-go/mimo-v2.6-flash', 'calls': 4,
+             'tin': 1000000, 'tcached': 400000, 'tout': 500000}],
+  'hourly': [{'hour': '2026-10-02T22:00Z', 'ladder': 'service', 'model': 'opencode-go/mimo-v2.6-flash',
+              'calls': 4, 'ok_n': 4, 'tin': 1000000, 'tcached': 400000, 'tout': 500000}],
   'daily': [{'d': '2026-09-30', 'n': 10, 'failed': 2, 'tin': 1000, 'tout': 500}],
   'depth': [{'depth': 1, 'n': 8}, {'depth': 2, 'n': 2}],
   'errors': [{'err': 'HTTP 402: afford 499', 'n': 3},
              {'err': 'HTTP 402: afford 776', 'n': 4},
              {'err': 'empty answer', 'n': 2}],
 }
-pricing = {'deepseek/deepseek-v4-flash-0731': {'prompt': 1e-8, 'completion': 1.28e-6}}
-r = m.build_report(rows, pricing, 7)
-print(r['totals']['calls'], r['totals']['ok_rate'], r['totals']['est_cost_usd'],
-      len(r['models']), r['models'][0]['cost'], len(r['errors']), r['errors'][0]['n'], r['pricing_ok'])
-r2 = m.build_report(rows, {}, 7)
-print(r2['totals']['est_cost_usd'], r2['models'][0]['cost'], r2['pricing_ok'])
+r = m.build_report(rows, {}, 7)
+print(r['totals']['calls'], r['totals']['ok_rate'], round(r['totals']['est_cost_usd'], 5),
+      len(r['models']), round(r['models'][0]['cost'], 5), r['models'][1]['cost'],
+      len(r['errors']), r['errors'][0]['n'],
+      len(r['hourly']), round(r['hourly'][0]['cost'], 5), round(r['rungs'][0]['cost'], 5))
 md = m.render_markdown(r)
-print('Ladder analytics' in md, 'failover' in md.lower() or 'attempts' in md.lower(), 'HTTP' in md)`);
-  const [l1, l2, l3] = out.trim().split('\n');
-  const [calls, okRate, cost, nModels, firstCost, nErr, topN, pricingOk] = l1.split(' ');
+print('Ladder analytics' in md, 'failover' in md.lower() or 'attempts' in md.lower(), 'HTTP' in md, 'Hourly' in md)`);
+  const [l1, l2] = out.trim().split('\n');
+  const [calls, okRate, cost, nModels, firstCost, freeCost, nErr, topN, nHourly, hourlyCost, rungCost] = l1.split(' ');
   assert.equal(calls, '10');
   assert.equal(okRate, '0.8');
-  // 1M in @ $0.01/M + 0.5M out @ $1.28/M = 0.01 + 0.64
-  assert.equal(Number(cost).toFixed(2), '0.65');
+  // cache-aware: fresh 600k @0.14 + out 500k @0.28 + cached 400k @0.0028 = 0.084+0.14+0.00112 = 0.22512
+  assert.equal(cost, '0.22512');
   assert.equal(nModels, '2');
-  assert.equal(Number(firstCost).toFixed(2), '0.65');
-  // merged: 3+4=7 on top, then empty answer
+  assert.equal(firstCost, '0.22512');
+  assert.equal(freeCost, '0', 'Go free rung costs $0');
   assert.equal(nErr, '2');
   assert.equal(topN, '7');
-  assert.equal(pricingOk, 'True');
-  const [noCost, noModelCost, noPricingOk] = l2.split(' ');
-  assert.equal(noCost, 'None');
-  assert.equal(noModelCost, 'None');
-  assert.equal(noPricingOk, 'False');
-  const [hasTitle, hasDepth, hasErr] = l3.split(' ');
+  assert.equal(nHourly, '1');
+  assert.equal(hourlyCost, '0.22512');
+  assert.equal(rungCost, '0.22512');
+  const [hasTitle, hasDepth, hasErr, hasHourly] = l2.split(' ');
   assert.equal(hasTitle, 'True');
   assert.equal(hasDepth, 'True');
   assert.equal(hasErr, 'True', 'top errors table renders (normalized: HTTP #)');
+  assert.equal(hasHourly, 'True', 'hourly cut renders');
 });

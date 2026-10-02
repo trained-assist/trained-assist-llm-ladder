@@ -5,6 +5,7 @@
 import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
 import config from '../config/ladders.json' with { type: 'json' };
+import prices from '../config/prices.json' with { type: 'json' };
 
 // GET /v1/analytics: both bind ?1 = since (ms). Aggregates per requested ladder name;
 // the depth histogram is attempts-per-call from the attempts JSON (json_valid guards
@@ -15,16 +16,21 @@ const ANALYTICS_AGG_SQL =
   + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
   + 'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
   + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY ladder';
+// Per ladder × served model: calls + tokens (in / cached / out) so the caller can price each
+// rung. Category is derived in JS (categoryOf) — the model already determines it.
 const ANALYTICS_RUNGS_SQL =
-  'SELECT ladder, '
-  + "CASE WHEN model LIKE 'opencode-go/%' AND model NOT LIKE '%-free' THEN 'go_sub' "
-  + "WHEN model LIKE 'opencode-go/%-free' THEN 'go_free' "
-  + "WHEN model LIKE 'opencode-zen/%' THEN 'zen' "
-  + "WHEN model LIKE 'openrouter/%%:free' THEN 'or_free' "
-  + "WHEN model LIKE 'openrouter/%' THEN 'or_paid' "
-  + "ELSE 'other' END AS category, "
-  + 'COUNT(*) AS calls, SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout '
-  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 GROUP BY ladder, category ORDER BY ladder, category';
+  'SELECT ladder, model, COUNT(*) AS calls, '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 GROUP BY ladder, model ORDER BY ladder, calls DESC';
+// Hourly cut (#93): the same ladder × model breakdown bucketed by UTC hour, so every cost
+// cut the owner asked for is one row per hour, not a per-call dump.
+const ANALYTICS_HOURLY_SQL =
+  "SELECT strftime('%Y-%m-%dT%H:00Z', ts / 1000, 'unixepoch') AS hour, ladder, model, "
+  + 'COUNT(*) AS calls, SUM(ok) AS ok_n, '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY hour, ladder, model ORDER BY hour DESC, calls DESC';
 const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
   + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
@@ -54,6 +60,26 @@ export function normalizeError(err) {
     return clip((s.slice(0, i + 2) + body).replace(/\s+/g, ' ').trim());
   }
   return clip(s.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim());
+}
+
+// Rung category — which free/paid tier a served model belongs to (#80). Derived in JS now
+// that the rung query returns the model itself.
+export function categoryOf(model) {
+  if (!model) return 'other';
+  if (model.startsWith('opencode-go/')) return model.endsWith('-free') ? 'go_free' : 'go_sub';
+  if (model.startsWith('opencode-zen/')) return 'zen';
+  if (model.startsWith('openrouter/')) return model.endsWith(':free') ? 'or_free' : 'or_paid';
+  return 'other';
+}
+
+// Estimated $ for one ladder×model row: (in - cached)×in + out×out + cached×cachedRead, all
+// per 1M tokens (config/prices.json). null = unknown price and not an obvious $0 rung.
+export function costUsd(model, tin, tcached, tout) {
+  if (!model) return null;
+  const p = prices[model];
+  if (!p) return (model.startsWith('opencode-zen/') || model.endsWith('-free') || model.endsWith(':free')) ? 0 : null;
+  const fresh = Math.max(0, (tin || 0) - (tcached || 0));
+  return (fresh * p[0] + (tout || 0) * p[1] + (tcached || 0) * p[2]) / 1e6;
 }
 
 function json(status, body, headers = {}) {
@@ -286,6 +312,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     try {
       const aggRows = (await db.prepare(ANALYTICS_AGG_SQL).bind(since).all()).results || [];
       const rungRows = (await db.prepare(ANALYTICS_RUNGS_SQL).bind(since).all()).results || [];
+      const hourlyRows = (await db.prepare(ANALYTICS_HOURLY_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
@@ -323,21 +350,34 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const rungGroups = new Map();
       for (const r of rungRows) {
         const ladder = canonName(r.ladder); // alias-merge rung rows the same way as agg rows
-        const key = `${ladder}|${r.category}`;
-        if (!rungGroups.has(key)) rungGroups.set(key, { ladder, category: r.category, calls: 0, tokens_in: 0, tokens_out: 0 });
-        const e = rungGroups.get(key);
-        e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_out += num(r.tout);
+        const model = r.model || null;
+        const key = `${ladder}|${model}`;
+        let e = rungGroups.get(key);
+        if (!e) { e = { ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; rungGroups.set(key, e); }
+        e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
       }
+      for (const e of rungGroups.values()) e.cost_usd = costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out);
       const rungsByLadder = new Map();
-      for (const [, e] of rungGroups) {
+      for (const e of rungGroups.values()) {
         if (!rungsByLadder.has(e.ladder)) rungsByLadder.set(e.ladder, []);
         rungsByLadder.get(e.ladder).push(e);
       }
-      const totals = { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0 };
+      // Hourly cut (#93): one row per UTC hour × ladder × model, with cost — the owner's
+      // "master-plan-mimo: $0.2" view, aggregated so an hour is a handful of rows, not a dump.
+      const hourly = hourlyRows.map((r) => {
+        const tin = num(r.tin), tcached = num(r.tcached), tout = num(r.tout);
+        return {
+          hour: r.hour, ladder: canonName(r.ladder), model: r.model || null, category: categoryOf(r.model),
+          calls: num(r.calls), ok: num(r.ok_n), tokens_in: tin, tokens_cached: tcached, tokens_out: tout,
+          cost_usd: costUsd(r.model, tin, tcached, tout),
+        };
+      });
+      const totals = { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 };
       const out = [...ladders.values()].sort((a, b) => b.calls - a.calls);
       for (const e of out) {
         e.depth.sort((a, b) => a.depth - b.depth);
         e.rungs = rungsByLadder.get(e.ladder) || [];
+        e.cost_usd = e.rungs.reduce((s, r) => s + (r.cost_usd || 0), 0);
         for (const k of Object.keys(totals)) totals[k] += e[k];
       }
       // Top errors, merged across all ladders: normalize first (digits masked), then
@@ -353,7 +393,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         .map(([error, calls]) => ({ error, calls }))
         .sort((a, b) => b.calls - a.calls)
         .slice(0, 20);
-      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, errors });
+      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, hourly, errors });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
     }

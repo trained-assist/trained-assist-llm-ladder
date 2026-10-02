@@ -7,7 +7,7 @@ const ENV = { LADDER_TOKEN: 't' };
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
 // canned rows for that statement — routed by SQL shape (agg / depth / errors), not
 // by call order, so the queries can be reordered or extended freely.
-function fakeD1({ aggRows = [], rungRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
+function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
   const calls = [];
   return {
     _calls: calls,
@@ -19,7 +19,8 @@ function fakeD1({ aggRows = [], rungRows = [], depthRows = [], errorRows = [], f
             if (fail) throw new Error('d1 down');
             if (sql.includes('json_array_length')) return { results: depthRows };
             if (sql.includes('json_each')) return { results: errorRows };
-            if (sql.includes('model LIKE')) return { results: rungRows };
+            if (sql.includes('AS hour')) return { results: hourlyRows };
+            if (sql.includes('GROUP BY ladder, model')) return { results: rungRows };
             return { results: aggRows };
           } };
         },
@@ -52,10 +53,14 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
       { ladder: 'deepseek:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
     ],
     rungRows: [
-      { ladder: 'deepseek', category: 'go_sub', calls: 10, tin: 1000, tout: 50 },
-      { ladder: 'deepseek', category: 'or_free', calls: 5, tin: 200, tout: 10 },
-      { ladder: 'free-ladder', category: 'go_free', calls: 3, tin: 300, tout: 15 },
-      { ladder: 'free-ladder', category: 'or_free', calls: 2, tin: 150, tout: 40 },
+      { ladder: 'deepseek', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 1000, tcached: 400, tout: 50 },
+      { ladder: 'deepseek', model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', calls: 5, tin: 200, tcached: 0, tout: 10 },
+      { ladder: 'free-ladder', model: 'opencode-go/space-bunny-free', calls: 3, tin: 300, tcached: 0, tout: 15 },
+      { ladder: 'free-ladder', model: 'openrouter/inclusionai/ling-3.0-flash', calls: 2, tin: 150, tcached: 0, tout: 40 },
+    ],
+    hourlyRows: [
+      { hour: '2026-10-02T22:00Z', ladder: 'deepseek', model: 'opencode-go/mimo-v2.6-flash', calls: 10, ok_n: 10, tin: 1000, tcached: 400, tout: 50 },
+      { hour: '2026-10-02T21:00Z', ladder: 'free-ladder', model: 'opencode-go/space-bunny-free', calls: 3, ok_n: 3, tin: 300, tcached: 0, tout: 15 },
     ],
     depthRows: [
       { ladder: 'deepseek', depth: 3, calls: 1 },
@@ -88,14 +93,23 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   const free = b.ladders.find(l => l.ladder === 'free');
   assert.equal(free.calls, 3);
   assert.deepEqual(free.depth, [{ depth: 1, calls: 1 }, { depth: 2, calls: 2 }]);
-  // rung-category breakdown: go_free/zen are $0, or_free is $0, or_paid bills per token —
-  // the owner reads these to size limits (#80).
-  assert.deepEqual(free.rungs, [
-    { ladder: 'free', category: 'go_free', calls: 3, tokens_in: 300, tokens_out: 15 },
-    { ladder: 'free', category: 'or_free', calls: 2, tokens_in: 150, tokens_out: 40 },
-  ]);
+  // rung breakdown is per served model now (#94): category derived, tokens split fresh/cached,
+  // and cost from config/prices.json — the owner's "ladder×model: $X" view (#93).
+  const sb = free.rungs.find(r => r.model === 'opencode-go/space-bunny-free');
+  assert.deepEqual(sb, { ladder: 'free', model: 'opencode-go/space-bunny-free', category: 'go_free', calls: 3, tokens_in: 300, tokens_cached: 0, tokens_out: 15, cost_usd: 0 });
+  const ling = free.rungs.find(r => r.model === 'openrouter/inclusionai/ling-3.0-flash');
+  assert.equal(ling.category, 'or_paid');
+  assert.ok(Math.abs(ling.cost_usd - (150 * 0.021 / 1e6 + 40 * 0.063 / 1e6)) < 1e-12, 'or_paid priced from the config map');
+  assert.equal(free.cost_usd, ling.cost_usd, 'ladder cost = sum of its rungs');
 
-  assert.deepEqual(b.totals, { calls: 27, failed: 4, tokens_in: 2400, tokens_out: 120, no_usage: 5 });
+  // hourly cut: one row per hour × ladder × model, aliased and priced
+  const h = b.hourly.find(x => x.hour === '2026-10-02T22:00Z');
+  assert.equal(h.ladder, 'service', 'deepseek → service alias in the hourly cut too');
+  assert.equal(h.model, 'opencode-go/mimo-v2.6-flash');
+  assert.ok(Math.abs(h.cost_usd - ((1000 - 400) * 0.14 / 1e6 + 50 * 0.28 / 1e6 + 400 * 0.0028 / 1e6)) < 1e-12, 'fresh+cached+out priced');
+
+  assert.deepEqual({ ...b.totals, cost_usd: undefined }, { calls: 27, failed: 4, tokens_in: 2400, tokens_out: 120, no_usage: 5, cost_usd: undefined });
+  assert.ok(b.totals.cost_usd > 0, 'totals carry an estimated $');
   // ladders sorted by calls desc
   assert.equal(b.ladders[0].ladder, 'service');
 });
@@ -121,27 +135,29 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 4, 'all four queries issued');
+  assert.equal(d1._calls.length, 5, 'all five queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
     assert.ok(!sql.includes(String(since)), 'must not interpolate the timestamp');
   }
   assert.match(d1._calls[0].sql, /FROM ladder_calls WHERE ts >= \?1 GROUP BY ladder/);
-  assert.match(d1._calls[1].sql, /model LIKE/, 'rung-category breakdown');
-  assert.match(d1._calls[1].sql, /GROUP BY ladder, category/);
-  assert.match(d1._calls[2].sql, /json_array_length\(attempts\)/);
-  assert.match(d1._calls[2].sql, /json_valid\(attempts\)/);
-  assert.match(d1._calls[3].sql, /json_each\(ladder_calls\.attempts\)/);
-  assert.match(d1._calls[3].sql, /GROUP BY err/);
+  assert.match(d1._calls[1].sql, /GROUP BY ladder, model/, 'ladder × model rungs');
+  assert.match(d1._calls[1].sql, /tokens_cached/, 'cache split in the rung cut');
+  assert.match(d1._calls[2].sql, /AS hour/, 'hourly cut');
+  assert.match(d1._calls[3].sql, /json_array_length\(attempts\)/);
+  assert.match(d1._calls[3].sql, /json_valid\(attempts\)/);
+  assert.match(d1._calls[4].sql, /json_each\(ladder_calls\.attempts\)/);
+  assert.match(d1._calls[4].sql, /GROUP BY err/);
 });
 
 test('GET /v1/analytics: empty window → zero totals, no ladders', async () => {
   const r = await get({ ...ENV, LADDER_TRACE_DB: fakeD1() }, '?hours=1');
   assert.equal(r.status, 200);
   const b = await r.json();
-  assert.deepEqual(b.totals, { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0 });
+  assert.deepEqual(b.totals, { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 });
   assert.deepEqual(b.ladders, []);
+  assert.deepEqual(b.hourly, []);
 });
 
 test('GET /v1/analytics: no D1 binding → 503; D1 failure → 500 (never throws out of handle)', async () => {
