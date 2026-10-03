@@ -7,7 +7,7 @@ const ENV = { LADDER_TOKEN: 't' };
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
 // canned rows for that statement — routed by SQL shape (agg / depth / errors), not
 // by call order, so the queries can be reordered or extended freely.
-function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
+function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
   const calls = [];
   return {
     _calls: calls,
@@ -20,6 +20,7 @@ function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], depthRows = [], 
             if (sql.includes('json_array_length')) return { results: depthRows };
             if (sql.includes('json_each')) return { results: errorRows };
             if (sql.includes('AS hour')) return { results: hourlyRows };
+            if (sql.includes('GROUP BY app, ladder, model')) return { results: appRows };
             if (sql.includes('GROUP BY ladder, model')) return { results: rungRows };
             return { results: aggRows };
           } };
@@ -113,6 +114,56 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   assert.equal(b.ladders[0].ladder, 'service');
 });
 
+test('GET /v1/analytics: per-sub-task cut — cost by caller app, ladder name collapsed (#107)', async () => {
+  // Every one of the agent's ~20 service tools posts model="service", so the ladder name alone
+  // cannot say which sub-task spends. x-ladder-app (the caller's `source:`) is the only
+  // discriminator, and this is the cut that makes it usable.
+  const d1 = fakeD1({
+    appRows: [
+      // two sub-tasks on the same ladder+model — they must stay separate rows
+      { app: 'gtd-intent', ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 100, tin: 100_000, tcached: 0, tout: 2_000 },
+      { app: 'tg-format', ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 20_000, tcached: 0, tout: 8_000 },
+      // the paid tail of one sub-task: this is where money actually goes
+      { app: 'tg-format', ladder: 'service', model: 'openrouter/inclusionai/ling-3.0-flash', calls: 3, tin: 5_000, tcached: 0, tout: 1_000 },
+      // the default role collapses: 'service:build' is the same ladder as 'service'
+      { app: 'hh-conversation', ladder: 'service:build', model: 'openrouter/google/gemini-3.1-flash-lite-preview', calls: 7, tin: 30_000, tcached: 0, tout: 900 },
+      { app: 'hh-conversation', ladder: 'service', model: 'openrouter/google/gemini-3.1-flash-lite-preview', calls: 2, tin: 10_000, tcached: 0, tout: 300 },
+      // a $0 rung: calls, but no money
+      { app: 'session-summary', ladder: 'service', model: 'opencode-go/space-bunny-free', calls: 40, tin: 90_000, tcached: 0, tout: 5_000 },
+    ],
+  });
+  const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=6');
+  assert.equal(r.status, 200);
+  const b = await r.json();
+
+  // Sorted by cost desc, and this IS the point of the cut: 100 cheap gtd-intent calls on the
+  // $0.14/$0.28 rung ($0.0146) cost MORE than 7 conversation calls ($0.0089). Before it, both sat
+  // inside one "service"/"conversation" bucket and neither was visible.
+  assert.deepEqual(b.apps.map(a => a.app), ['gtd-intent', 'hh-conversation', 'tg-format', 'session-summary']);
+
+  const hh = b.apps.find(a => a.app === 'hh-conversation');
+  assert.equal(hh.calls, 9, "'service' + 'service:build' rows of one sub-task land in one rung row");
+  assert.equal(hh.rungs.length, 1);
+  assert.equal(hh.rungs[0].ladder, 'service', 'default role collapsed');
+  assert.equal(hh.rungs[0].category, 'or_paid');
+  assert.equal(hh.rungs[0].tokens_in, 40_000, 'tokens summed across the raw names');
+  assert.ok(Math.abs(hh.cost_usd - (40_000 * 0.25 / 1e6 + 1_200 * 1.50 / 1e6)) < 1e-12, 'priced from the config map');
+
+  const fmt = b.apps.find(a => a.app === 'tg-format');
+  assert.equal(fmt.calls, 13, 'two rungs of one sub-task sum into one row');
+  assert.equal(fmt.rungs.length, 2);
+  assert.equal(fmt.rungs[0].calls, 10, 'rungs sorted by calls desc');
+  assert.ok(Math.abs(fmt.cost_usd - ((20_000 * 0.14 / 1e6 + 8_000 * 0.28 / 1e6) + (5_000 * 0.021 / 1e6 + 1_000 * 0.063 / 1e6))) < 1e-12,
+    'go_sub rung + or_paid rung priced together');
+
+  const gtd = b.apps.find(a => a.app === 'gtd-intent');
+  assert.ok(gtd.cost_usd > hh.cost_usd, '100 cheap classify calls out-cost 9 conversation calls');
+
+  const sess = b.apps.find(a => a.app === 'session-summary');
+  assert.equal(sess.cost_usd, 0, '$0 rung: calls counted, no money');
+  assert.equal(sess.calls, 40);
+});
+
 test('GET /v1/analytics: hours param clamped to [1,168], default 24', async () => {
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=9999');
@@ -134,7 +185,7 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 5, 'all five queries issued');
+  assert.equal(d1._calls.length, 6, 'all six queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
@@ -144,10 +195,13 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   assert.match(d1._calls[1].sql, /GROUP BY ladder, model/, 'ladder × model rungs');
   assert.match(d1._calls[1].sql, /tokens_cached/, 'cache split in the rung cut');
   assert.match(d1._calls[2].sql, /AS hour/, 'hourly cut');
-  assert.match(d1._calls[3].sql, /json_array_length\(attempts\)/);
-  assert.match(d1._calls[3].sql, /json_valid\(attempts\)/);
-  assert.match(d1._calls[4].sql, /json_each\(ladder_calls\.attempts\)/);
-  assert.match(d1._calls[4].sql, /GROUP BY err/);
+  assert.match(d1._calls[3].sql, /GROUP BY app, ladder, model/, 'per-sub-task cut');
+  assert.match(d1._calls[3].sql, /app IS NOT NULL/);
+  assert.match(d1._calls[3].sql, /ok = 1/, 'only served calls are priced');
+  assert.match(d1._calls[4].sql, /json_array_length\(attempts\)/);
+  assert.match(d1._calls[4].sql, /json_valid\(attempts\)/);
+  assert.match(d1._calls[5].sql, /json_each\(ladder_calls\.attempts\)/);
+  assert.match(d1._calls[5].sql, /GROUP BY err/);
 });
 
 test('GET /v1/analytics: empty window → zero totals, no ladders', async () => {
@@ -157,6 +211,7 @@ test('GET /v1/analytics: empty window → zero totals, no ladders', async () => 
   assert.deepEqual(b.totals, { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 });
   assert.deepEqual(b.ladders, []);
   assert.deepEqual(b.hourly, []);
+  assert.deepEqual(b.apps, []);
 });
 
 test('GET /v1/analytics: no D1 binding → 503; D1 failure → 500 (never throws out of handle)', async () => {
