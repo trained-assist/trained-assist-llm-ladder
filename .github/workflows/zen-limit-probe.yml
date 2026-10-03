@@ -20,6 +20,9 @@ on:
       model_after:
         description: 'fire one request at this model right after the first 429 (shared-bucket test)'
         default: ''
+      delay_ms:
+        description: 'delay between request starts per worker'
+        default: '0'
 
 # Issue #106: two PARALLEL runners (matrix) = two different Azure egress IPs, same anonymous
 # zen fingerprint. If the free-tier limit is per-IP, each runner trips its own budget; if it
@@ -43,6 +46,7 @@ jobs:
             --prompt "${{ inputs.prompt }}" \
             --max-tokens ${{ inputs.max_tokens }} \
             --model-after ${{ inputs.model_after }} \
+            --delay-ms ${{ inputs.delay_ms }} \
             --out zen-probe-gh-${{ matrix.shard }}.json
       - name: fingerprint cross-check runner ${{ matrix.shard }}
         if: always()
