@@ -74,7 +74,7 @@ hour after the incident).
 
 ---
 
-## Zen free — two limit layers, both per IP, no key involved
+## Zen free — three limit layers, all per IP, all request-based
 
 Zen free models (`space-bunny-free`, `longcat-2.5-preview-free`,
 `mimo-v2.6-flash-free`, `mimo-v2.5-free`, `big-pickle`,
