@@ -1,0 +1,51 @@
+name: zen-limit-probe
+on:
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: 'requests per runner'
+        default: '400'
+      concurrency:
+        description: 'concurrency per runner'
+        default: '4'
+      model:
+        description: 'zen free model'
+        default: 'mimo-v2.6-flash-free'
+
+# Issue #106: two PARALLEL runners (matrix) = two different Azure egress IPs, same anonymous
+# zen fingerprint. If the free-tier limit is per-IP, each runner trips its own budget; if it
+# is shared, both trip at the same request count. The probe script writes a JSON report per
+# runner; the summary is printed to the log and the report uploaded as an artifact.
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - name: zen probe from runner ${{ matrix.shard }}
+        run: |
+          node scripts/zen-limit-probe.mjs \
+            --requests ${{ inputs.requests }} \
+            --concurrency ${{ inputs.concurrency }} \
+            --model ${{ inputs.model }} \
+            --out zen-probe-gh-${{ matrix.shard }}.json
+      - name: summary runner ${{ matrix.shard }}
+        if: always()
+        run: |
+          node -e "
+            const r = require('./zen-probe-gh-${{ matrix.shard }}.json');
+            const s = r.summary;
+            console.log('GH runner ${{ matrix.shard }} @ ' + new Date(r.startedAt).toISOString());
+            console.log('  ok=' + s.ok + ' http429=' + s.http429 + ' other=' + s.otherErrors + ' first429At=' + s.first429At);
+            console.log('  usageTotals=' + JSON.stringify(s.usageTotals));
+            const ra = s.retryAfterSeries.filter(x => x.retryAfterSec != null);
+            if (ra.length) console.log('  retry-after: ' + ra[0].retryAfterSec + ' → ' + ra[ra.length-1].retryAfterSec);
+          "
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zen-probe-gh-${{ matrix.shard }}
+          path: zen-probe-gh-${{ matrix.shard }}.json
