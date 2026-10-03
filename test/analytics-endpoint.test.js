@@ -46,26 +46,26 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   const d1 = fakeD1({
     aggRows: [
       // deepseek → service (alias #49), free-ladder → free, deepseek:build → service (default role)
-      { ladder: 'deepseek', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
+      { ladder: 'service', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
       { ladder: 'service', calls: 5, failed: 0, tin: 500, tout: 25, no_usage: 2 },
-      { ladder: 'deepseek:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
+      { ladder: 'service:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
       { ladder: 'free-ladder', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
-      { ladder: 'deepseek:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
+      { ladder: 'service:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
     ],
     rungRows: [
-      { ladder: 'deepseek', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 1000, tcached: 400, tout: 50 },
-      { ladder: 'deepseek', model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', calls: 5, tin: 200, tcached: 0, tout: 10 },
+      { ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 1000, tcached: 400, tout: 50 },
+      { ladder: 'service', model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', calls: 5, tin: 200, tcached: 0, tout: 10 },
       { ladder: 'free-ladder', model: 'opencode-go/space-bunny-free', calls: 3, tin: 300, tcached: 0, tout: 15 },
       { ladder: 'free-ladder', model: 'openrouter/inclusionai/ling-3.0-flash', calls: 2, tin: 150, tcached: 0, tout: 40 },
     ],
     hourlyRows: [
-      { hour: '2026-10-02T22:00Z', ladder: 'deepseek', model: 'opencode-go/mimo-v2.6-flash', calls: 10, ok_n: 10, tin: 1000, tcached: 400, tout: 50 },
+      { hour: '2026-10-02T22:00Z', ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, ok_n: 10, tin: 1000, tcached: 400, tout: 50 },
       { hour: '2026-10-02T21:00Z', ladder: 'free-ladder', model: 'opencode-go/space-bunny-free', calls: 3, ok_n: 3, tin: 300, tcached: 0, tout: 15 },
     ],
     depthRows: [
-      { ladder: 'deepseek', depth: 3, calls: 1 },
-      { ladder: 'deepseek', depth: 1, calls: 9 },
-      { ladder: 'deepseek:build', depth: 1, calls: 7 },
+      { ladder: 'service', depth: 3, calls: 1 },
+      { ladder: 'service', depth: 1, calls: 9 },
+      { ladder: 'service:build', depth: 1, calls: 7 },
       { ladder: 'service', depth: 1, calls: 5 },
       { ladder: 'free-ladder', depth: 2, calls: 2 },
       { ladder: 'free-ladder', depth: 1, calls: 1 },
@@ -176,8 +176,8 @@ test('GET /v1/analytics: no D1 binding → 503; D1 failure → 500 (never throws
 test('GET /v1/analytics: SUM/COUNT arrive as strings from SQLite — coerced to numbers', async () => {
   // D1 JSON-encodes aggregates; a defensive reporter must never see "10" as a string.
   const d1 = fakeD1({
-    aggRows: [{ ladder: 'deepseek', calls: '10', failed: '2', tin: '1000', tout: '50', no_usage: '0' }],
-    depthRows: [{ ladder: 'deepseek', depth: '1', calls: '10' }],
+    aggRows: [{ ladder: 'service', calls: '10', failed: '2', tin: '1000', tout: '50', no_usage: '0' }],
+    depthRows: [{ ladder: 'service', depth: '1', calls: '10' }],
   });
   const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
   const b = await r.json();

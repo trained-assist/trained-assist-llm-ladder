@@ -23,7 +23,7 @@ const authed = (qs) => new Request(`https://l.test/v1/calls${qs}`, { headers: { 
 // One real row out of ladder_calls, as D1 hands it over.
 const ROW = {
   ts: 1759400000000, trace_id: 'task-7', run_id: null, user_id: 'kobzevvv', chat_id: '1714048',
-  session_id: 'sess-42', ladder: 'deepseek', ok: 1, model: 'opencode-go/mimo-v2.6-flash',
+  session_id: 'sess-42', ladder: 'service', ok: 1, model: 'opencode-go/mimo-v2.6-flash',
   ms: 1844, tokens_in: 97, tokens_out: 42,
   attempts: '[{"model":"opencode-go/mimo-v2.6-flash","outcome":"ok","key":0}]',
 };

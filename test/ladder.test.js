@@ -24,7 +24,7 @@ function fakeFetch(behaviour, calls) {
     return { ok: r.status === 200, status: r.status, json: async () => data, text: async () => r.error || '' };
   };
 }
-const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
+const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 
 // Floor/diag assertions are pinned to EXPLICIT rung ids — never to LADDER[0]: #39 reordered the
 // real deepseek ladder (space-bunny-free first) and that alone turned the previous version of
@@ -108,7 +108,6 @@ test('config: free = 8 $0 rungs + zen tail (#42)', () => {
 
 test('config: aliases resolve to the designed ladders (#79 design alignment)', () => {
   assert.deepEqual(config.aliases, {
-    deepseek: 'service',
     'free-ladder': 'free',
     cheap: 'free',
     conversations: 'conversation',
@@ -634,7 +633,7 @@ test('state: a late failure on an already-rotated key parks THAT key, not the he
 
 test('ladder: concurrent weekly-limit on key 0 keeps Go serving on key 1', async () => {
   const env = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a, oc_b', OPENROUTER_API_KEY: 'or' };
-  const cfg = { ladders: { deepseek: { build: ['opencode-go/mimo', 'openrouter/x'] } } };
+  const cfg = { ladders: { service: { build: ['opencode-go/mimo', 'openrouter/x'] } } };
   const store = memoryStore(2);
   const weekly = () => new Response('{"type":"error","error":{"type":"GoUsageLimitError","message":"Go usage limit exceeded"},"metadata":{"limitName":"weekly"}}', { status: 429 });
   const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
@@ -649,7 +648,7 @@ test('ladder: concurrent weekly-limit on key 0 keeps Go serving on key 1', async
     }
     return ok();
   };
-  const body = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
+  const body = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
   const pB = run(body, { env, config: cfg, store, fetchImpl });
   await new Promise(r => setTimeout(r, 10));
   const a = await run(body, { env, config: cfg, store, fetchImpl });
@@ -798,7 +797,7 @@ test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forward
   const post = (headers) => handle(new Request('https://l.test/v1/chat/completions', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer t', ...headers },
-    body: JSON.stringify({ model: 'deepseek', ladder_rung: 'openrouter/xiaomi/mimo-v2.6-flash', messages: [{ role: 'user', content: 'hi' }] }),
+    body: JSON.stringify({ model: 'service', ladder_rung: 'openrouter/xiaomi/mimo-v2.6-flash', messages: [{ role: 'user', content: 'hi' }] }),
   }), ENV, { store: memoryStore(0), fetchImpl: f });
 
   await post({ 'x-ladder-app': 'bg-Playbooks', 'x-ladder-app-title': 'Background Playbooks' });
