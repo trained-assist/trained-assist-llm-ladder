@@ -24,10 +24,11 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config/ladders.json'), 'utf8'));
 
-// Same resolution the worker does (src/ladder.js rungsFor): alias first, then role suffix.
+// Same resolution the worker does (src/ladder.js rungsFor). No aliases since 2026-10-03 —
+// the whole point of this guard is that a rename breaks loudly instead of silently aliasing.
 function rungsFor(name) {
   const [rawLadder, role] = String(name).split(':');
-  const ladder = (config.aliases && config.aliases[rawLadder]) || rawLadder;
+  const ladder = rawLadder;
   const l = config.ladders && config.ladders[ladder];
   if (!l) return null;
   return l[role || 'build'] || l.build || null;

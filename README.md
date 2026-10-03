@@ -1,155 +1,93 @@
 # trained-assist-llm-ladder
 
-OpenAI-compatible **model ladder** for small "service" LLM calls across trained-assist repos
-(answer buttons, formatting, classifiers, summaries, routing). Cloudflare Worker — no VM.
+OpenAI-compatible **model ladder**: one HTTP endpoint that walks a named list of models
+(rungs) top-down and answers from the first one that works. Small "service" LLM calls across
+trained-assist repos — answer buttons, formatting, classifiers, summaries, routing — plus the
+interactive agent roles (build/plan/explore/review).
+
+Cloudflare Worker + one Durable Object. No VM.
 
 Live: `https://llm-ladder.trainedassist.store`
 
+---
+
+## The one rule
+
+**One ladder = one canonical name. No aliases.** Every name below is final; the config has an
+empty `aliases` object. A request that names a ladder which doesn't exist gets
+`404 unknown ladder: <name>` — loud, not silent.
+
+Rung providers:
+
+| prefix | what it is |
+|---|---|
+| `opencode-go/*` | OpenCode Go subscription (per-model monthly $ limits, key rotation) |
+| `openrouter/*` | OpenRouter pay-per-token — `:free` models are $0 |
+| `opencode-zen/*` | Zen free tier, proxied through the GCP relay (`scripts/zen-relay.mjs`) |
+
+---
+
 ## Ladders
 
-`config/ladders.json`:
+`config/ladders.json` is the source of truth. Thirteen ladders, three groups.
 
-- **`service`** (renamed from `deepseek` in issue #49 — the legacy alias `deepseek` keeps
-  resolving, so no client changes; the agent keeps sending it) — small service calls; owner
-  decision 2026-10-02 (issue #67): **Pareto-first**, same for every role — the best model by
-  bench opens, the eight free rungs move into the tail right before the paid one (so a Go
-  weekly-limit incident still lands on free before any money is spent, #36 economics kept) —
-  a default call no longer opens on a weak free model. Free-first window that #67 closes:
-  2026-09-30T15:16Z (#39) → 2026-10-02 (#67 deploy); free rungs first entered the default
-  ladder 2026-09-30T11:07Z (#27). Owner 2026-09-30 (issue #42): the four zen rungs live in
-  `free` only. **Roles** (owner 2026-10-03, issue #98): `service:classify` (short, speed —
-  free-first), `service:summarize` (medium context — mimo → free), `service:format`
-  (mechanical — free-first), `service:route` (decision — mimo → free), `service:gate`
-  (reliability — mimo → paid tail). The default role stays Pareto-first; the agent sends
-  `deepseek:<role>` per call type so each role can be benchmarked and priced separately.
+### 1. Service calls (`service`) — the default
 
-1. `opencode-go/mimo-v2.6-flash` — Go **subscription**, best by Pareto (τ²-bench 76.6%;
-   «мимо норм»), the same starting rung as `research` and `doctor`
-2. `opencode-go/space-bunny-free` — Go free tier, **Unlimited** (limited time); keeps working
-   after the Go usage limit, so a weekly-limit incident stops here
-3. `opencode-go/longcat-2.5-preview-free` — Go free tier, Unlimited (limited time), zero-retention
-4. `openrouter/nvidia/nemotron-3-super-120b-a12b:free` — OpenRouter free (issue #26)
-5. `openrouter/inclusionai/ling-3.0-flash-sante:free` — OpenRouter free, second vendor
-6. `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter free, strongest by bench
-   (coding 49.3; flaky some hours — health-skip walks past it)
-7. `openrouter/cohere/north-mini-code:free` — OpenRouter free, third vendor
-8. `openrouter/dots-studio/dots-3-note-preview:free` — OpenRouter free, fourth vendor
-9. `openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` — OpenRouter free, fifth vendor
-10. `openrouter/inclusionai/ling-3.0-flash` — paid tail starts here ($0.021/$0.063 per M, live
-    OpenRouter price 2026-09-30; fastest paid rung: 1–4s and judge q2 in the continuous bench)
-11. `openrouter/xiaomi/mimo-v2.6-flash` — paid, second vendor ($0.14/$0.28; owner: «мимо норм»)
+The `service` ladder answers small mechanical calls: buttons, paragraph formatting,
+classifiers, summaries, routing. It has **no role suffix by default** — callers post
+`{"model": "service"}`.
 
-(`opencode-go/muse-spark-1.3-contributor` was removed 2026-09-27 — owner: broken, drop it.)
-(`openrouter/deepseek/deepseek-v4-flash-0731` was removed 2026-09-30 — issue #45: the live
-OpenRouter price is $0.01/**$1.28** per M output (40× ling), the bench shows ❌ ping/json/code
-and a live probe timed out at 60s on code-gen/agent-plan — owner: «дипсик вполне можно
-заменять». Alongside it #45 adds ONE same-rung guard-retry for empty/non-JSON answers.)
-(`opencode-go/deepseek-v4.1-flash` was dropped from this ladder 2026-10-01 — issue #49: the
-intermittent `HTTP 400 {"model":"deepseek-v4.1-flash"}` (×8/hour in query-ladder-logs, known
-since 2026-09-25) + bench ❌ on agent-plan/code-fix; owner: «дипсик вполне можно заменять».
-It REMAINS in the `research` ladder.)
+Roles (opt in with `"model": "service:<role>"`) split by what the call *is*, so each can be
+benchmarked and priced separately:
 
-**Zen free tier needs a relay** and lives in the `free` ladder only (owner decision 2026-09-30,
-issue #42). OpenCode gates `zen/v1` free models behind an exact client
-fingerprint (captured live: `Bearer public`, `User-Agent: opencode/1.18.31 ai-sdk/…`, `x-opencode-client`,
-`x-opencode-project`, `msg_`/`ses_` ids, `stream:true`, and `tools` containing functions named
-`shell` + `read`) **and** IP reputation: Cloudflare Worker egress gets a stable
-`429 FreeUsageLimitError` from every colo, while the GCP VM answers 200. So the Worker calls
-`scripts/zen-relay.mjs` (systemd `zen-relay.service` on the GCP VM, nginx `location /zen/` on
-`https://136-65-7-197.sslip.io/zen`) with `OPENCODE_ZEN_RELAY_TOKEN`; the relay injects the
-fingerprint, forces `stream:true`, merges `shell`/`read` into `tools` (`tool_choice:"none"` when the
-caller sent none) and aggregates SSE → JSON for non-streaming callers.
+| role | for | policy |
+|---|---|---|
+| `build` (default) | generic service call | Pareto-first: mimo → free ×8 → zen ×4 → paid tail |
+| `classify` | classify, failure-classifier, plan-detect, menu-detect, gtd-intent | free-first (short, cheap) |
+| `summarize` | session-summary, session-digest | mimo → free |
+| `format` | tg-format, content-rewrite, answer-glyph-guard | free-first (mechanical) |
+| `route` | quick, workrun, quick-answer-verify | mimo → free |
+| `gate` | issue-fixer-gate, playbook-validator | mimo → free → paid tail (reliability) |
 
-- **`research`** — Hermes / opencode researcher runs (owner 2026-09-28), **split by role**:
-  `research:explore` (the reading subagent — big docs, PDFs, pages) = Go `mimo-v2.6-flash` (1M ctx) →
-  Go `deepseek-v4.1-flash` → paid `openrouter/google/gemini-2.5-flash-lite` as the degradation tail
-  (issue #28, owner 2026-09-30: Go-first, `gemini-3.1-flash-lite` dropped — redundant paid rung of
-  the same vendor); `research` / `:plan` / `:general` / `:review` (the thinking and
-  writing main agent) = Go `mimo-v2.6-flash` (1M ctx) → Go `deepseek-v4.1-flash` → paid OpenRouter mimo.
-  `gemini-2.5-flash` and `2.5-pro` are deliberately not in it (too expensive).
+`service:plan|explore|general|review` exist too (used by the opencode agent roles, same rungs as
+`build`).
 
-- **`doctor`** — strongest tier for playbook `doctor` steps when Claude/Codex are unavailable
-  (owner decision 2026-09-28): Go MiMo-V2.6-Flash primary (τ²-bench airline 76.6%, above Kimi K2.7
-  Code 71.7%), then *stronger* Go models instead of cheaper ones — `qwen3.7-plus` → `deepseek-v4-pro`
-  (`qwen3.8-max` dropped — far too expensive) — and paid OpenRouter `xiaomi/mimo-v2.6-flash` last.
+### 2. Role ladders (interactive agent work)
 
-- **`free`** (aliases `free-ladder`, `cheap`) — the hard **$0 ceiling**: Go free
-  (`space-bunny-free`, `longcat-2.5-preview-free`) → OpenRouter `:free` ×6 → zen tail
-  (`mimo-v2.6-flash-free` → `mimo-v2.5-free` → `big-pickle` → `nemotron-3.5-lightning-free`).
-  No Go subscription rung, no paid OpenRouter — spending is impossible. Used by opencode as a
-  client, pr-autofix, and heavy tests (issue #79 alignment). Streaming + tools supported.
+Each role is its own ladder. `explore` is big-context (≥1M on every rung); the rest are
+advanced-first (mimo → paid tail).
 
-- **`conversation`** (alias `conversations`) — candidate-message writing from
-  trained-assist-hh-skill (`src/conversation-generation.js`, owner 2026-10-01):
-  `openrouter/google/gemini-3.1-flash-lite-preview` (first: newer and cheaper than
-  `gemini-2.5-flash`, $0.25/$1.50 vs $0.30/$2.50) → `openrouter/google/gemini-2.5-flash` →
-  `opencode-go/mimo-v2.6-flash`. Model swaps happen here (or per-call via `ladder_rung` for A/B
-  and bench pins); the last N question/answer exchanges are recorded JSONL on the hh-skill side.
+| ladder | shape |
+|---|---|
+| `build` | base: space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
+| `build advanced` | mimo → paid tail |
+| `plan` / `general` / `review` | mimo → paid tail |
+| `explore` | mimo (1M) → gemini-2.5-flash-lite (1048576) → xiaomi/mimo (1050000) — contexts measured on OpenRouter 2026-10-02 |
+| `vision` / `vision advanced` | gemini stack for multimodal image+text |
 
-- **`build` / `build advanced` / `plan` / `explore` / `general` / `review` / `vision` /
-  `vision advanced`** — interactive agent work; the role/level model
-  (issue #71, owner 2026-10-02): **level = a ladder of its own, no escalation between them** —
-  «нет эскалации, это не задача лестницы, задача лестницы — ретраи» (a ladder retries down its
-  own rungs; moving between levels is the caller's decision, e.g. an opencode profile).
-  - `build` — base: `space-bunny-free` → `longcat-2.5-preview-free` → `ling-3.0-flash-sante:free`
-    → paid tail (`ling-3.0-flash` → `xiaomi mimo-v2.6-flash`); **no mimo inside**.
-  - `build advanced` — advanced head: `opencode-go/mimo-v2.6-flash` → the same paid tail
-    (pin it from a profile for a harder task, e.g. code review).
-  - `plan` / `general` / `review` — advanced-first: mimo → paid tail (owner: «все кроме build на mimo»).
-  - `explore` — **≥1M context on every rung**: mimo (1M) → `gemini-2.5-flash-lite` (1048576) →
-    `xiaomi/mimo-v2.6-flash` (1050000), contexts measured on OpenRouter `/v1/models` 2026-10-02;
-    Hermes takes this ladder whole for research reads (tail follows research:explore, #28).
-  - `vision` / `vision advanced` (alias `picture` / `picture advanced`) — the vision stack,
-    picture recognition, all multimodal image+text with 1M ctx (OpenRouter architecture
-    2026-10-02): `gemini-2.5-flash-lite` ($0.10/$0.40) → `gemini-2.5-flash` ($0.30/$2.50);
-    advanced: `gemini-2.5-flash` → `gemini-3.8-flash` ($0.75/$3.75).
+There is **no escalation between levels**: a ladder retries down its own rungs; moving
+`build` → `build advanced` is the caller's call (an opencode profile, `ladder_rung`).
 
-  **Constructors** (#71): (1) plain LLM callers keep the single-model profiles as-is
-  (`service`, `conversation` — role suffixes); (2) opencode launches in the agent get a
-  four-ladder assembly (`build`/`plan`/`explore`/`general`) — ready profiles in
-  `~/.config/opencode/profiles/`: `free` (everything on the $0 ladder), `master`
-  (build=base ladder, roles on advanced), `phd` (build→`build advanced`).
-  Vision is no longer taxonomy-only: `vision*` ladders exist; legacy callers still keep
-  Gemini in-process (#71).
+### 3. Free ceiling + specialist ladders
 
-Rungs are tried top-down:
+| ladder | shape |
+|---|---|
+| `free` | hard **$0**: space-bunny-free → longcat → OR `:free` ×6 → zen ×4. Never spends money. |
+| `conversation` | candidate-message writing (hh-skill): gemini-3.1-flash-lite-preview → gemini-2.5-flash → mimo |
+| `doctor` | strongest Go tier for playbook doctor steps: mimo → qwen3.7-plus → deepseek-v4-pro → paid xiaomi |
+| `research` | hermes/researcher reads: mimo → deepseek-v4.1 → paid gemini-2.5-flash-lite (explore) |
 
-- **Model health** — a failing rung is skipped for everyone: transient faults back off per model
-  (15s → 30s → 60s … cap 5 min, each model its own counter); quota/limit errors skip for the
-  classified TTL (`src/classify.js`). Exception: a TRANSIENT skip on a Go or zen rung is capped at 30s
-  after its last failure — a short Go wobble must not keep the fleet on the paid OpenRouter tail
-  (money + a mid-run prompt-cache reset) for the full backoff. Real limits keep their TTL.
-- **OpenCode Go key pool** (`OPENCODE_GO_API_KEYS`, comma-separated, index 0 = default primary;
-  three keys since 2026-10-01) — a key-level fault (usage limit, 429,
-  rejected key) rotates to the spare key and retries the same rung; a WEEKLY allowance parks that
-  key for 6 h (`"limitName":"weekly"`), not the 15-minute rate-limit TTL. A rung that fails for a
-  NON-key reason (timeout, empty answer, 500) gets ONE spare-key probe per call before the ladder
-  leaves Go for paid OpenRouter — a silently throttled key looks exactly like a slow model, and
-  staying on Go costs nothing. Context/config rejections never probe (the key cannot change them).
-  When every key is parked, only the PAID Go rungs are skipped until the earliest key heals —
-  the free Go rungs (`*-free`) keep serving, they don't eat the allowance (#69) — so the ladder
-  rides the incident out on free Go → OpenRouter :free → paid and returns to Go by itself. Every attempt entry carries the pool `key` index
-  (`ok` / `error` / `key-rotated` / `key-probe`), so `/v1/state` and the Workers Observability
-  logs show which key served. 503 / Bad Request never burn a key.
-- **Guard** — empty content, or non-JSON when `response_format: json_object`, fails the rung.
-- **`max_tokens` floor** (`src/ladder.js`) — the caller's `max_tokens` is raised to at least
-  `MIN_TOKENS = 1500`, and to `REASONING_MIN_TOKENS = 3000` for the rungs of the empirical
-  `REASONING_MODELS` list (issue #38, owner decision: variant 2): a reasoning rung can burn the
-  whole 1500 floor on chain-of-thought (`empty answer (finish=length, out=1500, reasoning=1500,
-  prompt=97, max_tokens=1500)` in prod → content empty → chronic guard failures), so only those
-  rungs get the higher floor. The list is measured, not guessed: every rung of
-  `config/ladders.json` was pinned through the live worker (`ladder_rung`) and its
-  `usage.completion_tokens_details.reasoning_tokens` read — 24 of 26 unique rungs reason,
-  including the four zen tail rungs of `free` (measured 2026-09-30 through the relay, #42:
-  17/15/255/43 reasoning_tokens); `openrouter/google/gemini-2.5-flash-lite` reads 0 and stays at
-  1500, `ling-3.0-flash-fin:free` was a dead rung (no data; removed from the free-tier ladder 2026-09-30 —
-  34×404/day in the hourly digest). The #34 guard diagnostic prints the
-  floor that actually went upstream.
+---
 
-State lives in one global Durable Object (`LadderState`) — strongly consistent across callers.
+## How a call resolves
 
-> Research / presentation / vision calls are NOT for this service — they stay on Gemini in their
-> callers (owner: «gemini для рисеча и для презентаций он прямо гуд»).
+1. POST `/v1/chat/completions`, `model` = ladder name (`service` default).
+2. Model **health**: a failing rung is skipped for everyone (per-model backoff 15s → 30s → … cap 5 min; quota/limit errors use their classified TTL).
+3. **Go key rotation**: a key-level fault (weekly limit, 429, rejected key) rotates to the next pool key and retries the *same* rung; a non-key fault gets one spare-key probe.
+4. **Guard**: empty content, or non-JSON when `response_format: json_object`, fails the rung.
+5. Walk down until one answers → that model's completion is returned (`model` field names the winner).
+
+---
 
 ## API
 
@@ -158,167 +96,75 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | Method | Path | |
 |---|---|---|
 | GET | `/health` | liveness + ladder names |
-| GET | `/v1/models` | ladders as model ids (`service`, `service:review`, …) |
-| GET | `/v1/state` | model health + key rotation snapshot |
-| GET | `/v1/go-usage` | remaining Go allowance per pool key: polls `opencode.ai/zen/go/v1/usage` for each key → unified `rolling`/`weekly`/`monthly` percent + `resetsAt` (issue #91). Raw keys never appear in the response |
-| GET | `/v1/analytics?hours=N` | aggregates over the D1 trace: per-ladder calls / failures / tokens, per-ladder×**model** rungs with a fresh/cached/output token split and an estimated `cost_usd` (`config/prices.json`), an **hourly** cut (UTC hour × ladder × model × cost), attempts-depth histogram and merged top-20 errors; N = window in hours, 1–168, default 24. What the hourly Telegram digest in `vm-telegram-monitor` renders |
-| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder name (default `service`, legacy alias `deepseek`); `stream: true` → SSE; `tools` passed through |
+| GET | `/v1/models` | ladders as model ids (`service`, `service:gate`, `vision`, …) |
+| GET | `/v1/state` | model health + key-rotation snapshot |
+| GET | `/v1/go-usage` | remaining Go allowance per pool key (rolling/weekly/monthly % + reset) |
+| GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, failover depth, top errors |
+| GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
+| POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
+| POST | `/v1/state/reset-keys` | unpark all Go keys (after replacing the pool) |
 
-Extra optional body fields: `ladder_timeout_ms` (per rung, default 20000),
-`ladder_ttfb_ms` (streaming: first-token window, default 15000), `ladder_total_timeout_ms` (whole
-ladder), `ladder_rung` (benchmarks: pin one rung of the ladder — no failover; used by the
-continuous bench in trained-assist-free-models-benchmark). Streaming picks the rung before the first output token (text, reasoning or tool call);
-after it there is no failover.
+Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (stream first-token window, 15000), `ladder_total_timeout_ms` (whole ladder), `ladder_rung` (pin one rung, no failover), `ladder_conversation` (sticky-rung key).
 
-App attribution to OpenRouter (issue #33): send `x-ladder-app: <slug>` (`[a-z0-9-]`, ≤64 chars,
-default `llm-ladder`) and optionally `x-ladder-app-title: <name>` (default `Trained Assist`). For
-`openrouter/*` rungs the worker adds `HTTP-Referer: https://recruiter-assistant.ru/app/<slug>` —
-the URL *is* the application id in the OpenRouter "Application" analytics cut — plus
-`X-OpenRouter-Title` and `X-OpenRouter-App-Visibility: hidden` (hidden from public rankings,
-analytics kept). A garbage/absent slug falls back to `llm-ladder`, never a half-repaired one.
-`opencode-go/*` rungs get none of these (not an OpenRouter concept there).
+OpenRouter attribution: send `x-ladder-app: <slug>` and `x-ladder-app-title` — the worker adds `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-App-Visibility` on `openrouter/*` rungs only.
 
-opencode provider (free ladder): `baseURL = https://llm-ladder.trainedassist.store/v1`,
-`apiKey = <LADDER_TOKEN>`, model `free` (legacy ids `free-ladder` / `cheap` also resolve). Response = the upstream `chat.completion` with `model`
-set to the rung that answered, plus headers `x-ladder-model` / `x-ladder-attempts`.
-Failure: `502 {error:{type:"ladder_error", attempts:[…]}}`.
+---
 
-```bash
-curl -s https://llm-ladder.trainedassist.store/v1/chat/completions \
-  -H "Authorization: Bearer $LADDER_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"model":"service","messages":[{"role":"user","content":"Верни JSON {\"ok\":true}"}],"response_format":{"type":"json_object"}}'
-```
+## Clients
 
-Clients:
+Every client sends the **canonical** ladder name:
 
-- `trained-assist-agent` `src/service-llm.js` — all small service calls (sends `deepseek`, the
-  legacy alias of `service` — no agent change needed, issue #49); the only implementation, no
-  in-process copy.
-- `pr-autofix` ≥ v1.6.0 — every stage (`free-ladder` → `free`), token via org secret `LLM_LADDER_TOKEN`.
-- `trained-assist-hh-skill` `src/conversation-generation.js` — candidate-message writing
-  (`conversation` ladder), ATS evaluation (`cheap` → `free`), funnel planner (`service`); token via
-  `LLM_LADDER_TOKEN` / `$AGENT_TOKENS_DIR/llm-ladder/token`.
-- opencode — provider `baseURL=https://llm-ladder.trainedassist.store/v1`, model `free`.
+| client | ladder |
+|---|---|
+| `trained-assist-agent` `src/service-llm.js` | `service` (+ `service:<role>` per call type) |
+| `trained-assist-agent` `src/opencode-ladder-provider.js` | maps opencode profile → `service` / `doctor` / `free` / `research` |
+| `pr-autofix` | `free` |
+| `trained-assist-hh-skill` | `conversation`, `free`, `service` |
+| opencode (agent roles) | `ladder/<role>`: build, build advanced, plan, explore, general, review |
 
-## Pool endpoints
-
-Control-plane tail for the runs pool (owner decision 2026-10-01): the worker relays **metadata and
-references only** — a task string ≤ 4000 chars plus optional pointers. Big data (GB) never goes
-through this API: payloads move presigned-URL direct between the client and object storage, and
-`artifactRef` is just the *reference* — the worker never downloads it, only forwards it in the
-dispatch («ГБ всегда presigned-прямым путём»).
-
-| Method | Path | Auth | |
-|---|---|---|---|
-| POST | `/pool/trigger` | `Bearer $POOL_TRIGGER_TOKEN` (own token, timing-safe compare — not `LADDER_TOKEN`) | body ≤ 8 KB → GitHub `repository_dispatch` → `202 {queued:true, location, reserved?}` |
-| GET | `/pool/health` | none | `{service:"pool", ok:true}` |
-
-Nothing else under `/pool/*` exists yet (`status` — later, owner's call).
-
-`POST /pool/trigger` body: `{"task": "<required, ≤4000 chars>", "repo": "owner/name", "profile": "...", "artifactRef": "...", "location": ""}` —
-`repo`/`profile`/`artifactRef` are optional plain strings forwarded as-is (unknown body keys are ignored).
-
-`location` (epic ai-agent-run-api#1, Ф1) is an enum: `""` | `ru` | `eu` | `us`. Absent == `""`.
-`""` = our pool (runs normally); `ru`/`eu`/`us` are reserved for future regional pools — the dispatch
-still goes out (the receiver records `location_reserved` and does not run), and the response carries
-`reserved: true`. Anything else → `400` naming the field `location`, before any dispatch.
-
-Responses: `202 {queued:true, location, reserved?}` once GitHub accepts the dispatch (outgoing cap 10 s);
-`502 {error:"dispatch_failed", gh_status}` on a non-2xx/timeout (`gh_status: null` on timeout);
-`401` missing/wrong bearer; `413` body > 8 KB; `400` validation;
-`503 {error:{type:"CONFIG"}}` while a secret is not set.
-
-The dispatch goes to `vovalikessmoothy-png/ai-agent-runs-pool` as
-`{event_type: "agent-task", client_payload: {task, repo, profile, artifactRef, location, ts}}`, where
-`.github/workflows/agent-task.yml` picks it up. Worker logs carry metadata only — task length and
-statuses, never the task text or any token.
-
-Secrets: GCP Secret Manager is the source of truth (`POOL_TRIGGER_TOKEN`,
-`GITHUB_AI_AGENT_RUNS_POOL`), mirrored into the worker with `wrangler secret put` — never in git.
+**Contract guard** — before renaming or removing a ladder, run:
 
 ```bash
-curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
-  -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"task":"smoke","repo":"trained-assist/ai-agent-runner"}'
-# → {"queued":true,"location":""}
-
-curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
-  -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"task":"smoke","location":"ru"}'
-# → {"queued":true,"location":"ru","reserved":true}   (региональный пул ещё не подключён)
-
-curl -s -X POST https://llm-ladder.trainedassist.store/pool/trigger \
-  -H "Authorization: Bearer $POOL_TRIGGER_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"task":"smoke","location":"mars"}'
-# → 400 {"error":{"message":"location: expected one of \"\", \"ru\", \"eu\", \"us\", got \"mars\"", ...}}
-
-curl -s https://llm-ladder.trainedassist.store/pool/health
-# → {"service":"pool","ok":true}
+node scripts/check-client-contracts.mjs ~/.config/opencode/opencode.json <vm opencode.json> <agent provider>
 ```
+
+It extracts every ladder id the clients actually send and fails if any doesn't resolve — a
+rename breaks CI, not prod.
+
+---
+
+## Go keys (subscription)
+
+Keys live only in the worker secret `OPENCODE_GO_API_KEYS` (comma-separated pool); clients
+never see them. Docs: `docs/go-key-management.md`.
+
+- A weekly-limit key is parked ~6h, then the ladder rotates back automatically.
+- Free Go rungs (`*-free`) rotate keys round-robin so no single account is hammered.
+- Remaining allowance per key: `GET /v1/go-usage` (or `node scripts/go-usage.mjs`). Free-tier
+  limits: `docs/free-tier-limits.md`.
+
+---
 
 ## Development
 
 ```bash
-npm test            # node:test — ladder + state logic (no Workers runtime needed)
-npm run test:sandbox  # full route in-process with fake upstreams
-npm run gate        # live gate against the running worker (see below)
-npx wrangler dev    # local worker
+npm test              # ladder + state + analytics (node:test, no runtime needed)
+npm run gate          # live gate: one pinned call per gate rung against prod
+npx wrangler dev      # local worker (cp .dev.vars.example .dev.vars first)
 ```
 
-Local iteration without touching prod: `cp .dev.vars.example .dev.vars`, fill in real keys, then
-`npm run dev` and point clients (or the gate: `LADDER_BASE=http://localhost:8787 npm run gate`) at
-`http://localhost:8787`. `.dev.vars` is gitignored — real values never enter the repo.
+Local iteration: `cp .dev.vars.example .dev.vars` (gitignored), `npm run dev`, point clients at
+`http://localhost:8787` (or `LADDER_BASE=http://localhost:8787 npm run gate`).
 
-**Live gate** (`scripts/live-gate.mjs`): `/health` → one `ladder_rung`-pinned call per rung of the
-gate ladder (default `service`/`build`; override with `LADDER_GATE_RUNGS="rung1 rung2"`) →
-`/v1/state` skip check. A failed pin retries twice (`LADDER_GATE_RETRIES`) — upstream blips don't
-flake the gate, a dead rung still does. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token`
-(chmod 600, outside the repo) — never printed, never committed. Exit 0 = green. Only people who hold
-the token can call the API; repo access (the repo is public) grants nothing.
+Live gate token from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the repo) —
+read it only inside the script, never echo it into a prompt or a file in the repo.
 
-Secrets (`wrangler secret put`): `LADDER_TOKEN`, `OPENCODE_GO_API_KEYS`, `OPENROUTER_API_KEY`,
-`OPENCODE_ZEN_RELAY_TOKEN` (relay shared secret — the Worker sends it as the zen provider key;
-without it every `opencode-zen/` rung is filtered out as keyless), plus `POOL_TRIGGER_TOKEN` and
-`GITHUB_AI_AGENT_RUNS_POOL` for `/pool/trigger` (both sourced from GCP Secret Manager).
-Deploy: push to `main` → CI runs tests → `wrangler deploy` (GitHub secrets `CF_API_TOKEN`,
-`CF_ACCOUNT_ID`).
+---
 
-Inspecting what actually served a call (which rung, which key, which error): the worker logs one
-JSON line per call with the full `attempts` array. Dispatch the `query-ladder-logs` GitHub Actions
-workflow (inputs `hours`, `step_min`, `needle`, `regex_hours`) to query Workers Observability and
-print the aggregation — served-model histogram, distinct error strings, `key-rotated` / `key-probe`
-events, OpenRouter descents. Live health + key rotation snapshot: `GET /v1/state`.
+## Rules for changing the ladder
 
-Per-call trace log (who burned the tokens): every call is appended to D1 `ladder_calls` with the
-caller's `x-ladder-trace/run/user/chat/session` ids. Dispatch the `query-ladder-trace` workflow
-(`preset` = `recent` | `trace` | `user` | `chat` | `session` + `value` | `summary` | `sql` with a
-read-only SELECT; `hours`, `limit`) — e.g. `gh workflow run query-ladder-trace -f preset=summary`.
-
-Spend & reliability digest: `scripts/analytics.py` rolls the D1 trace into a markdown report —
-calls/ok-rate/latency per ladder, served rungs with tokens, estimated OpenRouter spend
-(tokens × current list price from the public `/models` endpoint; Go rungs are subscription → no
-cost, `:free` → $0), failover-depth histogram and digit-normalized top errors. The
-`ladder-analytics` workflow runs it daily (and on dispatch, inputs `days`, `format`) into the job
-summary; locally: `CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… python3 scripts/analytics.py
---days 7 [--format json]`. Stream calls still report no usage (#22), so spend is a lower bound.
-The same trace drives the live hourly Telegram digest: `vm-telegram-monitor` polls
-`GET /v1/analytics?hours=N` with the ladder token and renders the per-ladder section next to the
-OpenRouter spend report.
-
-## Claude Code Instructions
-
-- Keep the Worker dependency-free; logic stays in pure modules (`src/ladder.js`, `src/state.js`)
-  so node:test covers it — `src/index.js` / `src/state-do.js` are thin runtime adapters.
-- Changing the ladder = edit `config/ladders.json` + the test that pins the order, and log it in
-  `docs/requirements-log.md`.
-- Never add a rung that is more expensive than the ones above it without the owner's decision.
-- Zen free tier runs through `scripts/zen-relay.mjs` on the GCP VM (systemd `zen-relay.service`,
-  nginx `location /zen/`). The Worker only holds `OPENCODE_ZEN_RELAY_TOKEN`; the relay owns the
-  client fingerprint and the `shell`/`read` tools requirement. Relay down → zen rungs 502 → health
-  skip → the ladder walks on; nothing else breaks.
-- Live gate = `npm run gate` (`scripts/live-gate.mjs`): health → pinned call per gate rung →
-  `/v1/state` skips. Token from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the
-  repo) — read it only inside the script, never echo it into a prompt, transcript or file in the
-  repo. No token → exit 2, not a fake pass. Local loop: `.dev.vars` + `npm run dev` +
-  `LADDER_BASE=http://localhost:8787 npm run gate`.
-- PRs only, never push to `main` directly.
+- Editing `config/ladders.json` means editing the **order of models**, not the router code.
+- Don't add a rung more expensive than the ones above it without the owner's decision.
+- Changing a ladder *name* is a breaking change: update every client, then run the contract
+  guard.
+- Zen free rungs live in the `free` tail only — never ahead of a working free rung.

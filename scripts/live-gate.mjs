@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const BASE = (process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store').replace(/\/+$/, '');
-const LADDER = process.env.LADDER || 'service'; // legacy alias 'deepseek' also resolves (#49)
+const LADDER = process.env.LADDER || 'service'; // canonical ladder name
 const ROLE = process.env.LADDER_ROLE || 'build';
 
 function readToken() {
@@ -32,13 +32,10 @@ if (!token) {
 }
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
-// Same resolution the worker does (rungsFor): a legacy name ('deepseek') must find its ladder
-// here too, otherwise the gate skips instead of checking the very alias production callers send (#49).
-const aliasTarget = config.aliases && config.aliases[LADDER];
-const resolved = aliasTarget && config.ladders[aliasTarget] ? aliasTarget : LADDER;
+// Same resolution the worker does (rungsFor) — canonical names only since 2026-10-03.
 const rungs = process.env.LADDER_GATE_RUNGS
   ? process.env.LADDER_GATE_RUNGS.trim().split(/\s+/)
-  : config.ladders[resolved]?.[ROLE];
+  : config.ladders[LADDER]?.[ROLE];
 if (!rungs || !rungs.length) {
   console.error(`GATE SKIP: no rungs for ${LADDER}:${ROLE} and no LADDER_GATE_RUNGS`);
   process.exit(2);
