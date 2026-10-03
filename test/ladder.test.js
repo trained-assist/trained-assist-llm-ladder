@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
@@ -108,6 +108,11 @@ test('config: free = 8 $0 rungs + zen tail (#42)', () => {
 
 test('config: aliases resolve to the designed ladders (#79 design alignment)', () => {
   assert.deepEqual(config.aliases, {
+    // deepseek stays as a BACKWARD-COMPAT alias: opencode provider configs and the agent's
+    // runner still send `deepseek:build` (removed 2026-10-03 → broke them with 404
+    // "unknown ladder: deepseek:build"). The agent now sends `service`, but the alias keeps
+    // every deployed client working until its config is updated.
+    deepseek: 'service',
     'free-ladder': 'free',
     cheap: 'free',
     conversations: 'conversation',
@@ -121,6 +126,8 @@ test('config: aliases resolve to the designed ladders (#79 design alignment)', (
   for (const keep of ['free', 'vision', 'vision advanced', 'conversation', 'build', 'build advanced', 'plan', 'explore', 'general', 'review', 'service', 'doctor', 'research']) {
     assert.ok(config.ladders[keep], `${keep} exists`);
   }
+  // the legacy alias must resolve role suffixes too (`deepseek:build` → service:build)
+  assert.deepEqual(rungsFor(config, 'deepseek:build'), config.ladders.service.build);
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
