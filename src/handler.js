@@ -35,6 +35,16 @@ const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
   + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
   + 'GROUP BY ladder, depth';
+// Per caller sub-task × ladder × served model (#107). The ladder name alone cannot answer
+// "which sub-task burns the money": every one of the agent's ~20 service tools posts
+// `model: "service"`, and the only thing that tells them apart is `x-ladder-app` (the caller's
+// `source:`). Grouped by model as well so each row prices exactly like a rung row.
+const ANALYTICS_APPS_SQL =
+  'SELECT app, ladder, model, COUNT(*) AS calls, '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND app IS NOT NULL '
+  + 'GROUP BY app, ladder, model ORDER BY calls DESC';
 // Raw error counts (top 100 by frequency, same as scripts/analytics.py). Grouping is on
 // the RAW string — digit variants ('can only afford 499' / '776') are merged by
 // normalizeError() below, mirroring analytics.py normalize_error.
@@ -313,6 +323,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const aggRows = (await db.prepare(ANALYTICS_AGG_SQL).bind(since).all()).results || [];
       const rungRows = (await db.prepare(ANALYTICS_RUNGS_SQL).bind(since).all()).results || [];
       const hourlyRows = (await db.prepare(ANALYTICS_HOURLY_SQL).bind(since).all()).results || [];
+      const appRows = (await db.prepare(ANALYTICS_APPS_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
@@ -395,7 +406,32 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         .map(([error, calls]) => ({ error, calls }))
         .sort((a, b) => b.calls - a.calls)
         .slice(0, 20);
-      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, hourly, errors });
+// Per-sub-task cut (#107): which of the caller's tools actually spends. Same ladder collapse as
+      // the other cuts, so `deepseek` + `service` land together; per-row cost is priced exactly
+      // like a rung row. `apps` is empty for callers that send no x-ladder-app (the bench, one-off
+      // curls) — the ladder name stays the coarse view, this is the fine one.
+      const appGroups = new Map();
+      for (const r of appRows) {
+        const app = r.app, ladder = canonName(r.ladder), model = r.model || null;
+        const key = `${app}|${ladder}|${model}`;
+        let e = appGroups.get(key);
+        if (!e) { e = { app, ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; appGroups.set(key, e); }
+        e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
+      }
+      const appsByName = new Map();
+      for (const e of appGroups.values()) {
+        e.cost_usd = costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out);
+        let a = appsByName.get(e.app);
+        if (!a) { a = { app: e.app, calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0, cost_usd: 0, rungs: [] }; appsByName.set(e.app, a); }
+        a.calls += e.calls; a.tokens_in += e.tokens_in; a.tokens_cached += e.tokens_cached;
+        a.tokens_out += e.tokens_out; a.cost_usd += e.cost_usd || 0; a.rungs.push(e);
+      }
+      for (const a of appsByName.values()) {
+        a.rungs.sort((x, y) => y.calls - x.calls);
+        a.cost_usd = a.rungs.reduce((s, r) => s + (r.cost_usd || 0), 0);
+      }
+      const apps = [...appsByName.values()].sort((a, b) => b.cost_usd - a.cost_usd || b.calls - a.calls);
+      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, hourly, apps, errors });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
     }
@@ -433,6 +469,9 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
     const trace = makeTrace(request);
+    // The D1 row must carry the SAME slug as the OpenRouter "Application" cut (#107) — take the
+    // sanitised value, not the raw header, so the two views of one call can never disagree.
+    trace.app = appSlug;
     // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
     console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
     await logCall(env, trace, chat.model, r, started);

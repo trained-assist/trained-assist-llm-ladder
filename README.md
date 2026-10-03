@@ -99,7 +99,7 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/v1/models` | ladders as model ids (`service`, `service:gate`, `vision`, …) |
 | GET | `/v1/state` | model health + key-rotation snapshot |
 | GET | `/v1/go-usage` | remaining Go allowance per pool key (rolling/weekly/monthly % + reset) |
-| GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, failover depth, top errors |
+| GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, **per-sub-task (`apps`) cut**, failover depth, top errors |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
 | POST | `/v1/state/reset-keys` | unpark all Go keys (after replacing the pool) |
@@ -107,6 +107,14 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (stream first-token window, 15000), `ladder_total_timeout_ms` (whole ladder), `ladder_rung` (pin one rung, no failover), `ladder_conversation` (sticky-rung key).
 
 OpenRouter attribution: send `x-ladder-app: <slug>` and `x-ladder-app-title` — the worker adds `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-App-Visibility` on `openrouter/*` rungs only.
+
+`x-ladder-app` is also **stored** on the trace row (migration `0004_app.sql`) and is the
+discriminator for the `apps` cut in `/v1/analytics`: it is the only thing that tells apart the
+~20 service sub-tasks, since all of them post `model: "service"`. Send the concrete tool/task
+name (`gtd-intent`, `tg-format`, `session-summary`, `failure-classifier`, …) — the agent
+already sends it as its `source:` value, and the worker stores the same sanitised slug it
+sends to OpenRouter, so the two views can never disagree. Rows with no header are skipped by
+the cut; the ladder name stays the coarse view.
 
 ---
 
