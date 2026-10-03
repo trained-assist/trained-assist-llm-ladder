@@ -362,16 +362,19 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         if (!rungsByLadder.has(e.ladder)) rungsByLadder.set(e.ladder, []);
         rungsByLadder.get(e.ladder).push(e);
       }
-      // Hourly cut (#93): one row per UTC hour × ladder × model, with cost — the owner's
-      // "master-plan-mimo: $0.2" view, aggregated so an hour is a handful of rows, not a dump.
-      const hourly = hourlyRows.map((r) => {
-        const tin = num(r.tin), tcached = num(r.tcached), tout = num(r.tout);
-        return {
-          hour: r.hour, ladder: canonName(r.ladder), model: r.model || null, category: categoryOf(r.model),
-          calls: num(r.calls), ok: num(r.ok_n), tokens_in: tin, tokens_cached: tcached, tokens_out: tout,
-          cost_usd: costUsd(r.model, tin, tcached, tout),
-        };
-      });
+// Hourly cut (#93): one row per UTC hour × ladder × model, with cost — the owner's
+      // "master-plan-mimo: $X" view. Merged by canonical name: 'deepseek', 'deepseek:build'
+      // and 'service' are the same ladder and must land in ONE row per hour.
+      const hourlyGroups = new Map();
+      for (const r of hourlyRows) {
+        const hour = r.hour, ladder = canonName(r.ladder), model = r.model || null;
+        const key = `${hour}|${ladder}|${model}`;
+        let e = hourlyGroups.get(key);
+        if (!e) { e = { hour, ladder, model, category: categoryOf(model), calls: 0, ok: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; hourlyGroups.set(key, e); }
+        e.calls += num(r.calls); e.ok += num(r.ok_n);
+        e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
+      }
+      const hourly = [...hourlyGroups.values()].map((e) => ({ ...e, cost_usd: costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out) }));
       const totals = { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 };
       const out = [...ladders.values()].sort((a, b) => b.calls - a.calls);
       for (const e of out) {
