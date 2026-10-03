@@ -6,8 +6,10 @@ let freeGoKeyCursor = 0;
 export function resetFreeGoKeyCursor() { freeGoKeyCursor = 0; }
 
 export function nextFreeGoKeyIndex(poolSize) {
+  if (poolSize <= 0) return 0;
+  const i = freeGoKeyCursor % poolSize; // return current, then advance — so the first call uses key 0
   freeGoKeyCursor = (freeGoKeyCursor + 1) % poolSize;
-  return freeGoKeyCursor;
+  return i;
 }
 // last. Non-streaming, for small service calls (buttons, formatting, classifiers, summaries)
 // where reliability beats everything else.
@@ -436,6 +438,14 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     rungs = live.length ? live : keyed;
   }
   let keyIndex = Math.min(snap.keys.active || 0, Math.max(0, pool.length - 1));
+  // Free Go rungs rotate across the pool (owner 2026-10-03: «го фрии модели шли каруселью всё
+  // время по одному запросу по очереди перебирая аккаунты»). When the ladder OPENS on a free rung
+  // (build, free), the starting key comes from the round-robin cursor, so consecutive free calls
+  // land on different accounts instead of all hammering the active one. Single-key pool → no-op.
+  const head = rungs[0];
+  if (pool.length > 1 && head && head.startsWith('opencode-go/') && head.endsWith('-free')) {
+    keyIndex = nextFreeGoKeyIndex(pool.length);
+  }
   const exhaustedAtStart = new Set(Object.keys(snap.keys.exhausted || {}).map(Number));
   // One spare-key probe per call (owner 2026-09-29: «ключ залимитился → переключаем на другой,
   // всё»). A Go rung that fails for a NON-key reason (timeout, empty answer, 500) still gets one
@@ -523,7 +533,6 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         await store.recordSuccess(model);
       }
        attempts.push({ model, outcome: 'ok', key });
-       if (isGo && model.endsWith('-free')) keyIndex = nextFreeGoKeyIndex(pool.length);
        return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
