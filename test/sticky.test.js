@@ -14,7 +14,7 @@ const LADDER = config.ladders.service.build;
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
-const msg = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] };
+const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 const Kh = 'a'.repeat(64); // any sha256-shaped key
 
 // ── S1: pure pin layer ──────────────────────────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ test('S8: the x-ladder-attempts header carries pin= for keyed calls (and not for
   const post = (headers) => handle(new Request('https://l.test/v1/chat/completions', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer t', ...headers },
-    body: JSON.stringify({ model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] }),
+    body: JSON.stringify({ model: 'service', messages: [{ role: 'user', content: 'hi' }] }),
   }), ENV, { store, fetchImpl: recFetch({}, []) });
   const keyed = await post({ 'x-session-affinity': 'conv-a' });
   assert.match(keyed.headers.get('x-ladder-attempts'), /pin=new/, 'first keyed turn reports pin=new');

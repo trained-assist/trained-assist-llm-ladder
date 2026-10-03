@@ -66,7 +66,7 @@ function sandboxStore(poolSize = 2) {
     async snapshot(_poolSize, pinKey) {
       const s = await inner.snapshot(_poolSize || poolSize);
       const p = pinKey ? pins.get(pinKey) : undefined;
-      return { ...s, pin: p ? { ladder: 'deepseek', rung: p.rung, lastUsedAt: p.lastUsedAt } : null };
+      return { ...s, pin: p ? { ladder: 'service', rung: p.rung, lastUsedAt: p.lastUsedAt } : null };
     },
     async recordSuccess(model, extra) {
       await inner.recordSuccess(model);
@@ -89,7 +89,7 @@ function sandboxStore(poolSize = 2) {
 function makeScenario() {
   const upstream = fakeUpstreams();
   const store = sandboxStore(2);
-  const post = (headers, body = { model: 'deepseek', messages: [{ role: 'user', content: 'hi' }] }) =>
+  const post = (headers, body = { model: 'service', messages: [{ role: 'user', content: 'hi' }] }) =>
     handle(new Request('https://ladder.test/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...headers },
