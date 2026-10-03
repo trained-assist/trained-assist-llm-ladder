@@ -39,14 +39,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: zen probe from runner ${{ matrix.shard }}
         run: |
+          MODEL_AFTER_ARG=""
+          if [ -n "${{ inputs.model_after }}" ]; then MODEL_AFTER_ARG="--model-after ${{ inputs.model_after }}"; fi
           node scripts/zen-limit-probe.mjs \
             --requests ${{ inputs.requests }} \
             --concurrency ${{ inputs.concurrency }} \
             --model ${{ inputs.model }} \
             --prompt "${{ inputs.prompt }}" \
             --max-tokens ${{ inputs.max_tokens }} \
-            --model-after ${{ inputs.model_after }} \
             --delay-ms ${{ inputs.delay_ms }} \
+            $MODEL_AFTER_ARG \
             --out zen-probe-gh-${{ matrix.shard }}.json
       - name: fingerprint cross-check runner ${{ matrix.shard }}
         if: always()
