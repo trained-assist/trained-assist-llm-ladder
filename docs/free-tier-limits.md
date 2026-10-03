@@ -259,3 +259,24 @@ free Go rung.
    the fallback that survives a paid-limit hit; revoking the key takes them down
    too and routes the fleet straight to the paid OpenRouter tail. The allowance
    is not saved — free models never consumed it.
+---
+
+## Calling zen free from a job (not measuring it)
+
+The limits above are what `scripts/zen-limit-probe.mjs` measures by firing **unguarded**
+requests. A job that merely wants an answer should not do that — it should use
+`scripts/zen-client.mjs`, which keeps every counter per model and reports which limit stopped it:
+
+```js
+import { createZenClient } from './zen-client.mjs';
+const zen = createZenClient({ ratePerMin: 80, dailyBudget: 800 });
+const r = await zen.chat({ model: 'mimo-v2.6-flash-free', messages: [{ role: 'user', content: 'ping' }] });
+if (!r.ok && r.kind === 'cooldown') break;              // a limit, not a failure
+if (!r.ok && r.kind === 'fingerprint') process.exit(1); // our headers regressed — loud
+console.log(zen.summary());                            // stoppedBy / cooldownUntil per model
+```
+
+The test build that proves it from a real runner is `.github/workflows/zen-selftest.yml`
+(`workflow_dispatch`, or every 6h): one signed call per free model, a `stream:false` → 403 negative
+test, an offline over-cap refusal, and a report where a limited cell is ⛔ "not measured" and is
+excluded from the denominator. Spec: `docs/github-actions-zen-client-spec.md`.

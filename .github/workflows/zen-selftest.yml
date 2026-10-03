@@ -1,0 +1,86 @@
+name: zen-selftest
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'comma-separated free models (empty = auto-discover from /v1/models)'
+        default: ''
+      runs:
+        description: 'signed calls per model'
+        default: '2'
+      deep:
+        description: 'also send one ~285K-token prompt to a 1M-cap model (proves the cap table live)'
+        type: boolean
+        default: false
+      prompt:
+        description: 'prompt for the live calls'
+        default: 'Answer in one short sentence: what is 2+4?'
+  schedule:
+    # Every 6h = a fresh Azure egress IP per run, so each run gets its own free-tier budget
+    # (spec §7 mode A). 15 models x 2 calls x 4 runs/day is ~120 requests — far under the ~940/day
+    # per (IP, model) budget, so this cannot starve anything.
+    - cron: '17 */6 * * *'
+
+# Two runs of this workflow must never share an egress IP: a shared IP would make the second run
+# look like a quota stop. cancel-in-progress so a manual dispatch does not race the schedule.
+concurrency:
+  group: zen-selftest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: unit tests (offline — no zen calls)
+        run: npm test
+
+  selftest:
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: zen free self-test
+        id: zen
+        env:
+          ZEN_EGRESS: github-hosted
+        run: |
+          MODELS_ARG=""
+          if [ -n "${{ inputs.models }}" ]; then MODELS_ARG="--models ${{ inputs.models }}"; fi
+          node scripts/zen-selftest.mjs \
+            $MODELS_ARG \
+            --runs ${{ inputs.runs }} \
+            --prompt "${{ inputs.prompt }}" \
+            ${{ inputs.deep && '--deep' || '' }} \
+            --out zen-selftest.json
+      - name: report
+        if: always()
+        run: |
+          node -e "
+            const r = require('./zen-selftest.json');
+            const rows = Object.entries(r.models);
+            const ok = rows.filter(([,m]) => m.ok > 0).length;
+            const limited = rows.filter(([,m]) => m.limited > 0);
+            const bad = rows.filter(([,m]) => m.errors > 0);
+            console.log('models: ' + rows.length + '  answered: ' + ok + '  limited: ' + limited.length + '  errored: ' + bad.length);
+            for (const [m, x] of limited) console.log('  ⛔ ' + m + ' stoppedBy=' + x.stoppedBy + ' cooldownUntil=' + (x.cooldownUntilIso || '—'));
+            for (const [m, x] of bad) console.log('  ❌ ' + m + ' ' + x.lastKind + ' ' + (x.lastError || ''));
+            console.log('negative(stream:false): ' + r.negative.status + ' ' + r.negative.verdict);
+            console.log('offline over-cap refusal: ' + r.offline.verdict + ' (cap=' + r.offline.cap + ', over=' + r.offline.over + ' tokens)');
+          "
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zen-selftest-${{ github.run_id }}
+          path: zen-selftest.json
+          retention-days: 30
