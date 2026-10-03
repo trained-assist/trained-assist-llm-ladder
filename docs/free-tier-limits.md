@@ -3,7 +3,10 @@
 What each free tier actually limits, what it tells you about the remaining
 allowance, and how precise that information is. Collected 2026-10-03 from the
 D1 trace (`ladder_calls.attempts`), the OpenRouter key endpoint, live zen probes
-through the relay IP, and opencode.ai/docs.
+through the relay IP, and opencode.ai/docs. The zen section was rewritten the same
+day from a dedicated limit-triggering study (`scripts/zen-limit-probe.mjs`, issue #106)
+run from five runtimes: local Mac, GCP VM, Cloudflare Worker, GitHub Actions (×4
+runs), and an attempted Google Cloud Function.
 
 ---
 
@@ -12,7 +15,7 @@ through the relay IP, and opencode.ai/docs.
 | Tier | What the limit counts | Granularity | Remaining visible? | Precision |
 |---|---|---|---|---|
 | **OpenRouter `:free`** | requests per **day** (1000) + requests per **minute** (20), **account-wide** | day / minute | **yes** — `GET /api/v1/key` → `free_model_daily_requests` | exact (integer + exact reset timestamp) |
-| **Zen free** (`*-free` via relay) | requests per rolling window, **per IP + per client fingerprint** | rolling, no fixed reset | **no** — body carries no numbers | reset time exact to the second (`retry-after` header) |
+| **Zen free** (`*-free` via relay) | **requests**, per IP: a rate limit ~90–95/min + a daily quota ~940/day | minute / day | **no** — body carries no numbers | rate limit: none; daily quota: exact to the second (`retry-after` → 00:00 UTC) |
 | **Go `*-free`** (`opencode-go/*-free`) | nothing — Unlimited per docs, never consumes the $-allowance | n/a | n/a | n/a |
 | Go paid (contrast) | **USD per model per month**, windows 5h 20% / week 50% / month 100% | 5h / week / month | no — console only | n/a |
 
@@ -71,35 +74,104 @@ hour after the incident).
 
 ---
 
-## Zen free — no counter, but an exact wake-up time
+## Zen free — two limit layers, both per IP, no key involved
 
 Zen free models (`space-bunny-free`, `longcat-2.5-preview-free`,
 `mimo-v2.6-flash-free`, `mimo-v2.5-free`, `big-pickle`,
-`nemotron-3.5-lightning-free`) answer with a body that carries **no numbers at
-all**:
+`nemotron-3.5-lightning-free`) are **anonymous** — `Authorization: Bearer public`
+is a placeholder, and dropping the header entirely still returns 200. The gate is
+double: an opencode-client **fingerprint** (client) and an **IP budget** (network).
+Both were mapped live on 2026-10-03 with `scripts/zen-limit-probe.mjs` (issue #106).
+
+### The fingerprint — 4 required fields, 4 cosmetic
+
+| field | required | evidence (all live) |
+|---|---|---|
+| `user-agent` starting with `opencode/` | **yes** | `curl/8.7.1` → 403; `opencode/9.99.99` → 200 — the version is **not** pinned |
+| `x-opencode-session: ses_<12 hex><14 alnum>` | **yes** | absent → 403; `hello` / `ses_wrong` → 403 — the **shape** is validated, the value is free and reusable (same id ×3 → 200) |
+| `stream: true` | **yes** | `stream:false` → 403 |
+| `tools` containing both `shell` and `read` | **yes** | neither → 403; only `shell` → 403; only `read` → 403; wrong JSON schema → 200 — **names only**, order free |
+| `authorization` | no | header dropped → 200 |
+| `x-opencode-client: cli` | no | dropped → 200 |
+| `x-opencode-project: global` | no | dropped → 200 |
+| `x-opencode-request: msg_…` | no | dropped → 200 |
+
+A rejected fingerprint is **403 `FreeTierError`** ("OpenCode's free tier can only be
+used from within OpenCode") — a different error type from the 429 rate limit, so a
+caller can tell "wrong client" from "no quota" without parsing bodies.
+
+### Three limits, all per IP, all request-based
+
+**1. Provider rate limit — burst protection (bare 429, no headers).**
 
 ```
 HTTP 429
 {"type":"error","error":{"type":"FreeUsageLimitError",
- "message":"Rate limit exceeded. Please try again later."},"metadata":{}}
+  "message":"Error from provider (Console): Rate limit exceeded. Please try again later."}}
 ```
 
-The gate is double (see `scripts/zen-relay.mjs` header comment): an exact
-opencode-client fingerprint (User-Agent, `x-opencode-client`, `x-opencode-project:
-global`, `ses_`/`msg_` ids, `stream:true`, `tools` containing `shell` + `read`)
-**and** IP reputation — Cloudflare Worker egress gets 429 from every colo
-regardless of auth, which is why the relay exists.
+The `(Console)` prefix marks it as coming from the **model provider behind zen**, not
+from zen's own quota. It carries **no `retry-after` and no other header**. Trips at
+sustained **~90–95 requests/min per IP** (a GH runner peaking at 96/min tripped at 894
+total; one peaking at 79/min did not). A slow fire at ~41/min is unaffected.
 
-**The useful part is the header**, and it is precise:
+**2. Provider daily budget — the same bare 429, no headers.**
+
+Same body as above. Trips at **~915–965 requests per IP per day** regardless of rate
+(a slow 42/min run tripped at 915 and 964). A residential IP that tripped it stayed
+blocked **>100 min** (1 probe / 90 s never cleared it) — consistent with a daily reset.
+
+**3. Zen free daily quota — 429 with an exact wake-up time.**
 
 ```
-retry-after: 6314   →  6219  →  6215  →  6212   (three probes, ~9 s apart)
+retry-after: 26967   →  26824   (counts down in real time)
+{"type":"error","error":{"type":"FreeUsageLimitError",
+  "message":"Rate limit exceeded. Please try again later."},"metadata":{}}
 ```
 
-`retry-after` counts down in real time, so it answers *"when exactly may I
-retry"* to the second — while the remaining allowance itself is invisible.
-Granularity of the limit itself is unknown (rolling window, per IP + fingerprint,
-no published number).
+`retry-after` lands exactly on **00:00 UTC** (16:30 + 26967 s = 23:59:57) — a **daily
+quota per IP**, resetting at midnight UTC. Measured at **~940 requests per IP per day**
+on the relay VM (942 fired → dark). This is the layer the 2026-10-02 storm hit.
+
+Limits 2 and 3 are nearly the same size (~940/day) and both reset at midnight — most
+likely **one daily quota enforced at two layers**, which is why the same over-limit
+request can come back with either 429 shape depending on which layer rejects first.
+The ladder cannot tell them apart by count, only by body/headers.
+
+### Unit: requests, not tokens
+
+100 requests × 2048 output tokens = **219,800 tokens with zero 429s** (two parallel GH
+runners), while a 142-token "ping" burst tripped the rate limit at ~126K tokens / ~890
+requests. Every layer counts **requests**, not tokens.
+
+### Runtime × limit (2026-10-03)
+
+| runtime | egress | outcome | stopped at | 429 carries |
+|---|---|---|---|---|
+| local Mac (residential) | home IP | 200 | after 463–470 requests | nothing (provider) |
+| GCP VM `alesa-vm` (relay, #36) | 136.65.7.197 | 200 | after 942 requests | 15 bare, then `retry-after` → midnight UTC |
+| Cloudflare Worker | CF shared egress (colo ARN/SE) | **429 from request #1** | immediately | `retry-after` → midnight UTC |
+| GitHub Actions (fast, 96/min peak) | Azure IP ×2 parallel | 200 | 894 / 884 requests | nothing (provider rate limit) |
+| GitHub Actions (slow, ~41/min) | Azure IP ×2 | 200 | 900/900, not reached | — |
+| GitHub Actions (slow, 1200 fired) | Azure IP ×2 | 200 | 964 (zen daily) / 915 (provider) | `retry-after` → midnight / nothing |
+| Google Cloud Function | — | not measured — deploy blocked by project IAM (build SA) | | |
+
+**The limit is per IP, not per fingerprint**: a blocked residential IP stayed 429 with
+a *different* `user-agent` too. Two parallel GH runners each got their own budget —
+**no intersection**, confirming the owner's hypothesis (#95).
+
+### What this means for the ladder
+
+- **CF Worker egress is unusable for zen** — 429 from request #1 on every colo. The
+  relay on the GCP VM is not a workaround, it is the only way.
+- **The relay IP has a daily budget of ~940 requests.** Once exhausted, zen is dark
+  until 00:00 UTC. Spread zen load across egress IPs (or accept the ceiling).
+- **The rate limit (~90–95/min) only matters for bursts.** Normal ladder traffic is a
+  few zen calls per minute — far below it. Do not let a retry loop or a parallel fan-out
+  exceed ~90 req/min on one egress IP.
+- **A bare 429 (no `retry-after`) means "back off for a long, unknown cooldown"** —
+  do not feed it into the health-skip TTL as if it were a precise wake-up time. Only
+  the `retry-after` shape is safe for that.
 
 ---
 
@@ -152,9 +224,11 @@ free Go rung.
 2. **A loop can burn the whole daily budget in minutes** — 20/min is the only
    brake, and it is per minute, not per hour. Any caller that must not pay money
    belongs on the `free` ladder (#79), never on a ladder with a paid tail.
-3. **Do not parse zen 429 bodies for limits** — there are none. If the relay
-   forwarded `retry-after` into the ladder's error classification, the health
-   skip would expire exactly when zen allows traffic again.
+3. **Zen 429s come in two shapes — read the body, not just the status.** A bare 429
+   ("Error from provider (Console)", no headers) is the provider rate limit: no
+   `retry-after`, unknown cooldown, back off for a long time. A 429 with
+   `retry-after` is the daily quota: the header counts down to 00:00 UTC exactly.
+   Only the second shape is safe to feed into the ladder's health-skip TTL.
 4. **When all three free tiers are exhausted, the paid tail is what takes the
    load.** That is by design (reliability beats price), but it makes the paid
    spend a function of how long the free tiers stay dark.
