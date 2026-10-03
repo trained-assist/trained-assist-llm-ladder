@@ -17,7 +17,11 @@ Live: `https://llm-ladder.trainedassist.store`
   a default call no longer opens on a weak free model. Free-first window that #67 closes:
   2026-09-30T15:16Z (#39) → 2026-10-02 (#67 deploy); free rungs first entered the default
   ladder 2026-09-30T11:07Z (#27). Owner 2026-09-30 (issue #42): the four zen rungs live in
-  `free` only:
+  `free` only. **Roles** (owner 2026-10-03, issue #98): `service:classify` (short, speed —
+  free-first), `service:summarize` (medium context — mimo → free), `service:format`
+  (mechanical — free-first), `service:route` (decision — mimo → free), `service:gate`
+  (reliability — mimo → paid tail). The default role stays Pareto-first; the agent sends
+  `deepseek:<role>` per call type so each role can be benchmarked and priced separately.
 
 1. `opencode-go/mimo-v2.6-flash` — Go **subscription**, best by Pareto (τ²-bench 76.6%;
    «мимо норм»), the same starting rung as `research` and `doctor`
