@@ -17,6 +17,9 @@ on:
       max_tokens:
         description: 'max_tokens'
         default: '8'
+      model_after:
+        description: 'fire one request at this model right after the first 429 (shared-bucket test)'
+        default: ''
 
 # Issue #106: two PARALLEL runners (matrix) = two different Azure egress IPs, same anonymous
 # zen fingerprint. If the free-tier limit is per-IP, each runner trips its own budget; if it
@@ -39,7 +42,12 @@ jobs:
             --model ${{ inputs.model }} \
             --prompt "${{ inputs.prompt }}" \
             --max-tokens ${{ inputs.max_tokens }} \
+            --model-after ${{ inputs.model_after }} \
             --out zen-probe-gh-${{ matrix.shard }}.json
+      - name: fingerprint cross-check runner ${{ matrix.shard }}
+        if: always()
+        run: |
+          node scripts/zen-limit-probe.mjs --requests 1 --header 'user-agent: opencode/9.99.99 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14' --out zen-fp-gh-${{ matrix.shard }}.json
       - name: summary runner ${{ matrix.shard }}
         if: always()
         run: |
