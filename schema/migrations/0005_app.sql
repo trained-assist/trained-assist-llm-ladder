@@ -1,0 +1,12 @@
+-- 0005: caller-side sub-task tag (issue #107).
+--
+-- `x-ladder-app` — the agent's `source:` value (gtd-intent, tg-format, session-summary,
+-- failure-classifier, …) — is what says WHICH concrete sub-task a call belongs to. Until now it
+-- went only into OpenRouter attribution headers, so our own log could not answer "which sub-task
+-- burns the money": the ladder name is `service` for all ~20 of them.
+--
+-- Same ALTER-only shape as 0002 (a duplicate-column error means "already applied", so the deploy
+-- job runs it error-tolerantly). Numbered 0005 because the numbering space is shared across both
+-- D1 databases: 0003 = free_models table, 0004 = zen-pool payload. Those touch different
+-- databases, so order does not matter — only readability does.
+ALTER TABLE ladder_calls ADD COLUMN app TEXT;
