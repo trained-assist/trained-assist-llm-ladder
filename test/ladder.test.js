@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
@@ -438,6 +438,20 @@ async function readAll(stream) {
   const r = stream.getReader(); const dec = new TextDecoder(); let out = '';
   for (;;) { const { value, done } = await r.read(); if (done) return out; out += dec.decode(value); }
 }
+
+test('free-headed ladder rotates Go keys round-robin across calls (#81)', async () => {
+  resetFreeGoKeyCursor();
+  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/space-bunny-free'] } } };
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push(init.headers.Authorization);
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1 } }) };
+  };
+  const store = memoryStore(2);
+  for (let i = 0; i < 4; i++) await run({ model: 'free', messages: [{ role: 'user', content: 'hi' }] }, { env, config: cfg, store, fetchImpl });
+  assert.deepEqual(calls, ['Bearer oc_a', 'Bearer oc_b', 'Bearer oc_a', 'Bearer oc_b'],
+    'consecutive free calls land on different pool keys');
+});
 
 test('free-ladder alias resolves to free; stream answered by the first rung with output, bytes replayed intact', async () => {
   const calls = [];
