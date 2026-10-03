@@ -316,6 +316,7 @@
     }
   },
   "aliases": {
+    "deepseek": "service",
     "free-ladder": "free",
     "cheap": "free",
     "conversations": "conversation",
