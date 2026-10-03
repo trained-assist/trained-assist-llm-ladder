@@ -23,6 +23,9 @@ on:
       delay_ms:
         description: 'delay between request starts per worker'
         default: '0'
+      fill_tokens:
+        description: 'comma-separated context sizes to probe (e.g. 100000,500000,1050000); empty = off'
+        default: ''
 
 # Issue #106: two PARALLEL runners (matrix) = two different Azure egress IPs, same anonymous
 # zen fingerprint. If the free-tier limit is per-IP, each runner trips its own budget; if it
@@ -41,6 +44,8 @@ jobs:
         run: |
           MODEL_AFTER_ARG=""
           if [ -n "${{ inputs.model_after }}" ]; then MODEL_AFTER_ARG="--model-after ${{ inputs.model_after }}"; fi
+          FILL_ARG=""
+          if [ -n "${{ inputs.fill_tokens }}" ]; then FILL_ARG="--fill-tokens ${{ inputs.fill_tokens }}"; fi
           node scripts/zen-limit-probe.mjs \
             --requests ${{ inputs.requests }} \
             --concurrency ${{ inputs.concurrency }} \
@@ -48,6 +53,7 @@ jobs:
             --prompt "${{ inputs.prompt }}" \
             --max-tokens ${{ inputs.max_tokens }} \
             --delay-ms ${{ inputs.delay_ms }} \
+            $FILL_ARG \
             $MODEL_AFTER_ARG \
             --out zen-probe-gh-${{ matrix.shard }}.json
       - name: fingerprint cross-check runner ${{ matrix.shard }}

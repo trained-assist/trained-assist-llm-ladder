@@ -62,6 +62,7 @@ const cfg = {
   spacedMs: Number(arg('spaced-ms', 0)),
   maxTokens: Number(arg('max-tokens', 8)),
   modelAfter: arg('model-after', ''),
+  fillTokens: arg('fill-tokens', '').split(',').map(s => Number(s.trim())).filter(n => n > 0),
   out: arg('out', ''),
   headers: (() => {
     const out = [];
@@ -108,13 +109,22 @@ function body(model) {
     model,
     stream: !omitted.has('stream'),
     max_tokens: cfg.maxTokens,
-    messages: [{ role: 'user', content: arg('prompt', 'ping') }],
+    messages: [{ role: 'user', content: cfg.fillSize ? filler(cfg.fillSize) : arg('prompt', 'ping') }],
   };
   if (!omitted.has('tools')) {
     const t = arg('tools', 'shell,read');
     if (t !== 'none') b.tools = t.split(',').map(n => n === 'shell' ? SHELL_TOOL : READ_TOOL);
   }
   return b;
+}
+
+// Context probe: build a prompt of ~N tokens by repeating a sentence. The exact count is
+// reported back from usage.prompt_tokens on a 200; on a 400 the server usually names the cap.
+// ~4.2 chars/token for this ASCII sentence (calibrated against usage.prompt_tokens).
+function filler(tokens) {
+  const phrase = 'The quick brown fox jumps over the lazy dog. ';
+  const reps = Math.ceil((tokens * 4.2) / phrase.length);
+  return phrase.repeat(reps);
 }
 
 function classify(status, text) {
@@ -146,7 +156,7 @@ async function fire(model) {
     retryAfterSec: res.headers.get('retry-after'),
     ms: Date.now() - started,
     errorType: classify(res.status, text),
-    bodySnippet: text.slice(0, 160),
+    bodySnippet: text.slice(0, 500),
     usage,
   };
 }
@@ -171,7 +181,18 @@ async function one(i, model) {
   return r;
 }
 
-if (cfg.spacedMs > 0) {
+if (cfg.fillTokens.length) {
+  // Context probe: one request per target size, no retry loop. Reports the ACTUAL prompt_tokens
+  // the server counted (200) or the server's own error naming the cap (400/413).
+  for (const size of cfg.fillTokens) {
+    cfg.fillSize = size;
+    const r = await fire(cfg.model);
+    const pt = r.usage?.prompt_tokens;
+    results.push({ i: `fill:${size}`, model: cfg.model, target: size, at: new Date().toISOString(), ...r });
+    const tag = r.status === 200 ? `200  prompt_tokens=${pt}` : `${r.status} ${r.errorType}`;
+    console.log(`fill target=${size} → ${tag} (${r.ms}ms)${r.status !== 200 ? '  ' + r.bodySnippet : ''}`);
+  }
+} else if (cfg.spacedMs > 0) {
   for (let i = 1; i <= cfg.requests; i++) {
     const r = await one(i, cfg.model);
     if (r.status === 429) break;
