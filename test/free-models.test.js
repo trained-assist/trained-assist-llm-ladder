@@ -133,32 +133,28 @@ test('collectCatalogs: a provider that fails is reported, not fatal — and its 
   assert.equal(rows.length, 4, 'the healthy providers still collect');
 });
 
-test('collectCatalogs: the Go catalog walks the pool until a key answers', async () => {
+test('collectCatalogs: the Go catalog is public first, the pool is only a fallback', async () => {
   const seen = [];
-  const routes = {
-    ...CATALOGS,
-    [GO_MODELS]: [401, { error: 'invalid credential' }],
-  };
-  // First key rejected, second accepted — the collector must not stop at the first.
   let n = 0;
   const fetchImpl = async (url, init) => {
     if (url !== GO_MODELS) return fakeFetch(CATALOGS)(url, init);
     n += 1;
-    seen.push(init.headers.Authorization);
-    return n === 1
+    seen.push(init.headers.Authorization || null);
+    return n <= 2
       ? new Response('nope', { status: 401 })
       : new Response(JSON.stringify(GO_MODELS_PAYLOAD), { status: 200 });
   };
   const { providers } = await collectCatalogs(ENV, { fetchImpl, config });
   assert.equal(providers.find((p) => p.provider === 'opencode-go').ok, true);
-  assert.deepEqual(seen, ['Bearer go-key-1', 'Bearer go-key-2']);
+  assert.deepEqual(seen, [null, 'Bearer go-key-1', 'Bearer go-key-2'],
+    'no key first (the catalog is public), then the pool in order');
 });
 
-test('collectCatalogs: no Go key configured → the provider reports it, others continue', async () => {
+test('collectCatalogs: no Go key configured → the public catalog still collects', async () => {
   const { providers } = await collectCatalogs({ OPENROUTER_API_KEY: 'k' }, { fetchImpl: fakeFetch(CATALOGS), config });
   const go = providers.find((p) => p.provider === 'opencode-go');
-  assert.equal(go.ok, false);
-  assert.match(go.error, /no Go pool key/);
+  assert.equal(go.ok, true, 'GET /models is public — the catalog needs no key');
+  assert.equal(go.count, 1);
 });
 
 test('collectCatalogs: every rung prefix in ladders.json has a collector (no service skipped)', () => {

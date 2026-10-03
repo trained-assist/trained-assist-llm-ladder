@@ -148,15 +148,13 @@ async function collectProvider(provider, env, { fetchImpl, timeoutMs, inLadder }
       return entriesOf(payload).filter(zenFree).map((e) => normalize('opencode-zen', e, { inLadder }));
     }
     if (provider === 'opencode-go') {
-      // The Go catalog needs a pool key. Try them in order and stop at the first that answers —
-      // a catalog read costs nothing, so there is no reason to walk the whole pool.
-      const pool = readPool(env);
+      // GET /models is PUBLIC (answers 200 with no key) — try that first, so a missing pool key
+      // degrades nothing. If Go ever locks the catalog behind auth, fall back to the pool in order.
+      const attempts = [{}, ...readPool(env).map((key) => ({ Authorization: `Bearer ${key}` }))];
       let lastErr = null;
-      for (const key of pool) {
+      for (const headers of attempts) {
         try {
-          const payload = await getJson(GO_CATALOG_URL, {
-            fetchImpl, timeoutMs, headers: { Authorization: `Bearer ${key}` },
-          });
+          const payload = await getJson(GO_CATALOG_URL, { fetchImpl, timeoutMs, headers });
           return entriesOf(payload).filter(goFree).map((e) => normalize('opencode-go', e, { inLadder }));
         } catch (e) { lastErr = e; }
       }
