@@ -108,7 +108,7 @@ function body(model) {
     model,
     stream: !omitted.has('stream'),
     max_tokens: cfg.maxTokens,
-    messages: [{ role: 'user', content: 'ping' }],
+    messages: [{ role: 'user', content: arg('prompt', 'ping') }],
   };
   if (!omitted.has('tools')) {
     const t = arg('tools', 'shell,read');
