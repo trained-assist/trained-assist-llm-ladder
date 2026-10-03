@@ -79,6 +79,30 @@ There is **no escalation between levels**: a ladder retries down its own rungs; 
 
 ---
 
+## opencode profiles (the assembly)
+
+A profile is **not** a single ladder — it is a **per-role ladder mapping**, one
+`~/.config/opencode/profiles/<name>.json` that sets the model for each opencode agent
+(`build` / `plan` / `explore` / `general` / `review`):
+
+| profile | build | plan | explore | general | review |
+|---|---|---|---|---|---|
+| **`master`** | `ladder/build` | `ladder/plan` | `ladder/explore` | `ladder/general` | `ladder/review` |
+| **`phd`** | `ladder/build advanced` | `ladder/plan` | `ladder/explore` | `ladder/general` | `ladder/review` |
+| **`free`** | `ladder/free` | `ladder/plan` | `ladder/explore` | `ladder/general` | `ladder/review` |
+| `ladder-research` | `ladder/research` | `ladder/research:plan` | `ladder/research:explore` | `ladder/research:general` | `ladder/research:review` |
+
+`master` is the default assembly: the **base** build ladder + each role's own ladder.
+`phd` swaps build to the advanced tier. `free` puts build on the $0 ceiling. The role ladders
+(`build`, `plan`, `explore`, `general`, `review`) are the ones the assembly points at — **not**
+the `service` ladder (which is for small mechanical service calls, a separate concern).
+
+The ladder worker does **not** choose a profile — the caller (opencode, the agent's runner)
+does. Every ladder name a profile points at must exist; there are no aliases, so a rename
+breaks the profile loudly (404) unless the profile is updated too.
+
+---
+
 ## How a call resolves
 
 1. POST `/v1/chat/completions`, `model` = ladder name (`service` default).
