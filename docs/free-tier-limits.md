@@ -15,7 +15,7 @@ runs), and an attempted Google Cloud Function.
 | Tier | What the limit counts | Granularity | Remaining visible? | Precision |
 |---|---|---|---|---|
 | **OpenRouter `:free`** | requests per **day** (1000) + requests per **minute** (20), **account-wide** | day / minute | **yes** — `GET /api/v1/key` → `free_model_daily_requests` | exact (integer + exact reset timestamp) |
-| **Zen free** (`*-free` via relay) | **requests**, per IP: a rate limit ~90–95/min + a daily quota ~940/day | minute / day | **no** — body carries no numbers | rate limit: none; daily quota: exact to the second (`retry-after` → 00:00 UTC) |
+| **Zen free** (`*-free` via relay) | **requests**, per IP **per model**: a rate limit ~90–95/min + a daily quota ~940/day | minute / day | **no** — body carries no numbers | rate limit: none; daily quota: exact to the second (`retry-after` → 00:00 UTC) |
 | **Go `*-free`** (`opencode-go/*-free`) | nothing — Unlimited per docs, never consumes the $-allowance | n/a | n/a | n/a |
 | Go paid (contrast) | **USD per model per month**, windows 5h 20% / week 50% / month 100% | 5h / week / month | no — console only | n/a |
 
@@ -74,7 +74,7 @@ hour after the incident).
 
 ---
 
-## Zen free — three limit layers, all per IP, all request-based
+## Zen free — three limit layers, per (IP, model), all request-based
 
 Zen free models (`space-bunny-free`, `longcat-2.5-preview-free`,
 `mimo-v2.6-flash-free`, `mimo-v2.5-free`, `big-pickle`,
@@ -100,7 +100,7 @@ A rejected fingerprint is **403 `FreeTierError`** ("OpenCode's free tier can onl
 used from within OpenCode") — a different error type from the 429 rate limit, so a
 caller can tell "wrong client" from "no quota" without parsing bodies.
 
-### Three limits, all per IP, all request-based
+### Three limits, metered against the IP separately per model
 
 **1. Provider rate limit — burst protection (bare 429, no headers).**
 
@@ -112,12 +112,12 @@ HTTP 429
 
 The `(Console)` prefix marks it as coming from the **model provider behind zen**, not
 from zen's own quota. It carries **no `retry-after` and no other header**. Trips at
-sustained **~90–95 requests/min per IP** (a GH runner peaking at 96/min tripped at 894
+sustained **~90–95 requests/min per IP per model** (a GH runner peaking at 96/min tripped at 894
 total; one peaking at 79/min did not). A slow fire at ~41/min is unaffected.
 
 **2. Provider daily budget — the same bare 429, no headers.**
 
-Same body as above. Trips at **~915–965 requests per IP per day** regardless of rate
+Same body as above. Trips at **~915–965 requests per IP per model per day** regardless of rate
 (a slow 42/min run tripped at 915 and 964). A residential IP that tripped it stayed
 blocked **>100 min** (1 probe / 90 s never cleared it) — consistent with a daily reset.
 
@@ -130,7 +130,7 @@ retry-after: 26967   →  26824   (counts down in real time)
 ```
 
 `retry-after` lands exactly on **00:00 UTC** (16:30 + 26967 s = 23:59:57) — a **daily
-quota per IP**, resetting at midnight UTC. Measured at **~940 requests per IP per day**
+quota per IP per model**, resetting at midnight UTC. Measured at **~940 requests per IP per day**
 on the relay VM (942 fired → dark). This is the layer the 2026-10-02 storm hit.
 
 Limits 2 and 3 are nearly the same size (~940/day) and both reset at midnight — most
@@ -144,6 +144,24 @@ The ladder cannot tell them apart by count, only by body/headers.
 runners), while a 142-token "ping" burst tripped the rate limit at ~126K tokens / ~890
 requests. Every layer counts **requests**, not tokens.
 
+### Context cap — a fourth limit, per model
+
+Separate from the request counters, each model has a **context cap**, and it is **per model**
+(not per tier, not per IP). Measured live with `scripts/zen-limit-probe.mjs --fill-tokens`
+(send ~N tokens, read the server's own cap from the 400):
+
+| model (zen free) | cap, tokens | stability |
+|---|---|---|
+| `mimo-v2.6-flash-free` | 1,048,576 | stable |
+| `mimo-v2.5-free` | 1,048,576 | stable |
+| `nemotron-3.5-lightning-free` | 1,000,000 | stable |
+| `big-pickle` | **262,139** | unstable — backends with 262,139 and ≥1M, non-deterministic |
+
+**When a model is non-deterministic, use the minimum** (`big-pickle` → 262,139): the maximum
+is luck, not a guarantee. Caps are not in any docs — zen `/v1/models` returns no
+`context_length` — so each new model is measured. The client follows this before sending
+(`prompt + max_tokens ≤ cap`); see `docs/github-actions-zen-client-spec.md` §4.
+
 ### Runtime × limit (2026-10-03)
 
 | runtime | egress | outcome | stopped at | 429 carries |
@@ -156,9 +174,14 @@ requests. Every layer counts **requests**, not tokens.
 | GitHub Actions (slow, 1200 fired) | Azure IP ×2 | 200 | 964 (zen daily) / 915 (provider) | `retry-after` → midnight / nothing |
 | Google Cloud Function | — | not measured — deploy blocked by project IAM (build SA) | | |
 
-**The limit is per IP, not per fingerprint**: a blocked residential IP stayed 429 with
+**The limit is per (IP, model), not per fingerprint**: a blocked residential IP stayed 429 with
 a *different* `user-agent` too. Two parallel GH runners each got their own budget —
 **no intersection**, confirming the owner's hypothesis (#95).
+
+**Per model, not one shared counter.** On the same relay IP, in one bench run, `mimo-v2.6`,
+`mimo-v2.5` and `big-pickle` all returned 429 while `nemotron-3.5-lightning` kept answering —
+so tripping one model does not silence another. The IP is the identity the provider meters
+against; the budget itself is per model (provider). Track state per model, not globally.
 
 ### What this means for the ladder
 
