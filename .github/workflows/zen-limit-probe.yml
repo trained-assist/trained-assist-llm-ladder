@@ -11,6 +11,12 @@ on:
       model:
         description: 'zen free model'
         default: 'mimo-v2.6-flash-free'
+      prompt:
+        description: 'user message'
+        default: 'ping'
+      max_tokens:
+        description: 'max_tokens'
+        default: '8'
 
 # Issue #106: two PARALLEL runners (matrix) = two different Azure egress IPs, same anonymous
 # zen fingerprint. If the free-tier limit is per-IP, each runner trips its own budget; if it
@@ -31,6 +37,8 @@ jobs:
             --requests ${{ inputs.requests }} \
             --concurrency ${{ inputs.concurrency }} \
             --model ${{ inputs.model }} \
+            --prompt "${{ inputs.prompt }}" \
+            --max-tokens ${{ inputs.max_tokens }} \
             --out zen-probe-gh-${{ matrix.shard }}.json
       - name: summary runner ${{ matrix.shard }}
         if: always()
