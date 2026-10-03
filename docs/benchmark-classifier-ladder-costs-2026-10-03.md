@@ -322,54 +322,90 @@ const ladders = models.data.filter(m => !m.id.includes(':') && …);
 Так что бенчить `service` было нельзя: бенчить нечего. Роль — это политика ступеней, а
 подзадача — это то, что бенчить надо. Сейчас в системе есть только подзадачи.
 
-#### Конкретные подзадачи: 20 источников агента
+#### Не «20 подзадач», а 5 форм решения
 
-Каждый вызов `service-llm` уже помечен собственным `source:` — это и есть готовая
--taxonomy подзадач, просто она никуда не доходила.
+Владелец, 2026-10-03: «по-хорошему нужно сделать абстрактные решения: типа принять решение
+yes/no». Верно. `vacancy-publish-intent`, `quick-answer-verify`, `plan-detect`,
+`gtd-intent`, `failure-classifier` — это **один и тот же класс задачи**: принять решение и
+ответить коротко. Различаются они не тем, что делают, а **контрактом ответа** — формой,
+размером, бюджетом ожидания и тем, что считается отказом.
 
-| # | `source:` | место вызова | что делает | роль #98 | maxTokens |
+Именно контракт (а не имя инструмента) должен выбирать ступень. Поэтому роль в конфиге
+лестницы — это описание формы решения, а `source:` — это только тег для атрибуции.
+
+| форма решения | контракт ответа | `source:` | ответ | бюджет | отказ = |
 |---|---|---|---|---|---|
-| 1 | `classify` | `classify-message.js:80` | классификация сообщения | `classify` | 64 |
-| 2 | `failure-classifier` | `failure-classifier.js:151` | классификация ошибки | `classify` | 40 |
-| 3 | `gtd-intent` | `gtd-controller.js:1883` | «хочу ли это в gtd» | `classify` | 60 |
-| 4 | `plan-detect` | `runner/index.js:2035` | план это или нет | `classify` | **20** |
-| 5 | `menu-detect` | `runner/index.js:2074` | это пункт меню или текст | `classify` | 150 |
-| 6 | `session-summary` | `session-summary.js:69` | сжатие транскрипта | `summarize` | 600 |
-| 7 | `session-digest` | `session-digest.js:453` | дайджест по сессиям | `summarize` | 700 |
-| 8 | `project-summary` | `project-summary.js:101` | резюме проекта | `summarize` | 500 |
-| 9 | `tg-format` | `tg-format.js:185` | форматирование под Telegram | `format` | 2048 |
-| 10 | `input-router` | `input-router.js:199` | маршрутизация ввода | `route` | 300 |
-| 11 | `project-match` | `project-match.js:110` | подбор проекта | `route` | — |
-| 12 | `vacancy-publish-intent` | `runner/intent-engine.js:758` | публиковать вакансию? | `route` | **5** |
-| 13 | `quick-answer-verify` | `runner/intent-engine.js:783` | проверка быстрого ответа | `route` | **5** |
-| 14 | `issue-fixer-gate` | `issue-fixer.js:254` | гейт перед фиксом | `gate` | 800 |
-| 15 | `playbook-validator` | `playbook-validators.js:757` | вердикт по playbook | `gate` | 200 |
-| 16 | `durable-marker-judge` | `durable-marker-judge.js:119` | судья маркера | `gate` | — |
-| 17 | `reproject` | `reproject.js:108` | пере-проектирование | `classify` | 4000 |
-| 18 | `label-vision` | `mcp-skills/tools/96-label.js:84` | разбор картинки | **`vision`** ⚠️ | — |
-| 19 | `mainstream-decider` | `mainstream-tester/mainstream-decider.js:141` | решение по mainstream | `route` | — |
-| 20 | `bugs-collector` | `bugs-collector.js:211` | сбор багов | `summarize` | 2000 |
+| **verify** | одно бинарное слово | `vacancy-publish-intent`, `quick-answer-verify` | 5 токенов | 4 с, обход 6 с | отказ (fail-closed / fail-open) |
+| **classify** | метка из закрытого множества | `plan-detect`, `failure-classifier`, `gtd-intent`, `classify`, `durable-marker-judge` | 20–80 токенов, JSON или одно слово | 8–15 с | дефолт, работа продолжается |
+| **extract** | структура из текста/картинки | `project-match`, `playbook-validator`, `input-router`, `mainstream-decider`, `label-vision`, `reproject` | JSON, 80–4000 токенов | 20–45 с | дефолт, работа продолжается |
+| **author** | текст для человека | `session-summary`, `session-digest`, `project-summary`, `tg-format`, `bugs-collector` | 500–2048 токенов | 8–45 с | `null`, вызывающий решает сам |
+| **gate** | вердикт, ошибка которого дорого стоит | `issue-fixer-gate` | 800 токенов | 30 с | блокирует действие |
 
-Два наблюдения, которые видны только в этой таблице:
+Что из этого следует для выбора ступеней (и почему роль ≠ имя тула):
 
-- **№12 и №13 — гейты с `maxTokens: 5` и латентно-критичные.** Оба спрашивают буквально
-  «да/нет» и сидят перед быстрым путём, который обязан обогнать Claude; клиент отдаёт на них
-  `totalTimeoutMs: 6000` (весь обход лестницы). **Деньги здесь не аргумент:** вход ~100–300
-  токенов, выход 5 → ~$0.00002 на `mimo` ($0.14/$0.28) против ~$0.00004 на платном
-  `gemini-3.1-flash-lite`. Разница в микроценты. Аргумент — **латентность и формат**: если
-  гейт сядет на медленную ступень (в последнем бенче `gemini-3.8-flash` и `xiaomi/mimo`
-  роняли задачи по 90 с), он упрётся в 6 секунд и тихо отдаст `false` — заплатим задержкой
-  вместо денег.
-  - `vacancy-publish-intent` (`intent-engine.js:747`) — «публиковать страницу вакансии?»,
-    зовётся только если regex `VACANCY_PUBLISH_PAGE_INTENT` не сработал, но черновик есть;
-    **fail-closed** (ошибка → не публиковать, Claude разберётся сам).
-  - `quick-answer-verify` (`intent-engine.js:775`) — «юзер реально просил этот авто-ответ?»,
-    анти-ложное срабатывание ~55 fuzzy-регексов; **fail-open** (всё, что не начинается с
-    `NO`, считается `YES`).
-- **№18 `label-vision` шлёт в `service`, а не в `vision`.** Лестницы `vision` /
-  `vision advanced` (100% платные, `$0.0012` на вызов) не вызываются из агента вообще — их
-  58 + 54 вызова за 5 дней пришли откуда-то ещё. Это отдельная нестыковка: платная
-  мультимодальная лестница без клиента.
+- **`verify` и `classify` сейчас обе живут в `service:classify`, но требования разные.**
+  У `verify` бюджет 4 секунды на ответ «да/нет» и ошибка не стоит ничего (клиент просто
+  работает дальше). У `classify` бюджет 8–15 секунд и ошибка стоит решения. Ставить их на
+  одну роль с free-first политикой — значит либо убивать `verify` по таймауту, либо
+  переплачивать за `classify`.
+- **`author` и `extract` — противоположные по цене формы.** У `extract` вход большой
+  (до 4000 токенов ответа, вход до 3000 символов) и ответ машинно проверяемый: дешёвая модель,
+  которая вернёт кривой JSON, просто проиграет по guard'у и уйдёт на следующую ступень. У
+  `author` ответ читает человек, и дешёвая модель даёт мусор, который guard не поймает —
+  тут дешёвая ступень опасна.
+- **`gate` — единственная форма, где нужен платный хвост.** Ошибка `issue-fixer-gate`
+  стоит неверного фикса в PR.
+
+#### Приложение: кто какую форму использует (это таблица, которой не должно быть в документе)
+
+Каждый вызов `service-llm` уже помечен собственным `source:` — готовая разметка есть, просто
+она никуда не доходила. Эта таблица **не должна жить в документации**: её правильное место —
+код (`SOURCE_ROLE` в агенте) и данные (разрез `apps` в `/v1/analytics`, PR #113). Она устареет
+в тот же день, когда агент добавит новый вызов, и никакой документ её не обновит.
+
+| # | `source:` | место вызова | форма | роль #98 | ответ |
+|---|---|---|---|---|---|
+| 1 | `classify` | `classify-message.js:80` | classify | `classify` | 64 |
+| 2 | `failure-classifier` | `failure-classifier.js:151` | classify | `classify` | 40 |
+| 3 | `gtd-intent` | `gtd-controller.js:1883` | classify | `classify` | 60 |
+| 4 | `plan-detect` | `runner/index.js:2035` | classify | `classify` | **20** |
+| 5 | `menu-detect` | `runner/index.js:2074` | classify | `classify` | 150 |
+| 6 | `durable-marker-judge` | `durable-marker-judge.js:119` | classify | `gate` | 80 |
+| 7 | `project-match` | `project-match.js:110` | extract | `route` | 80 |
+| 8 | `playbook-validator` | `playbook-validators.js:757` | extract | `gate` | 200 |
+| 9 | `input-router` | `input-router.js:199` | extract | `route` | 300 |
+| 10 | `mainstream-decider` | `mainstream-tester/mainstream-decider.js:141` | extract | `route` | 300 |
+| 11 | `label-vision` | `mcp-skills/tools/96-label.js:84` | extract | **`vision`** ⚠️ | 1024 |
+| 12 | `reproject` | `reproject.js:108` | extract | `classify` | 4000 |
+| 13 | `session-summary` | `session-summary.js:69` | author | `summarize` | 600 |
+| 14 | `session-digest` | `session-digest.js:453` | author | `summarize` | 700 |
+| 15 | `project-summary` | `project-summary.js:101` | author | `summarize` | 500 |
+| 16 | `tg-format` | `tg-format.js:185` | author | `format` | 2048 |
+| 17 | `bugs-collector` | `bugs-collector.js:211` | author | `summarize` | 2000 |
+| 18 | `issue-fixer-gate` | `issue-fixer.js:254` | gate | `gate` | 800 |
+| 19 | `vacancy-publish-intent` | `runner/intent-engine.js:758` | **verify** | `route` | **5** |
+| 20 | `quick-answer-verify` | `runner/intent-engine.js:783` | **verify** | `route` | **5** |
+
+Обратите внимание на форму `verify` (строки 19–20): в #98 они отнесены к `route`, потому что
+это «роутинг». По контракту это не роутинг — это бинарный вердикт с бюджетом 4 секунды и
+5 токенами ответа, и он ближе к `classify` по требованиям, чем к `route`. Роль в конфиге
+описана как `route` (mimo → free), а форма требует другой ступени — вот и цена того, что
+роль названа по тулу, а не по форме.
+
+
+#### Где это должно жить (решение владельца от 2026-10-03)
+
+Вопрос: «в каком репозитории или документации место этой доки». Разделение такое:
+
+| что | где | почему |
+|---|---|---|
+| **таблица «кто какой формой пользуется»** | **нигде** — код + данные | Это состояние, а не решение. Правильное место — `SOURCE_ROLE` в агенте (это и есть таблица) и разрез `apps` в `/v1/analytics`. Документ устареет в день, когда агент добавит вызов, и сам себя не обновит. Плюс дублирование: `vacancy-publish-intent` уже будет тегом в аналитике, вручную держать его же в доке — значит поддерживать одно и то же дважды |
+| **контракт форм решения (verify / classify / extract / author / gate)** | **этот репо, `docs/`** | Это то, что реализует `config/ladders.json`: какая форма → какая роль → какой порядок ступеней. Бенч-репо нужен именно этот контракт, чтобы знать, какую задачу писать для роли |
+| **контракт вызова** (timeoutMs, totalTimeoutMs, maxTokens, fail-политика) | **агент** | Правится вместе с местом вызова, там же где живёт вызов |
+
+Вывод: в агент переносить ничего не нужно. Единственное, что туда должно уехать, — сам
+`SOURCE_ROLE`-маппинг, и это не документ, а код, который заодно чинит невыполненный пункт
+приёмки #98.
 
 #### Что уже сделано и что осталось
 
