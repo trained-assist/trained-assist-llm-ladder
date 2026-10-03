@@ -316,12 +316,11 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
-      // Canonical ladder name: 'deepseek'→'service', 'free-ladder'→'cheap' (config.aliases),
-      // the default role 'X:build' collapses to 'X'; non-default roles (:review, :explore) stay.
+      // Canonical ladder names only (no aliases since 2026-10-03). The default role
+      // 'X:build' collapses to 'X'; non-default roles (:review, :explore) stay separate.
       const canonName = (raw) => {
         const [base, role] = String(raw || '').split(':');
-        const canon = config.aliases[base] || base;
-        return !role || role === 'build' ? canon : `${canon}:${role}`;
+        return !role || role === 'build' ? base : `${base}:${role}`;
       };
       const ladders = new Map();
       const entry = (raw) => {

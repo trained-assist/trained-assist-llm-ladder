@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders served by trained-assist-llm-ladder. Rungs tried top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = paid OpenRouter, opencode-zen/* = zen free tier via relay. Design (owner 2026-10-02, issue #71, aligned in #79): role = a ladder of its own (build / build advanced / plan / explore / general / review), vision = picture recognition, conversation = candidate messages, free = hard $0 ceiling (Go-free + OR :free + zen). service (bot contract, #67), doctor, research stay as-is. Aliases keep old callers working: deepseek->service, free-ladder->free, cheap->free, conversations->conversation, picture->vision, picture advanced->vision advanced.",
+  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via relay. NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling).",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -315,12 +315,5 @@
       ]
     }
   },
-  "aliases": {
-    "deepseek": "service",
-    "free-ladder": "free",
-    "cheap": "free",
-    "conversations": "conversation",
-    "picture": "vision",
-    "picture advanced": "vision advanced"
-  }
+  "aliases": {}
 }

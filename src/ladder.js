@@ -149,8 +149,7 @@ export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
 
 // "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
 export function rungsFor(config, name) {
-  let [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
-  if (config.aliases && config.aliases[ladderName]) ladderName = config.aliases[ladderName];
+  const [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
   const l = config.ladders && config.ladders[ladderName];
   if (!l) return null;
   return l[role || DEFAULT_ROLE] || l[DEFAULT_ROLE] || null;

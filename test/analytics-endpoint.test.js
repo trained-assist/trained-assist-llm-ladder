@@ -42,33 +42,33 @@ test('GET /v1/analytics: requires auth', async () => {
   assert.equal(r2.status, 401);
 });
 
-test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', async () => {
+test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   const d1 = fakeD1({
     aggRows: [
-      // deepseek → service (alias #49), free-ladder → free, deepseek:build → service (default role)
+      // no aliases: every row carries a canonical ladder name (2026-10-03 refactor)
       { ladder: 'service', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
       { ladder: 'service', calls: 5, failed: 0, tin: 500, tout: 25, no_usage: 2 },
       { ladder: 'service:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
-      { ladder: 'free-ladder', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
+      { ladder: 'free', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
       { ladder: 'service:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
     ],
     rungRows: [
       { ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 1000, tcached: 400, tout: 50 },
       { ladder: 'service', model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', calls: 5, tin: 200, tcached: 0, tout: 10 },
-      { ladder: 'free-ladder', model: 'opencode-go/space-bunny-free', calls: 3, tin: 300, tcached: 0, tout: 15 },
-      { ladder: 'free-ladder', model: 'openrouter/inclusionai/ling-3.0-flash', calls: 2, tin: 150, tcached: 0, tout: 40 },
+      { ladder: 'free', model: 'opencode-go/space-bunny-free', calls: 3, tin: 300, tcached: 0, tout: 15 },
+      { ladder: 'free', model: 'openrouter/inclusionai/ling-3.0-flash', calls: 2, tin: 150, tcached: 0, tout: 40 },
     ],
     hourlyRows: [
       { hour: '2026-10-02T22:00Z', ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, ok_n: 10, tin: 1000, tcached: 400, tout: 50 },
-      { hour: '2026-10-02T21:00Z', ladder: 'free-ladder', model: 'opencode-go/space-bunny-free', calls: 3, ok_n: 3, tin: 300, tcached: 0, tout: 15 },
+      { hour: '2026-10-02T21:00Z', ladder: 'free', model: 'opencode-go/space-bunny-free', calls: 3, ok_n: 3, tin: 300, tcached: 0, tout: 15 },
     ],
     depthRows: [
       { ladder: 'service', depth: 3, calls: 1 },
       { ladder: 'service', depth: 1, calls: 9 },
       { ladder: 'service:build', depth: 1, calls: 7 },
       { ladder: 'service', depth: 1, calls: 5 },
-      { ladder: 'free-ladder', depth: 2, calls: 2 },
-      { ladder: 'free-ladder', depth: 1, calls: 1 },
+      { ladder: 'free', depth: 2, calls: 2 },
+      { ladder: 'free', depth: 1, calls: 1 },
     ],
   });
   const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
@@ -79,12 +79,11 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
   assert.ok(Date.now() - b.since_ms <= 3_600_000 + 5_000, 'since covers ~1h');
   assert.ok(b.generated_ms <= Date.now() + 5_000);
 
-  // aliases merged: deepseek → service (#49), free-ladder → free; the default role
-  // (deepseek:build) collapses into 'service'; a non-default role stays separate.
+  // canonical names only; the default role (X:build) collapses into 'X', a non-default role stays separate.
   const names = b.ladders.map(l => l.ladder);
   assert.deepEqual(names.sort(), ['free', 'service', 'service:review']);
   const ds = b.ladders.find(l => l.ladder === 'service');
-  assert.equal(ds.calls, 22, 'deepseek + deepseek:build merged into service');
+  assert.equal(ds.calls, 22, 'service + service:build default-role rows sum together');
   assert.equal(ds.failed, 1);
   assert.equal(ds.tokens_in, 2200);
   assert.equal(ds.no_usage, 2);
@@ -104,7 +103,7 @@ test('GET /v1/analytics: aggregates per ladder, aliases merged, depth sorted', a
 
   // hourly cut: one row per hour × ladder × model, aliased and priced
   const h = b.hourly.find(x => x.hour === '2026-10-02T22:00Z');
-  assert.equal(h.ladder, 'service', 'deepseek → service alias in the hourly cut too');
+  assert.equal(h.ladder, 'service', 'canonical ladder name in the hourly cut');
   assert.equal(h.model, 'opencode-go/mimo-v2.6-flash');
   assert.ok(Math.abs(h.cost_usd - ((1000 - 400) * 0.14 / 1e6 + 50 * 0.28 / 1e6 + 400 * 0.0028 / 1e6)) < 1e-12, 'fresh+cached+out priced');
 

@@ -6,7 +6,7 @@ import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
-const LADDER = config.ladders.service.build; // primary key renamed in #49; 'deepseek' stays a legacy alias
+const LADDER = config.ladders.service.build; // canonical name since the 2026-10-03 refactor
 const FREE = config.ladders.free.build;
 const CONVERSATION = config.ladders.conversation.build;
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
@@ -27,13 +27,13 @@ function fakeFetch(behaviour, calls) {
 const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 
 // Floor/diag assertions are pinned to EXPLICIT rung ids — never to LADDER[0]: #39 reordered the
-// real deepseek ladder (space-bunny-free first) and that alone turned the previous version of
+// real service ladder (space-bunny-free first) and that alone turned the previous version of
 // these tests red (#40 → CI fail), and #67 reordered it again (mimo first). DIAG_REASONING is
 // measured reasoning → 3000 floor; DIAG_SECOND exists only so the failover half of the diag tests
 // has a stable second rung.
 const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
 const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
-const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } } }; // keyed by the canonical name — rungsFor resolves 'deepseek' → 'service' (#49)
+const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } } }; // keyed by the canonical name
 
 test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid last (#36/#42 economics kept)', () => {
   assert.deepEqual(LADDER, [
@@ -106,28 +106,15 @@ test('config: free = 8 $0 rungs + zen tail (#42)', () => {
   assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
 });
 
-test('config: aliases resolve to the designed ladders (#79 design alignment)', () => {
-  assert.deepEqual(config.aliases, {
-    // deepseek stays as a BACKWARD-COMPAT alias: opencode provider configs and the agent's
-    // runner still send `deepseek:build` (removed 2026-10-03 → broke them with 404
-    // "unknown ladder: deepseek:build"). The agent now sends `service`, but the alias keeps
-    // every deployed client working until its config is updated.
-    deepseek: 'service',
-    'free-ladder': 'free',
-    cheap: 'free',
-    conversations: 'conversation',
-    picture: 'vision',
-    'picture advanced': 'vision advanced',
-  });
-  // removed as artifacts — the names must not be real ladders anymore
-  for (const gone of ['cheap', 'free_100percent', 'picture', 'picture advanced', 'conversations']) {
+test('config: no aliases — every ladder name is canonical (refactor 2026-10-03)', () => {
+  assert.deepEqual(config.aliases, {}, 'aliases removed: one name, one ladder');
+  for (const gone of ['deepseek', 'cheap', 'free-ladder', 'conversations', 'picture', 'picture advanced', 'free_100percent']) {
     assert.equal(config.ladders[gone], undefined, `${gone} is not a ladder`);
+    assert.equal(rungsFor(config, gone), null, `${gone} must NOT resolve`);
   }
-  for (const keep of ['free', 'vision', 'vision advanced', 'conversation', 'build', 'build advanced', 'plan', 'explore', 'general', 'review', 'service', 'doctor', 'research']) {
+  for (const keep of ['service', 'conversation', 'vision', 'vision advanced', 'free', 'build', 'build advanced', 'plan', 'explore', 'general', 'review', 'doctor', 'research']) {
     assert.ok(config.ladders[keep], `${keep} exists`);
   }
-  // the legacy alias must resolve role suffixes too (`deepseek:build` → service:build)
-  assert.deepEqual(rungsFor(config, 'deepseek:build'), config.ladders.service.build);
 });
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
@@ -459,9 +446,9 @@ test('free-headed ladder rotates Go keys round-robin across calls (#81)', async 
     'consecutive free calls land on different pool keys');
 });
 
-test('free-ladder alias resolves to free; stream answered by the first rung with output, bytes replayed intact', async () => {
+test('free ladder: stream answered by the first rung with output, bytes replayed intact', async () => {
   const calls = [];
-  const r = await run({ model: 'free-ladder', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
+  const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
   assert.equal(r.ok, true);
   assert.equal(r.model, FREE[0]);
   assert.equal(calls[0].body.stream, true);
@@ -748,7 +735,7 @@ test('zen upstreamRequest: relay URL + relay token, no OpenRouter attribution, m
   assert.equal(conv.headers['x-session-id'], 'conv-42', 'conversation id goes to the relay for ses_ derivation');
 });
 
-// #42 (owner): zen left deepseek for the free ladder TAIL, so the live deepseek walk no longer
+// #42 (owner): zen left service for the free ladder TAIL, so the live service walk no longer
 // contains a zen rung. The relay mechanics below are what matter here — pin them to an explicit
 // config (the DIAG_CFG pattern) instead of to LADDER[0]/LADDER[1].
 const ZEN_WALK = [
@@ -757,7 +744,7 @@ const ZEN_WALK = [
   'opencode-zen/mimo-v2.6-flash-free',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
 ];
-const ZEN_CFG = { ...config, ladders: { ...config.ladders, service: { build: ZEN_WALK } } }; // canonical key — rungsFor resolves 'deepseek' → 'service' (#49)
+const ZEN_CFG = { ...config, ladders: { ...config.ladders, service: { build: ZEN_WALK } } }; // canonical key
 const zenGoFail = () => ({
   [short(ZEN_WALK[0])]: () => ({ status: 500, error: 'boom' }),
   [short(ZEN_WALK[1])]: () => ({ status: 500, error: 'boom' }),
