@@ -7,6 +7,9 @@
 //   GET  /v1/models              ladders as model ids (auth)
 //   GET  /v1/state               model health + key rotation snapshot (auth)
 //   POST /v1/state/reset-keys    unpark all Go keys + Go rungs (auth, ops lever)
+//   GET  /v1/free-models        free-model inventory: context/price + last availability probe (auth)
+//   POST /v1/free-models/collect one collection pass + diff report (auth; the only writer — the Go
+//                               catalog key lives in the worker secret and never leaves it)
 //   POST /v1/chat/completions    body.model = ladder ("service", legacy alias "deepseek", "service:review") (auth)
 //
 // Auth: `Authorization: Bearer <LADDER_TOKEN>`. Non-streaming → a normal chat.completion whose

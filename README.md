@@ -101,7 +101,9 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/v1/go-usage` | remaining Go allowance per pool key (rolling/weekly/monthly % + reset) |
 | GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, failover depth, top errors |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
+| GET | `/v1/free-models?provider=&available=0\|1` | the free-model inventory (D1 `free_models`) with context/price + last probe |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
+| POST | `/v1/free-models/collect` | one collection pass + diff report; body `{probe, probe_limit, probe_concurrency, dry_run}` |
 | POST | `/v1/state/reset-keys` | unpark all Go keys (after replacing the pool) |
 
 Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (stream first-token window, 15000), `ladder_total_timeout_ms` (whole ladder), `ladder_rung` (pin one rung, no failover), `ladder_conversation` (sticky-rung key).
@@ -133,6 +135,37 @@ rename breaks CI, not prod.
 
 ---
 
+## Free-model inventory
+
+Every free model the ladder's providers publish, kept in one D1 table (`free_models`, in the
+trace DB) and refreshed by GitHub Actions every 4h (`.github/workflows/collect-free-models.yml`).
+
+- **Catalogs** — OpenRouter (`:free` / both prices 0), zen (`*-free` + `big-pickle`), Go
+  (`*-free`). A provider that fails to answer is reported as degraded and its models are left
+  alone: an outage must not look like "every model left".
+- **Row** — `(provider, model_id, name, context, price_in, price_out, price_cached, owned_by,
+  description, in_ladder, first_seen, last_seen, available, probe_status, probed_at)`. `model_id`
+  is the full ladder rung id, so a row joins to `config/prices.json` / `config/contexts.json`
+  directly. Prices are per 1M tokens, like `config/prices.json`.
+- **Probe** — one light request per model per run (`max_tokens: 8`, prompt `ping`), budgeted by
+  `probe_limit` (default 12) and aimed at the least-recently-probed models first, so a small
+  budget still rotates coverage. `probe_status`: `ok` / `limited` (429) / `not_found` /
+  `http_<n>` / `error` / `skipped`. zen needs the opencode-client fingerprint and `stream:true`
+  (issue #106); Go needs a session header; both are in `src/free-models.js`.
+- **Reconcile** — upsert on `(provider, model_id)`, `first_seen` preserved, `last_seen` bumped,
+  `available=0` for what disappeared (never deleted — the history is the point).
+- **Diff** — `appeared` / `gone` / `changed` (context, price, name, owned_by) between this run
+  and the table as it was. That diff is the trigger signal for the free-models benchmark step.
+
+```bash
+npm run collect        # one pass against prod, markdown diff on stdout
+```
+
+The Go catalog is fetched inside the worker with the `OPENCODE_GO_API_KEYS` pool — the key never
+leaves the worker and is never logged. `GET /v1/free-models` reads the inventory back.
+
+---
+
 ## Go keys (subscription)
 
 Keys live only in the worker secret `OPENCODE_GO_API_KEYS` (comma-separated pool); clients
@@ -148,8 +181,9 @@ never see them. Docs: `docs/go-key-management.md`.
 ## Development
 
 ```bash
-npm test              # ladder + state + analytics (node:test, no runtime needed)
+npm test              # ladder + state + analytics + free-models inventory (node:test, no runtime)
 npm run gate          # live gate: one pinned call per gate rung against prod
+npm run collect       # one free-model collection pass against prod, markdown diff on stdout
 npx wrangler dev      # local worker (cp .dev.vars.example .dev.vars first)
 ```
 

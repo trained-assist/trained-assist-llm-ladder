@@ -4,6 +4,7 @@
 
 import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
+import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import config from '../config/ladders.json' with { type: 'json' };
 import prices from '../config/prices.json' with { type: 'json' };
 
@@ -258,6 +259,78 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   // percent, issue #91). The raw key never appears in the response or the logs.
   if (request.method === 'GET' && url.pathname === '/v1/go-usage') {
     return json(200, { keys: await fetchGoUsage(env, { fetchImpl }) });
+  }
+
+  // GET /v1/free-models — the free-model inventory (issue #111): every free model the ladder's
+  // providers publish, with context/price and the last availability probe. Filters are bound,
+  // never interpolated; `available` is 1/0 (a string 'true'/'false' would silently match
+  // nothing, so it is parsed to a number first).
+  if (request.method === 'GET' && url.pathname === '/v1/free-models') {
+    const db = env.LADDER_TRACE_DB;
+    if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+    const q = url.searchParams;
+    const provider = q.get('provider');
+    const available = q.get('available');
+    const limit = Math.min(Math.max(Number(q.get('limit')) || 100, 1), 500);
+    const where = [];
+    const params = [];
+    if (provider) { where.push('provider = ?1'); params.push(String(provider).slice(0, 40)); }
+    if (available !== null && available !== '') {
+      const avail = Number(available);
+      if (!Number.isFinite(avail)) return oaError(400, 'available must be 0 or 1', 'invalid_request_error');
+      where.push(`available = ?${params.length + 1}`);
+      params.push(avail ? 1 : 0);
+    }
+    const sql = 'SELECT provider, model_id, name, context, price_in, price_out, price_cached, owned_by, '
+      + 'description, in_ladder, first_seen, last_seen, available, probe_status, probed_at '
+      + `FROM ${FREE_MODELS_TABLE}`
+      + (where.length ? ` WHERE ${where.join(' AND ')}` : '')
+      + ` ORDER BY provider, model_id LIMIT ?${params.length + 1}`;
+    try {
+      const { results = [] } = await db.prepare(sql).bind(...params, limit).all();
+      const models = results.map((r) => ({
+        ...r,
+        available: !!r.available,
+        in_ladder: !!r.in_ladder,
+        price_in: r.price_in === null ? null : r.price_in / 1e6,
+        price_out: r.price_out === null ? null : r.price_out / 1e6,
+        price_cached: r.price_cached === null ? null : r.price_cached / 1e6,
+      }));
+      const counts = {};
+      for (const m of models) counts[m.provider] = (counts[m.provider] || 0) + 1;
+      return json(200, { models, count: models.length, by_provider: counts, generated_ms: Date.now() });
+    } catch (e) {
+      return oaError(500, `free-models query failed: ${e.message}`, 'server_error');
+    }
+  }
+
+  // POST /v1/free-models/collect — one collection pass (issue #111): fetch every provider's free
+  // catalog, probe availability lightly, upsert into free_models, mark the missing ones gone.
+  // This is the ONLY writer: the Go catalog needs a pool key, and the key lives in the worker
+  // secret OPENCODE_GO_API_KEYS — it never leaves the worker and is never logged. The cron
+  // (collect-free-models.yml) calls this; `dry_run` skips the write (and the reconcile) so a
+  // manual run can preview the diff without touching the table.
+  if (request.method === 'POST' && url.pathname === '/v1/free-models/collect') {
+    const db = env.LADDER_TRACE_DB;
+    if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+    let body = {};
+    try { body = await request.json(); } catch { /* empty body = defaults */ }
+    // A string "false"/"0" from a curl --data must not turn probing on.
+    const flag = (v, def) => (v === undefined ? def : !/^(false|0|off)$/i.test(String(v)));
+    const dryRun = flag(body.dry_run, false);
+    const probe = flag(body.probe, true);
+    const probeLimit = Math.min(Math.max(Number(body.probe_limit) || 12, 0), 100);
+    const probeConcurrency = Math.min(Math.max(Number(body.probe_concurrency) || 4, 1), 16);
+    try {
+      const run = await collectFreeModels(env, db, {
+        fetchImpl, config, probe, probeLimit, probeConcurrency,
+        ...(dryRun ? { write: false } : {}),
+      });
+      // dry_run: the diff is computed against the table as it stands — nothing was written.
+      return json(200, { ...(dryRun ? { dry_run: true } : {}), ...summarizeRun(run), diff: run.diff, report: markdownReport(run) });
+    } catch (e) {
+      return oaError(500, `free-models collect failed: ${e.message}`, 'server_error');
+    }
   }
 
   // GET /v1/calls — the per-CALL trace log, the read side /v1/analytics has no counterpart for.

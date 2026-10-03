@@ -8,6 +8,7 @@
     "test": "node --test test/*.test.js",
     "test:sandbox": "bash scripts/sandbox/sticky-rung.sh",
     "gate": "node scripts/live-gate.mjs",
+    "collect": "node scripts/collect-free-models.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
