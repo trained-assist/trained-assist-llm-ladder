@@ -1,0 +1,45 @@
+name: collect-free-models
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: Availability probe (one light request per model, budgeted)
+        default: "true"
+      probe_limit:
+        description: Max models to probe per run (least-recently-probed first)
+        default: "12"
+      dry_run:
+        description: Collect + diff only, do not write to the table
+        default: "false"
+  schedule:
+    # Every 4 hours, off the hour (GitHub's cron stampede) and off the analytics digest.
+    - cron: '13 */4 * * *'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Collect free-model inventory
+        env:
+          LLM_LADDER_TOKEN: ${{ secrets.LLM_LADDER_TOKEN }}
+          PROBE: ${{ github.event.inputs.probe || 'true' }}
+          PROBE_LIMIT: ${{ github.event.inputs.probe_limit || '12' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          node scripts/collect-free-models.mjs \
+            --probe "$PROBE" --probe-limit "$PROBE_LIMIT" --dry-run "$DRY_RUN" \
+            --out free-models-diff.md | tee free-models-collect.log
+          printf '\n%s\n' "$(cat free-models-diff.md)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: free-models-diff
+          path: |
+            free-models-diff.md
+            free-models-collect.log
+          if-no-files-found: ignore

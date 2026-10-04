@@ -24,6 +24,7 @@ Rung providers:
 | `opencode-go/*` | OpenCode Go subscription (per-model monthly $ limits, key rotation) |
 | `openrouter/*` | OpenRouter pay-per-token — `:free` models are $0 |
 | `opencode-zen/*` | Zen free tier, proxied through the GCP relay (`scripts/zen-relay.mjs`) |
+| `zen-pool/*` | Zen free tier through the **Zen Pool** — called in-process, same worker, no token |
 
 ---
 
@@ -59,7 +60,7 @@ advanced-first (mimo → paid tail).
 
 | ladder | shape |
 |---|---|
-| `build` | base: space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
+| `build` | **zen pool ×2** (`mimo-v2.6-flash-free` → `nemotron-3.5-lightning-free`) → space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
 | `build advanced` | mimo → paid tail |
 | `plan` / `general` / `review` | mimo → paid tail |
 | `explore` | mimo (1M) → gemini-2.5-flash-lite (1048576) → xiaomi/mimo (1050000) — contexts measured on OpenRouter 2026-10-02 |
@@ -125,7 +126,9 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/v1/go-usage` | remaining Go allowance per pool key (rolling/weekly/monthly % + reset) |
 | GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, failover depth, top errors |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
+| GET | `/v1/free-models?provider=&available=0\|1` | the free-model inventory (D1 `free_models`) with context/price + last probe |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
+| POST | `/v1/free-models/collect` | one collection pass + diff report; body `{probe, probe_limit, probe_concurrency, dry_run}` |
 | POST | `/v1/state/reset-keys` | unpark all Go keys (after replacing the pool) |
 
 Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (stream first-token window, 15000), `ladder_total_timeout_ms` (whole ladder), `ladder_rung` (pin one rung, no failover), `ladder_conversation` (sticky-rung key).
@@ -157,6 +160,37 @@ rename breaks CI, not prod.
 
 ---
 
+## Free-model inventory
+
+Every free model the ladder's providers publish, kept in one D1 table (`free_models`, in the
+trace DB) and refreshed by GitHub Actions every 4h (`.github/workflows/collect-free-models.yml`).
+
+- **Catalogs** — OpenRouter (`:free` / both prices 0), zen (`*-free` + `big-pickle`), Go
+  (`*-free`). A provider that fails to answer is reported as degraded and its models are left
+  alone: an outage must not look like "every model left".
+- **Row** — `(provider, model_id, name, context, price_in, price_out, price_cached, owned_by,
+  description, in_ladder, first_seen, last_seen, available, probe_status, probed_at)`. `model_id`
+  is the full ladder rung id, so a row joins to `config/prices.json` / `config/contexts.json`
+  directly. Prices are per 1M tokens, like `config/prices.json`.
+- **Probe** — one light request per model per run (`max_tokens: 8`, prompt `ping`), budgeted by
+  `probe_limit` (default 12) and aimed at the least-recently-probed models first, so a small
+  budget still rotates coverage. `probe_status`: `ok` / `limited` (429) / `not_found` /
+  `http_<n>` / `error` / `skipped`. zen needs the opencode-client fingerprint and `stream:true`
+  (issue #106); Go needs a session header; both are in `src/free-models.js`.
+- **Reconcile** — upsert on `(provider, model_id)`, `first_seen` preserved, `last_seen` bumped,
+  `available=0` for what disappeared (never deleted — the history is the point).
+- **Diff** — `appeared` / `gone` / `changed` (context, price, name, owned_by) between this run
+  and the table as it was. That diff is the trigger signal for the free-models benchmark step.
+
+```bash
+npm run collect        # one pass against prod, markdown diff on stdout
+```
+
+The Go catalog is fetched inside the worker with the `OPENCODE_GO_API_KEYS` pool — the key never
+leaves the worker and is never logged. `GET /v1/free-models` reads the inventory back.
+
+---
+
 ## Go keys (subscription)
 
 Keys live only in the worker secret `OPENCODE_GO_API_KEYS` (comma-separated pool); clients
@@ -172,8 +206,9 @@ never see them. Docs: `docs/go-key-management.md`.
 ## Development
 
 ```bash
-npm test              # ladder + state + analytics (node:test, no runtime needed)
+npm test              # ladder + state + analytics + free-models inventory (node:test, no runtime)
 npm run gate          # live gate: one pinned call per gate rung against prod
+npm run collect       # one free-model collection pass against prod, markdown diff on stdout
 npx wrangler dev      # local worker (cp .dev.vars.example .dev.vars first)
 ```
 
@@ -191,4 +226,82 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 - Don't add a rung more expensive than the ones above it without the owner's decision.
 - Changing a ladder *name* is a breaking change: update every client, then run the contract
   guard.
-- Zen free rungs live in the `free` tail only — never ahead of a working free rung.
+- Zen free rungs live in the `free` tail only — never ahead of a working free rung. The one
+  exception is `zen-pool/*`: it is a route, not a price (the models are $0), and the owner put it
+  at the head of `build` on 2026-10-04.
+
+---
+
+## Zen Pool (zen-pool rungs)
+
+A GitHub-hosted runner has no inbound address, so "one Actions dispatch per answer" pays a full
+cold start every call. The pool instead keeps **one long-lived job** registered with the worker;
+a call is a queue push plus the caller's own watchdog, and the answer comes back in the same
+request (measured 2.7–2.9 s warm, 10–13 s for a cold boot).
+
+It lives in **this same worker**, so a `zen-pool/*` rung calls the pool core **in-process**
+(`poolInvoke` in `src/zen-pool.js`) — no token, no second hop, no egress hop. The full OpenAI
+request travels with the task (`messages` + `tools`), the runner calls zen with the same
+fingerprint the relay uses, and the answer comes back as `tool_calls` / `usage` /
+`finish_reason`. A streaming caller gets a synthesised SSE stream (the pool answers in one blob).
+
+`ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
+`/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
+
+### The contract (frozen — do not rework)
+
+**Request** — `POST /zen/pool/invoke` with `Authorization: Bearer <ZEN_RUNNER_TOKEN>`, or
+in-process from the ladder (`poolInvoke`, no token):
+
+```json
+{ "model": "mimo-v2.6-flash-free",          // required, explicit id — the pool never picks one
+  "messages": [ {"role":"system","content":"…"}, {"role":"user","content":"…"} ],
+  "tools": [ {"type":"function","function":{"name":"shell","parameters":{…}}} ],
+  "max_tokens": 8192,                     // optional, 1..32768, default 300
+  "wait_ms": 20000 }                      // optional, 1000..90000, default 30000 — the CALLER's watchdog
+```
+
+`messages` is the full OpenAI array (system + history + tools) — that is what the ladder sends.
+`prompt` is the legacy one-line fallback, kept for the CLI and older callers.
+
+**200 — the answer:**
+
+```json
+{ "task_id": "m5x7-1a2b3c4d", "model": "mimo-v2.6-flash-free", "ok": true,
+  "text": "…",
+  "tool_calls": [ {"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}} ],
+  "usage": {"prompt_tokens":123,"completion_tokens":45},
+  "finish_reason": "tool_calls",
+  "provider_ms": 2100, "served_ms": 2300, "worker_id": "repo:run:attempt", "wait_ms": 20000,
+  "cold_start": {"scaled":"queue_not_empty","dispatched":["repo"],"boot_ms":25000} }
+```
+
+`cold_start` is present only when the call itself booted the worker.
+
+**Errors** — every non-200 carries `{"error": "…", …}`:
+
+| status | meaning | what the ladder does |
+|---|---|---|
+| `400` | no model, or neither `messages` nor `prompt` | rung fails (config) |
+| `401` | bad `ZEN_RUNNER_TOKEN` (HTTP route only) | ops only |
+| `404` / `409` | unknown `task_id` / task not claimed | ops only |
+| `413` | body over 8 KB (HTTP route only) | — |
+| `429` | budget exhausted (50/min, 500/day per repo+model) | **no retry** — straight down |
+| `502` | the runner reported a provider failure (`kind` names it) | one retry, then down |
+| `503` | no warm runner and nothing to boot with (`scaled`, `hint`) | one retry, then down |
+| `504` | watchdog fired; `task_id` — the job is still working | wait for **that** task, never start a second |
+
+The ladder turns a 200 into a normal OpenAI completion, or a synthesised SSE stream when the caller
+asked to stream. A pool error message deliberately contains no `429`/`503` digits, so the error
+classifier reads it as a short transient backoff instead of a long quota skip.
+
+### Idle = no GitHub Actions
+
+Nothing runs while there is no work. A worker exits itself after `idle_exit_ms` (default 10 min)
+and the autoscaler only boots one when a call actually arrives — the first request of a cold pool
+pays the ~10–13 s boot, every later one is served by the warm job. The 2-min scale cron reads
+`metrics` and dispatches nothing when the queue is empty.
+
+- Pool routes + autoscaler + budget: `docs/zen-runner.md`.
+- Local client: `npm run zen -- <health|pool|models|metrics|scale|call|result>` (`scripts/zen-pool-client.mjs`).
+- A cold pool is not an error: the call boots a worker and the caller's watchdog covers the boot.
