@@ -9,6 +9,7 @@
     "test:sandbox": "bash scripts/sandbox/sticky-rung.sh",
     "gate": "node scripts/live-gate.mjs",
     "collect": "node scripts/collect-free-models.mjs",
+    "zen": "node scripts/zen-pool-client.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
