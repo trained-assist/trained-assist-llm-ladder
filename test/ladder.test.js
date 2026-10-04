@@ -557,9 +557,9 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   // The zen pool opens every interactive ladder (owner 2026-10-04): one fast free model, one
   // attempt, then the ladder rides down. `build` carries a second pool rung as its fallback.
   const ZEN = 'zen-pool/mimo-v2.6-flash-free';
-  const zenHead = [ZEN, 'zen-pool/nemotron-3.5-lightning-free'];
+  const zenHead = [ZEN];
 
-  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool ×2 + base free ×3 + платный хвост, без mimo');
+  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool + base free ×3 + платный хвост, без mimo');
   assert.deepEqual(config.ladders['build advanced'].build, [ZEN, ...advanced], 'build advanced = zen pool + mimo + платный хвост');
   for (const role of ['plan', 'general', 'review']) {
     assert.deepEqual(config.ladders[role], { build: [ZEN, ...advanced] }, `${role} advanced-first — роль=лестница (#71)`);

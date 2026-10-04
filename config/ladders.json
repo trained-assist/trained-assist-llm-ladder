@@ -255,7 +255,6 @@
     "build": {
       "build": [
         "zen-pool/mimo-v2.6-flash-free",
-        "zen-pool/nemotron-3.5-lightning-free",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
