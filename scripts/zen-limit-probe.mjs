@@ -27,6 +27,10 @@
 //                  tools|stream|auth) — the mandatory-field matrix
 //
 // No dependencies (repo rule). Secrets: none — zen free tier is anonymous (Bearer public).
+//
+// This script MEASURES limits by firing unguarded requests. A job that only wants an answer
+// should use scripts/zen-client.mjs instead (per-model rate window, daily budget, 429
+// classification, cooldown) — see docs/free-tier-limits.md §"Calling zen free from a job".
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 
