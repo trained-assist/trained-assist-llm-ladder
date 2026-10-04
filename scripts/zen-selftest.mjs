@@ -25,25 +25,33 @@
 //
 // No dependencies (repo rule). No secrets: the free tier is anonymous.
 import fs from 'node:fs';
-import { createZenClient, zenHeaders, SHELL_TOOL, READ_TOOL, contextCheck, estTokens } from './zen-client.mjs';
+import { createZenClient, zenHeaders, SHELL_TOOL, READ_TOOL, contextCheck, estTokens, parseArgs } from './zen-client.mjs';
 
 const ZEN_MODELS = 'https://opencode.ai/zen/v1/models';
 const FREE_SUFFIX = /-free$/;
 const FREE_EXTRA = ['big-pickle'];
 
-function arg(name, def) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def;
+// A broken invocation must stop the run, never degrade it into a quiet no-op (see parseArgs).
+const parsed = parseArgs(process.argv.slice(2), {
+  models: '',
+  runs: 2,
+  deep: false,
+  out: 'zen-selftest.json',
+  'summary-md': process.env.GITHUB_STEP_SUMMARY || '',
+  prompt: 'Answer in one short sentence: what is 2+2?',
+}, { numeric: ['runs'] });
+if (parsed.problems.length) {
+  console.error('bad invocation:\n' + parsed.problems.map(p => `  - ${p}`).join('\n'));
+  process.exit(2);
 }
-function has(name) { return process.argv.includes(`--${name}`); }
 
 const cfg = {
-  models: arg('models', ''),
-  runs: Number(arg('runs', 2)),
-  deep: has('deep'),
-  out: arg('out', 'zen-selftest.json'),
-  summaryMd: arg('summary-md', process.env.GITHUB_STEP_SUMMARY || ''),
-  prompt: arg('prompt', 'Answer in one short sentence: what is 2+2?'),
+  models: parsed.values.models,
+  runs: parsed.values.runs,
+  deep: parsed.values.deep,
+  out: parsed.values.out,
+  summaryMd: parsed.values['summary-md'],
+  prompt: parsed.values.prompt,
 };
 
 const startedAt = new Date().toISOString();
@@ -165,6 +173,13 @@ if (cfg.deep) {
 report.summary = zen.summary();
 report.finishedAt = new Date().toISOString();
 
+// The gate that was missing: a green run must mean "we actually called zen". Counting the table is
+// not enough — every model can sit at 0 with no error and no limit (that is what a broken
+// invocation looks like), so the verdict has to be driven by the number of live calls sent.
+const liveCalls = Object.values(report.summary.byModel).reduce((n, m) => n + (m.calls || 0), 0);
+report.liveCalls = liveCalls;
+if (liveCalls === 0) failures.push('zero live calls were sent — this run verified nothing and must not be green');
+
 const okCount = Object.values(report.models).filter(m => m.ok > 0).length;
 const limitedCount = Object.values(report.models).filter(m => m.limited > 0).length;
 const errorCount = Object.values(report.models).filter(m => m.errors > 0).length;
@@ -173,7 +188,7 @@ const md = [
   '## zen free self-test',
   '',
   `runner: \`${report.runner.os}\` · node ${report.runner.node} · egress \`${report.runner.egress}\`${report.runner.sha ? ` · \`${report.runner.sha.slice(0, 8)}\`` : ''}`,
-  `negative (stream:false → 403): **${report.negative.verdict}** (${report.negative.status}) · offline over-cap refusal: **${report.offline.verdict}**`,
+  `negative (stream:false → 403): **${report.negative.verdict}** (${report.negative.status}) · offline over-cap refusal: **${report.offline.verdict}** · live calls sent: **${liveCalls}**`,
   '',
   '| model | ok | limited | stoppedBy | cooldownUntil (UTC) | rate peak | answer |',
   '|---|---|---|---|---|---|---|',
@@ -194,4 +209,4 @@ if (failures.length) {
   console.error('\nFAILED:\n' + failures.map(f => '  - ' + f).join('\n'));
   process.exit(1);
 }
-console.log(`\nOK — ${okCount}/${models.length} models answered, no fingerprint regression`);
+console.log(`\nOK — ${liveCalls} live calls sent, ${okCount}/${models.length} models answered, no fingerprint regression`);

@@ -13,6 +13,7 @@ import {
   aggregateSse,
   loadState,
   estTokens,
+  parseArgs,
 } from '../scripts/zen-client.mjs';
 
 const SSE = [
@@ -311,4 +312,29 @@ test('no model means no request — the limit is per model, so it is not optiona
   const r = await client.chat({ messages: ping });
   assert.equal(r.ok, false);
   assert.equal(calls.length, 0);
+});
+test('parseArgs: a flag with no value is a problem, never the next flag eaten as a value', () => {
+  // The exact argv a scheduled workflow run used to build: `--runs --prompt x`.
+  const { values, problems } = parseArgs(['--runs', '--prompt', 'hi'], { runs: 2, prompt: '' }, { numeric: ['runs'] });
+  assert.deepEqual(problems, ['--runs has no value']);
+  assert.equal(values.runs, 2, 'the default survives instead of becoming NaN');
+  assert.equal(values.prompt, 'hi', 'the next flag is still parsed as its own flag');
+});
+
+test('parseArgs: a non-numeric value for a numeric flag is rejected', () => {
+  const { values, problems } = parseArgs(['--runs', 'abc'], { runs: 2 }, { numeric: ['runs'] });
+  assert.deepEqual(problems, ['--runs must be an integer >= 1, got "abc"']);
+  assert.equal(values.runs, 2);
+});
+
+test('parseArgs: a numeric flag keeps a real value, and a boolean flag takes none', () => {
+  const { values, problems } = parseArgs(['--runs', '3', '--deep'], { runs: 2, deep: false }, { numeric: ['runs'] });
+  assert.deepEqual(problems, []);
+  assert.equal(values.runs, 3);
+  assert.equal(values.deep, true);
+});
+
+test('parseArgs: a flag at the very end of argv is a problem', () => {
+  const { problems } = parseArgs(['--models'], { models: '' });
+  assert.deepEqual(problems, ['--models has no value']);
 });

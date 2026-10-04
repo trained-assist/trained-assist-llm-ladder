@@ -113,6 +113,38 @@ function fitByTruncation(model, messages, maxTokens, table) {
   }
 }
 
+// CLI flags for the probe scripts. A flag whose value is MISSING must fall back to its default
+// instead of eating the next flag: a scheduled workflow run passes no inputs at all, so the shell
+// builds `--runs --prompt x`, and a parser that grabs the next token turns that into
+// Number("--prompt") = NaN. The loop `for (i = 0; i < NaN; i++)` then never runs and the whole
+// self-test reports green having made ZERO live calls — a false green, the worst kind.
+// Returns { values, problems }; problems are caller-fatal, never silently defaulted.
+export function parseArgs(argv, defaults = {}, { numeric = [] } = {}) {
+  const values = { ...defaults };
+  const problems = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (typeof tok !== 'string' || !tok.startsWith('--')) continue;
+    const name = tok.slice(2);
+    const next = argv[i + 1];
+    const isFlag = typeof next === 'string' && next.startsWith('--') && next.length > 2;
+    if (next === undefined || isFlag) {
+      if (typeof defaults[name] === 'boolean') { values[name] = true; continue; }
+      problems.push(`--${name} has no value`);
+      continue;
+    }
+    i++;
+    if (numeric.includes(name)) {
+      const n = Number(next);
+      if (!Number.isInteger(n) || n < 1) { problems.push(`--${name} must be an integer >= 1, got "${next}"`); continue; }
+      values[name] = n;
+    } else {
+      values[name] = next;
+    }
+  }
+  return { values, problems };
+}
+
 export function classify(status, headers, bodyText) {
   if (status === 403) return { kind: 'fingerprint' };
   if (status === 429) {

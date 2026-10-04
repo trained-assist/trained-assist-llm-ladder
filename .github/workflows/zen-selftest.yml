@@ -54,15 +54,18 @@ jobs:
         id: zen
         env:
           ZEN_EGRESS: github-hosted
+          ZEN_MODELS: ${{ inputs.models }}
+          ZEN_RUNS: ${{ inputs.runs }}
+          ZEN_DEEP: ${{ inputs.deep }}
+          ZEN_PROMPT: ${{ inputs.prompt }}
         run: |
-          MODELS_ARG=""
-          if [ -n "${{ inputs.models }}" ]; then MODELS_ARG="--models ${{ inputs.models }}"; fi
-          node scripts/zen-selftest.mjs \
-            $MODELS_ARG \
-            --runs ${{ inputs.runs }} \
-            --prompt "${{ inputs.prompt }}" \
-            ${{ inputs.deep && '--deep' || '' }} \
-            --out zen-selftest.json
+          # Inputs arrive EMPTY on a schedule event, so the argv is built here and never inline:
+          # `--runs ${{ inputs.runs }}` would render as a dangling `--runs` that eats the next flag.
+          ARGS=(--runs "${ZEN_RUNS:-2}")
+          if [ -n "${ZEN_MODELS:-}" ]; then ARGS+=(--models "$ZEN_MODELS"); fi
+          if [ -n "${ZEN_PROMPT:-}" ]; then ARGS+=(--prompt "$ZEN_PROMPT"); fi
+          if [ "${ZEN_DEEP:-false}" = "true" ]; then ARGS+=(--deep); fi
+          node scripts/zen-selftest.mjs "${ARGS[@]}" --out zen-selftest.json
       - name: report
         if: always()
         run: |
@@ -73,6 +76,7 @@ jobs:
             const limited = rows.filter(([,m]) => m.limited > 0);
             const bad = rows.filter(([,m]) => m.errors > 0);
             console.log('models: ' + rows.length + '  answered: ' + ok + '  limited: ' + limited.length + '  errored: ' + bad.length);
+            console.log('live calls sent: ' + r.liveCalls + (r.liveCalls ? '' : '  ← NOTHING WAS VERIFIED'));
             for (const [m, x] of limited) console.log('  ⛔ ' + m + ' stoppedBy=' + x.stoppedBy + ' cooldownUntil=' + (x.cooldownUntilIso || '—'));
             for (const [m, x] of bad) console.log('  ❌ ' + m + ' ' + x.lastKind + ' ' + (x.lastError || ''));
             console.log('negative(stream:false): ' + r.negative.status + ' ' + r.negative.verdict);
