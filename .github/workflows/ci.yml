@@ -93,11 +93,13 @@ jobs:
           ZEN_TOKEN_KEY: ${{ secrets.ZEN_TOKEN_KEY }}
         # The controller token and the token-encryption key live in GitHub secrets and are pushed
         # to the worker here — they must never be plain `--var`s, which Cloudflare shows in the
-        # dashboard. `secret put` is idempotent, so this runs on every deploy.
+        # dashboard. `secret put` is idempotent, so this runs on every deploy. The `if` (not
+        # `[ -n … ] && …`) matters: under `set -e` a skipped secret must still exit 0, or the
+        # deploy dies before it ever reaches `wrangler deploy`.
         run: |
           set -euo pipefail
-          [ -n "$ZEN_RUNNER_TOKEN" ] && printf '%s' "$ZEN_RUNNER_TOKEN" | npx --yes wrangler@4 secret put ZEN_RUNNER_TOKEN
-          [ -n "$ZEN_TOKEN_KEY" ] && printf '%s' "$ZEN_TOKEN_KEY" | npx --yes wrangler@4 secret put ZEN_TOKEN_KEY
+          if [ -n "$ZEN_RUNNER_TOKEN" ]; then printf '%s' "$ZEN_RUNNER_TOKEN" | npx --yes wrangler@4 secret put ZEN_RUNNER_TOKEN; fi
+          if [ -n "$ZEN_TOKEN_KEY" ]; then printf '%s' "$ZEN_TOKEN_KEY" | npx --yes wrangler@4 secret put ZEN_TOKEN_KEY; fi
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
