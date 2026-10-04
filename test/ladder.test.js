@@ -554,8 +554,10 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
   ];
   const advanced = ['opencode-go/mimo-v2.6-flash', ...paid];
+  // The zen pool opens the build ladder: two free zen models ahead of everything (owner 2026-10-04).
+  const zenHead = ['zen-pool/mimo-v2.6-flash-free', 'zen-pool/nemotron-3.5-lightning-free'];
 
-  assert.deepEqual(config.ladders.build.build, [...base, ...paid], 'build = base free ×3 + платный хвост, без mimo');
+  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool ×2 + base free ×3 + платный хвост, без mimo');
   assert.deepEqual(config.ladders['build advanced'].build, advanced, 'build advanced = mimo + платный хвост');
   for (const role of ['plan', 'general', 'review']) {
     assert.deepEqual(config.ladders[role], { build: advanced }, `${role} advanced-first — роль=лестница (#71)`);

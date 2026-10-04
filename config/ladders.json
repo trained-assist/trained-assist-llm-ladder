@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via relay. NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling).",
+  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via relay, zen-pool/* = zen free tier in-process via the pool (same worker, no token). NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling).",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -244,6 +244,8 @@
     },
     "build": {
       "build": [
+        "zen-pool/mimo-v2.6-flash-free",
+        "zen-pool/nemotron-3.5-lightning-free",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",

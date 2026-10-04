@@ -24,6 +24,7 @@ Rung providers:
 | `opencode-go/*` | OpenCode Go subscription (per-model monthly $ limits, key rotation) |
 | `openrouter/*` | OpenRouter pay-per-token — `:free` models are $0 |
 | `opencode-zen/*` | Zen free tier, proxied through the GCP relay (`scripts/zen-relay.mjs`) |
+| `zen-pool/*` | Zen free tier through the **Zen Pool** — called in-process, same worker, no token |
 
 ---
 
@@ -59,7 +60,7 @@ advanced-first (mimo → paid tail).
 
 | ladder | shape |
 |---|---|
-| `build` | base: space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
+| `build` | **zen pool ×2** (`mimo-v2.6-flash-free` → `nemotron-3.5-lightning-free`) → space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
 | `build advanced` | mimo → paid tail |
 | `plan` / `general` / `review` | mimo → paid tail |
 | `explore` | mimo (1M) → gemini-2.5-flash-lite (1048576) → xiaomi/mimo (1050000) — contexts measured on OpenRouter 2026-10-02 |
@@ -201,4 +202,28 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 - Don't add a rung more expensive than the ones above it without the owner's decision.
 - Changing a ladder *name* is a breaking change: update every client, then run the contract
   guard.
-- Zen free rungs live in the `free` tail only — never ahead of a working free rung.
+- Zen free rungs live in the `free` tail only — never ahead of a working free rung. The one
+  exception is `zen-pool/*`: it is a route, not a price (the models are $0), and the owner put it
+  at the head of `build` on 2026-10-04.
+
+---
+
+## Zen Pool (zen-pool rungs)
+
+A GitHub-hosted runner has no inbound address, so "one Actions dispatch per answer" pays a full
+cold start every call. The pool instead keeps **one long-lived job** registered with the worker;
+a call is a queue push plus the caller's own watchdog, and the answer comes back in the same
+request (measured 2.7–2.9 s warm, 10–13 s for a cold boot).
+
+It lives in **this same worker**, so a `zen-pool/*` rung calls the pool core **in-process**
+(`poolInvoke` in `src/zen-pool.js`) — no token, no second hop, no egress hop. The full OpenAI
+request travels with the task (`messages` + `tools`), the runner calls zen with the same
+fingerprint the relay uses, and the answer comes back as `tool_calls` / `usage` /
+`finish_reason`. A streaming caller gets a synthesised SSE stream (the pool answers in one blob).
+
+`ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
+`/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
+
+- Pool routes + autoscaler + budget: `docs/zen-runner.md`.
+- Local client: `npm run zen -- <health|pool|models|metrics|scale|call|result>` (`scripts/zen-pool-client.mjs`).
+- A cold pool is not an error: the call boots a worker and the caller's watchdog covers the boot.

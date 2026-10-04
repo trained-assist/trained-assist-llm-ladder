@@ -1,0 +1,121 @@
+name: zen-selftest
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'comma-separated free models (empty = auto-discover from /v1/models)'
+        default: ''
+      runs:
+        description: 'signed calls per model'
+        default: '2'
+      deep:
+        description: 'also send one ~285K-token prompt to a 1M-cap model (proves the cap table live)'
+        type: boolean
+        default: false
+      prompt:
+        description: 'prompt for the live calls'
+        default: 'Answer in one short sentence: what is 2+4?'
+  # Own dispatch type — `zen-run` belongs to zen-serve. Sharing it meant every POST /zen/run
+  # started BOTH workflows (a heavy selftest job nobody asked for).
+  repository_dispatch:
+    types: [zen-selftest]
+  schedule:
+    # Every 6h = a fresh Azure egress IP per run, so each run gets its own free-tier budget
+    # (spec §7 mode A). 15 models x 2 calls x 4 runs/day is ~120 requests — far under the ~940/day
+    # per (IP, model) budget, so this cannot starve anything.
+    - cron: '17 */6 * * *'
+
+# Two runs of this workflow must never share an egress IP: a shared IP would make the second run
+# look like a quota stop. cancel-in-progress so a manual dispatch does not race the schedule.
+concurrency:
+  group: zen-selftest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: unit tests (offline — no zen calls)
+        run: npm test
+
+  selftest:
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: zen free self-test
+        id: zen
+        env:
+          ZEN_EGRESS: github-hosted
+          ZEN_MODELS: ${{ inputs.models || github.event.client_payload.model }}
+          ZEN_RUNS: ${{ inputs.runs || github.event.client_payload.runs }}
+          ZEN_DEEP: ${{ inputs.deep }}
+          ZEN_PROMPT: ${{ inputs.prompt }}
+          ZEN_RUN_ID: ${{ github.event.client_payload.run_id }}
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        run: |
+          # Inputs arrive EMPTY on a schedule event, so the argv is built here and never inlined:
+          # an inline "--runs <input>" renders as a dangling --runs that eats the next flag.
+          ARGS=(--runs "${ZEN_RUNS:-2}")
+          if [ -n "${ZEN_MODELS:-}" ]; then ARGS+=(--models "$ZEN_MODELS"); fi
+          if [ -n "${ZEN_PROMPT:-}" ]; then ARGS+=(--prompt "$ZEN_PROMPT"); fi
+          if [ "${ZEN_DEEP:-false}" = "true" ]; then ARGS+=(--deep); fi
+          node scripts/zen-selftest.mjs "${ARGS[@]}" --out zen-selftest.json
+      - name: report
+        if: always()
+        run: |
+          node -e "
+            const r = require('./zen-selftest.json');
+            const rows = Object.entries(r.models);
+            const ok = rows.filter(([,m]) => m.ok > 0).length;
+            const limited = rows.filter(([,m]) => m.limited > 0);
+            const bad = rows.filter(([,m]) => m.errors > 0);
+            console.log('models: ' + rows.length + '  answered: ' + ok + '  limited: ' + limited.length + '  errored: ' + bad.length);
+            console.log('live calls sent: ' + r.liveCalls + (r.liveCalls ? '' : '  ← NOTHING WAS VERIFIED'));
+            for (const [m, x] of limited) console.log('  ⛔ ' + m + ' stoppedBy=' + x.stoppedBy + ' cooldownUntil=' + (x.cooldownUntilIso || '—'));
+            for (const [m, x] of bad) console.log('  ❌ ' + m + ' ' + x.lastKind + ' ' + (x.lastError || ''));
+            console.log('negative(stream:false): ' + r.negative.status + ' ' + r.negative.verdict);
+            console.log('offline over-cap refusal: ' + r.offline.verdict + ' (cap=' + r.offline.cap + ', over=' + r.offline.over + ' tokens)');
+          "
+      - name: report to zen runner
+        if: always() && github.event_name == 'repository_dispatch'
+        env:
+          ZEN_RUN_ID: ${{ github.event.client_payload.run_id }}
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        # One POST /zen/report per model: ok / kind / error is exactly what the ladder reads back
+        # to decide "call it now" vs "come back later". Without this the table stays empty and
+        # every model looks unknown — which is how a dead provider gets poked 100 times a run.
+        run: |
+          set -euo pipefail
+          [ -n "${ZEN_RUNNER_URL:-}" ] && [ -n "${ZEN_RUNNER_TOKEN:-}" ] || { echo "runner not configured — skipping report"; exit 0; }
+          MODEL="${{ github.event.client_payload.model }}"
+          node -e "
+            const r = require('./zen-selftest.json');
+            const m = r.models[process.argv[1]] || {};
+            const out = { run_id: process.argv[2], model: process.argv[1], ok: (m.ok || 0) > 0,
+              kind: m.lastKind || (m.ok ? 'ok' : 'error'), error: (m.lastError || '').slice(0, 300) };
+            fetch(process.argv[3] + '/zen/report', { method: 'POST',
+              headers: { authorization: 'Bearer ' + process.argv[4], 'content-type': 'application/json' },
+              body: JSON.stringify(out) })
+              .then(async r2 => console.log('report ' + r2.status + ' ' + (await r2.text()).slice(0, 200)))
+              .catch(e => console.log('report failed: ' + e.message));
+          " "$MODEL" "$ZEN_RUN_ID" "$ZEN_RUNNER_URL" "$ZEN_RUNNER_TOKEN"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zen-selftest-${{ github.run_id }}
+          path: zen-selftest.json
+          retention-days: 30

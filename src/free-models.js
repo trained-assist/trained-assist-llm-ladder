@@ -25,6 +25,8 @@ export const OPENROUTER_CATALOG_URL = 'https://openrouter.ai/api/v1/models';
 export const ZEN_CATALOG_URL = 'https://opencode.ai/zen/v1/models';
 export const GO_CATALOG_URL = 'https://opencode.ai/zen/go/v1/models';
 
+// Providers are keyed by the ladder rung prefix they own — config/ladders.json only ever uses
+// these three, and test/free-models.test.js asserts that (a new prefix must get a collector).
 export const PROVIDERS = ['openrouter', 'opencode-zen', 'opencode-go'];
 
 // The zen free tier is anonymous but validates the opencode-client fingerprint (issue #106 —

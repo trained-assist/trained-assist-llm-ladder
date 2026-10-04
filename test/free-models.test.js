@@ -164,9 +164,19 @@ test('collectCatalogs: every rung prefix in ladders.json has a collector (no ser
       for (const rung of list) prefixes.add(String(rung).split('/')[0]);
     }
   }
+  // `zen-pool` is deliberately NOT a collector: it serves the same zen free models as
+  // `opencode-zen`, only routed through the pool. Giving it its own provider would probe every
+  // model twice against zen (the thing the pool budget exists to avoid), and the pool already
+  // keeps its own availability table (zen_models). The guard still has to see the prefix, so it
+  // is mapped to the collector that actually serves it.
+  const SHARED = { 'zen-pool': 'opencode-zen' };
   const owned = new Set(PROVIDERS);
-  const missing = [...prefixes].filter((p) => !owned.has(p));
+  const missing = [...prefixes].filter((p) => !owned.has(p) && !SHARED[p]);
   assert.deepEqual(missing, [], `a ladder rung prefix without a free-model collector: ${missing}`);
+  for (const [prefix, provider] of Object.entries(SHARED)) {
+    if (!prefixes.has(prefix)) continue;
+    assert.ok(owned.has(provider), `${prefix} shares ${provider}, which must itself be a collector`);
+  }
 });
 
 // ── Probe ─────────────────────────────────────────────────────────────────────────

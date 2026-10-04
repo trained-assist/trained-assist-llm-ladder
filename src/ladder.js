@@ -26,6 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
+import { poolInvoke } from './zen-pool.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -354,7 +355,53 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
 }
 
 function attempt(env, model, body, keyIndex, opts) {
+  // Zen Pool rung — in-process, no HTTP and no token: the pool lives in this same worker, so the
+  // ladder calls its core directly. A cold pool boots a runner (~10-13 s) and the caller's own
+  // watchdog covers it; a warm one answers in ~3 s.
+  if (model.startsWith('zen-pool/')) return attemptPool(env, model, body, opts);
   return body.stream ? attemptStream(env, model, body, keyIndex, opts) : attemptJson(env, model, body, keyIndex, opts);
+}
+
+// The pool's answer is one blob from a long-lived GitHub Actions job, so a streaming call gets a
+// synthesised SSE stream — the ladder's TTFB path only needs the first output event, and the
+// client sees a normal stream.
+async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
+  const rung = model.replace(/^zen-pool\//, '');
+  const { status, data } = await poolInvoke(env, {
+    model: rung,
+    messages: body.messages,
+    tools: body.tools,
+    max_tokens: body.max_tokens,
+    // A cold pool needs the boot window; a warm one answers long before this. Capped at the
+    // pool's own watchdog ceiling.
+    wait_ms: Math.min(Math.max(timeoutMs || 0, 30_000), 90_000),
+  }, fetchImpl);
+  if (status !== 200 || !data.ok) {
+    // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
+    // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
+    return { ok: false, error: `zen-pool: ${data.error || data.kind || 'no answer'}` };
+  }
+  const content = String(data.text || '').trim();
+  const hasTools = Array.isArray(data.tool_calls) && data.tool_calls.length > 0;
+  if (!content && !hasTools) return { ok: false, guard: true, error: 'empty answer' };
+  const message = { role: 'assistant', content };
+  if (hasTools) message.tool_calls = data.tool_calls;
+  const finish = data.finish_reason || (hasTools ? 'tool_calls' : 'stop');
+  const completion = {
+    id: `zen-pool-${data.task_id || crypto.randomUUID()}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: rung,
+    choices: [{ index: 0, message, finish_reason: finish }],
+    ...(data.usage ? { usage: data.usage } : {}),
+  };
+  if (!body.stream) return { ok: true, data: completion, content };
+  const enc = new TextEncoder();
+  const head = { ...completion, choices: [{ index: 0, delta: message, finish_reason: null }] };
+  const tail = { choices: [{ index: 0, delta: {}, finish_reason: finish }] };
+  const sse = `data: ${JSON.stringify(head)}\n\ndata: ${JSON.stringify(tail)}\n\ndata: [DONE]\n\n`;
+  const stream = new ReadableStream({ start(c) { c.enqueue(enc.encode(sse)); c.close(); } });
+  return { ok: true, stream };
 }
 
 /**
@@ -388,7 +435,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const pool = readPool(env);
   const hasKey = m => (m.startsWith('opencode-go/') ? pool.length > 0
     : m.startsWith('opencode-zen/') ? !!env.OPENCODE_ZEN_RELAY_TOKEN
-      : !!env.OPENROUTER_API_KEY);
+    : m.startsWith('zen-pool/') ? !!env.ZEN_DB
+    : !!env.OPENROUTER_API_KEY);
   const keyed = all.filter(hasKey);
   if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [] };
 
