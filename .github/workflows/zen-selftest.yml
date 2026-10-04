@@ -59,8 +59,8 @@ jobs:
           ZEN_DEEP: ${{ inputs.deep }}
           ZEN_PROMPT: ${{ inputs.prompt }}
         run: |
-          # Inputs arrive EMPTY on a schedule event, so the argv is built here and never inline:
-          # `--runs ${{ inputs.runs }}` would render as a dangling `--runs` that eats the next flag.
+          # Inputs arrive EMPTY on a schedule event, so the argv is built here and never inlined:
+          # an inline "--runs <input>" renders as a dangling --runs that eats the next flag.
           ARGS=(--runs "${ZEN_RUNS:-2}")
           if [ -n "${ZEN_MODELS:-}" ]; then ARGS+=(--models "$ZEN_MODELS"); fi
           if [ -n "${ZEN_PROMPT:-}" ]; then ARGS+=(--prompt "$ZEN_PROMPT"); fi
