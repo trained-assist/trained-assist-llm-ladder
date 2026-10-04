@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { poolInvoke } from './zen-pool.js';
+import { poolInvoke, poolWaitForTask } from './zen-pool.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -365,35 +365,53 @@ function attempt(env, model, body, keyIndex, opts) {
 // The pool's answer is one blob from a long-lived GitHub Actions job, so a streaming call gets a
 // synthesised SSE stream — the ladder's TTFB path only needs the first output event, and the
 // client sees a normal stream.
+// One pool call: invoke, and if the caller's watchdog fired while the job is still working, wait a
+// short grace for the answer that is already in flight rather than starting a duplicate task. The
+// grace is bounded — the task already had the caller's whole rung budget, so a longer wait would
+// only delay the failover.
+async function poolCall(env, payload, fetchImpl, graceMs = 15_000) {
+  let r = await poolInvoke(env, payload, fetchImpl);
+  if (r.status === 504 && r.data?.task_id) {
+    const w = await poolWaitForTask(env, r.data.task_id, { deadlineMs: graceMs });
+    if (w.ok) return { status: 200, data: w.data };
+  }
+  return r;
+}
+
 async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
   const rung = model.replace(/^zen-pool\//, '');
-  const { status, data } = await poolInvoke(env, {
+  const payload = {
     model: rung,
     messages: body.messages,
     tools: body.tools,
     max_tokens: body.max_tokens,
-    // A cold pool needs the boot window; a warm one answers long before this. Capped at the
-    // pool's own watchdog ceiling.
-    wait_ms: Math.min(Math.max(timeoutMs || 0, 30_000), 90_000),
-  }, fetchImpl);
-  if (status !== 200 || !data.ok) {
+    // The caller's per-rung budget IS the pool watchdog (clamped to the pool's [1s, 90s]). A cold
+    // pool boots a runner (~10-13 s) and then answers (~3 s), so an interactive caller should send
+    // ladder_timeout_ms ≈ 20000; the default 20000 already covers it.
+    wait_ms: timeoutMs || undefined,
+  };
+  let r = await poolCall(env, payload, fetchImpl);
+  // ONE retry for a transient fault (a cold pool that just booted, a provider 5xx). A budget
+  // refusal (429) is not retried — the cap is real and retrying inside the same minute is wasted.
+  if (r.status !== 200 && r.status !== 429) r = await poolCall(env, payload, fetchImpl);
+  if (r.status !== 200 || !r.data?.ok) {
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
-    return { ok: false, error: `zen-pool: ${data.error || data.kind || 'no answer'}` };
+    return { ok: false, error: `zen-pool: ${r.data?.error || r.data?.kind || 'no answer'}` };
   }
-  const content = String(data.text || '').trim();
-  const hasTools = Array.isArray(data.tool_calls) && data.tool_calls.length > 0;
+  const content = String(r.data.text || '').trim();
+  const hasTools = Array.isArray(r.data.tool_calls) && r.data.tool_calls.length > 0;
   if (!content && !hasTools) return { ok: false, guard: true, error: 'empty answer' };
   const message = { role: 'assistant', content };
-  if (hasTools) message.tool_calls = data.tool_calls;
-  const finish = data.finish_reason || (hasTools ? 'tool_calls' : 'stop');
+  if (hasTools) message.tool_calls = r.data.tool_calls;
+  const finish = r.data.finish_reason || (hasTools ? 'tool_calls' : 'stop');
   const completion = {
-    id: `zen-pool-${data.task_id || crypto.randomUUID()}`,
+    id: `zen-pool-${r.data.task_id || crypto.randomUUID()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model: rung,
     choices: [{ index: 0, message, finish_reason: finish }],
-    ...(data.usage ? { usage: data.usage } : {}),
+    ...(r.data.usage ? { usage: r.data.usage } : {}),
   };
   if (!body.stream) return { ok: true, data: completion, content };
   const enc = new TextEncoder();

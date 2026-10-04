@@ -346,11 +346,13 @@ test('scale decision: names why it dispatches, and nothing boots while a worker 
 });
 
 const RING = { repo: 'ring/one', token_ref: 'env:RING_TOKEN' };
-function fakeGithub() {
+function fakeGithub(status = 204) {
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(init.body) });
-    return new Response(null, { status: 204 });   // 204 must carry a null body
+    return status === 204
+      ? new Response(null, { status: 204 })   // 204 must carry a null body
+      : new Response('nope', { status });
   };
   return { calls, fetchImpl };
 }
@@ -593,4 +595,70 @@ test('a zen-pool rung without ZEN_DB is skipped, not failed — the ladder walks
   });
   assert.equal(r.ok, true);
   assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
+});
+
+test('a 504 is not a failure: the ladder waits for the in-flight task instead of starting a second one', async () => {
+  const d1 = fakeD1();
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free'] } } };
+  const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW };
+  const fetchImpl = async () => { throw new Error('a zen-pool rung must not reach the network'); };
+
+  const reg = await post('/zen/pool/register', { worker_id: 'ring/one:3:1', repo: 'ring/one' }, d1);
+  const lease = await reg.json();
+  // wait_ms 1000 → the invoke gives up early, exactly like a caller with a short watchdog.
+  // ladder_timeout_ms 1000 → the pool watchdog fires at 1 s, long before the answer exists.
+  const pending = run({ model: 'build', messages: [{ role: 'user', content: 'hi' }], ladder_timeout_ms: 1000 },
+    { env, config: cfg, store: memoryStore(1), fetchImpl });
+
+  await new Promise((r) => setTimeout(r, 30));
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  const task = (await pulled.json()).task;
+  // The answer lands AFTER the invoke gave up — the ladder must still collect it.
+  await new Promise((r) => setTimeout(r, 1400));
+  await post('/zen/pool/result', { task_id: task.id, ok: true, text: 'late but fine', finish_reason: 'stop' }, d1);
+
+  const r = await pending;
+  assert.equal(r.ok, true);
+  assert.equal(r.data.choices[0].message.content, 'late but fine');
+});
+
+test('a budget refusal walks straight down the ladder (no retry, no second task)', async () => {
+  const full = fakeD1({ budget: [{ scope: '*', model: '*', minute_count: 50, minute_at: NOW, day_count: 1, day: '2026-10-04' }] });
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const env = { ...ENV, ZEN_DB: full, ZEN_NOW_MS: NOW, OPENROUTER_API_KEY: 'or_key' };
+  await post('/zen/pool/register', { worker_id: 'ring/one:4:1', repo: 'ring/one' }, full);
+  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
+    env, config: cfg, store: memoryStore(1),
+    fetchImpl: async () => ({
+      ok: true, status: 200,
+      json: async () => ({ id: 'x', object: 'chat.completion', choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'fallback' } }], usage: { prompt_tokens: 2 } }),
+      text: async () => '',
+    }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
+  assert.equal(r.attempts.find((a) => a.model.startsWith('zen-pool/')).outcome, 'error');
+  assert.match(r.attempts.find((a) => a.model.startsWith('zen-pool/')).error, /budget exhausted/);
+});
+
+test('a transient pool fault is retried exactly once, then the ladder walks down', async () => {
+  // Cold pool + a ring repo whose dispatch is refused: the first invoke cannot get a worker.
+  // One retry means exactly two boot attempts — never a third.
+  const d1 = fakeD1({ repos: [RING] });
+  // The dispatch is refused (so the pool can never get a worker), but the fallback rung answers.
+  const gh = fakeGithub(500);
+  const origFetch = gh.fetchImpl;
+  gh.fetchImpl = async (url, init) => (String(url).includes('api.github.com') ? origFetch(url, init) : new Response(JSON.stringify({
+    id: 'x', object: 'chat.completion', created: 1, model: 'xiaomi/mimo-v2.6-flash',
+    choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'fallback' } }],
+    usage: { prompt_tokens: 2, completion_tokens: 1 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'or_key' };
+  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }], ladder_timeout_ms: 1000 }, {
+    env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
+  assert.equal(gh.calls.length, 2, 'exactly one retry — a third boot attempt would burn quota');
 });

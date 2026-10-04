@@ -224,6 +224,60 @@ fingerprint the relay uses, and the answer comes back as `tool_calls` / `usage` 
 `ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
 `/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
 
+### The contract (frozen — do not rework)
+
+**Request** — `POST /zen/pool/invoke` with `Authorization: Bearer <ZEN_RUNNER_TOKEN>`, or
+in-process from the ladder (`poolInvoke`, no token):
+
+```json
+{ "model": "mimo-v2.6-flash-free",          // required, explicit id — the pool never picks one
+  "messages": [ {"role":"system","content":"…"}, {"role":"user","content":"…"} ],
+  "tools": [ {"type":"function","function":{"name":"shell","parameters":{…}}} ],
+  "max_tokens": 8192,                     // optional, 1..32768, default 300
+  "wait_ms": 20000 }                      // optional, 1000..90000, default 30000 — the CALLER's watchdog
+```
+
+`messages` is the full OpenAI array (system + history + tools) — that is what the ladder sends.
+`prompt` is the legacy one-line fallback, kept for the CLI and older callers.
+
+**200 — the answer:**
+
+```json
+{ "task_id": "m5x7-1a2b3c4d", "model": "mimo-v2.6-flash-free", "ok": true,
+  "text": "…",
+  "tool_calls": [ {"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}} ],
+  "usage": {"prompt_tokens":123,"completion_tokens":45},
+  "finish_reason": "tool_calls",
+  "provider_ms": 2100, "served_ms": 2300, "worker_id": "repo:run:attempt", "wait_ms": 20000,
+  "cold_start": {"scaled":"queue_not_empty","dispatched":["repo"],"boot_ms":25000} }
+```
+
+`cold_start` is present only when the call itself booted the worker.
+
+**Errors** — every non-200 carries `{"error": "…", …}`:
+
+| status | meaning | what the ladder does |
+|---|---|---|
+| `400` | no model, or neither `messages` nor `prompt` | rung fails (config) |
+| `401` | bad `ZEN_RUNNER_TOKEN` (HTTP route only) | ops only |
+| `404` / `409` | unknown `task_id` / task not claimed | ops only |
+| `413` | body over 8 KB (HTTP route only) | — |
+| `429` | budget exhausted (50/min, 500/day per repo+model) | **no retry** — straight down |
+| `502` | the runner reported a provider failure (`kind` names it) | one retry, then down |
+| `503` | no warm runner and nothing to boot with (`scaled`, `hint`) | one retry, then down |
+| `504` | watchdog fired; `task_id` — the job is still working | wait for **that** task, never start a second |
+
+The ladder turns a 200 into a normal OpenAI completion, or a synthesised SSE stream when the caller
+asked to stream. A pool error message deliberately contains no `429`/`503` digits, so the error
+classifier reads it as a short transient backoff instead of a long quota skip.
+
+### Idle = no GitHub Actions
+
+Nothing runs while there is no work. A worker exits itself after `idle_exit_ms` (default 10 min)
+and the autoscaler only boots one when a call actually arrives — the first request of a cold pool
+pays the ~10–13 s boot, every later one is served by the warm job. The 2-min scale cron reads
+`metrics` and dispatches nothing when the queue is empty.
+
 - Pool routes + autoscaler + budget: `docs/zen-runner.md`.
 - Local client: `npm run zen -- <health|pool|models|metrics|scale|call|result>` (`scripts/zen-pool-client.mjs`).
 - A cold pool is not an error: the call boots a worker and the caller's watchdog covers the boot.

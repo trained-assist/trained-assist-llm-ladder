@@ -543,6 +543,35 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
   }
 }
 
+// Wait for an in-flight task: the caller's watchdog fired (504) but the job is still working, and
+// the answer lands in the same row. Polling it is the honest "retry" — starting a second task for
+// the same request would spend the pool's budget twice.
+export async function poolWaitForTask(env, taskId, { deadlineMs = 60_000 } = {}) {
+  const deadline = Date.now() + deadlineMs;
+  let step = 0;
+  for (;;) {
+    const row = await readTask(env, String(taskId || ''));
+    if (!row) return { ok: false, data: { error: 'unknown task' } };
+    if (row.state === 'done' || row.state === 'failed') {
+      return {
+        ok: row.state === 'done',
+        data: {
+          task_id: row.id, model: row.model, ok: !!row.ok, text: row.text || null, kind: row.kind,
+          error: row.error, provider_ms: row.provider_ms, served_ms: row.served_ms,
+          worker_id: row.worker_id,
+          ...(row.tool_calls ? { tool_calls: JSON.parse(row.tool_calls) } : {}),
+          ...(row.usage ? { usage: JSON.parse(row.usage) } : {}),
+          ...(row.finish_reason ? { finish_reason: row.finish_reason } : {}),
+        },
+      };
+    }
+    if (Date.now() >= deadline) {
+      return { ok: false, data: { error: 'task still running', task_id: row.id, state: row.state } };
+    }
+    await sleep(backoffMs(step++));
+  }
+}
+
 // POST /zen/pool/invoke {model, messages?, prompt?, tools?, max_tokens?, wait_ms?} — the whole
 // point: one HTTP call, one answer, no job per call. 200 {text} | 504 {task_id} (answer still
 // lands, fetch it) | 503 (no warm worker) | 409 (quarantine) | 429 (budget).

@@ -513,14 +513,14 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
 });
 
 test('config: doctor = Go MiMo first, then stronger Go models, paid OpenRouter mimo last (owner 2026-09-28)', () => {
-  const expected = ['opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
+  const expected = ['zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
     'opencode-go/deepseek-v4-pro', 'openrouter/xiaomi/mimo-v2.6-flash'];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
 test('config: research is split by role — Go reads first, paid Gemini tail (owner 2026-09-30, issue #28)', () => {
-  const reader = ['opencode-go/mimo-v2.6-flash', 'openrouter/google/gemini-2.5-flash-lite'];
-  const thinker = ['opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/xiaomi/mimo-v2.6-flash'];
+  const reader = ['zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'openrouter/google/gemini-2.5-flash-lite'];
+  const thinker = ['zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/xiaomi/mimo-v2.6-flash'];
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
@@ -554,23 +554,26 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
   ];
   const advanced = ['opencode-go/mimo-v2.6-flash', ...paid];
-  // The zen pool opens the build ladder: two free zen models ahead of everything (owner 2026-10-04).
-  const zenHead = ['zen-pool/mimo-v2.6-flash-free', 'zen-pool/nemotron-3.5-lightning-free'];
+  // The zen pool opens every interactive ladder (owner 2026-10-04): one fast free model, one
+  // attempt, then the ladder rides down. `build` carries a second pool rung as its fallback.
+  const ZEN = 'zen-pool/mimo-v2.6-flash-free';
+  const zenHead = [ZEN, 'zen-pool/nemotron-3.5-lightning-free'];
 
   assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool ×2 + base free ×3 + платный хвост, без mimo');
-  assert.deepEqual(config.ladders['build advanced'].build, advanced, 'build advanced = mimo + платный хвост');
+  assert.deepEqual(config.ladders['build advanced'].build, [ZEN, ...advanced], 'build advanced = zen pool + mimo + платный хвост');
   for (const role of ['plan', 'general', 'review']) {
-    assert.deepEqual(config.ladders[role], { build: advanced }, `${role} advanced-first — роль=лестница (#71)`);
+    assert.deepEqual(config.ladders[role], { build: [ZEN, ...advanced] }, `${role} advanced-first — роль=лестница (#71)`);
   }
 
   // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
   // gemini-2.5-flash-lite 1048576, xiaomi mimo 1050000; ling-3.0-flash = 262144 и не годится.
   const explore = config.ladders.explore.build;
   assert.deepEqual(explore, [
+    'zen-pool/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
     'openrouter/google/gemini-2.5-flash-lite',
     'openrouter/xiaomi/mimo-v2.6-flash',
-  ], 'explore = big-ctx only (1M+), tail follows research:explore #28');
+  ], 'explore = zen pool + big-ctx only (1M+), tail follows research:explore #28');
   assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
 
   // vision (распознавание картинок): всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
