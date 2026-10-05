@@ -337,6 +337,28 @@ export async function zenReport(request, env) {
 }
 
 // POST /zen/repos { repo, token? | token_ref?, enabled?, location? } — the registry.
+// GET /zen/ring/payload — the ring exactly as the sync workflow reads it: one row per repo with
+// the actual token (decrypted with ZEN_TOKEN_KEY) or a token_ref. This is the "source=cf"
+// entrance for zen-ring-sync; the legacy payload secret is the other one.
+export async function zenRingPayload(request, env) {
+  const auth = await authorized(request, env);
+  if (!auth.ok) return j(auth.status, { error: auth.reason });
+  if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
+  const rows = (await db(env).prepare(
+    'SELECT repo, location, enabled, token_enc, token_ref FROM zen_repos ORDER BY added_at, repo'
+  ).all()).results || [];
+  const repos = [];
+  for (const r of rows) {
+    const row = { repo: r.repo, location: r.location || '', enabled: !!r.enabled };
+    if (r.token_enc && env.ZEN_TOKEN_KEY) {
+      try { row.token = await decryptToken(r.token_enc, env.ZEN_TOKEN_KEY); } catch { /* undecryptable — leave it out */ }
+    }
+    if (r.token_ref) row.token_ref = r.token_ref;
+    repos.push(row);
+  }
+  return j(200, { repos });
+}
+
 // `token` is stored encrypted (AES-GCM, ZEN_TOKEN_KEY) and never returned or logged;
 // `token_ref: "env:NAME"` points at a token that already lives in a worker secret.
 export async function zenRepos(request, env) {
