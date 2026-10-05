@@ -49,7 +49,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         # ADD COLUMN is not idempotent in SQLite; a duplicate-column error = already applied.
         run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0002_tokens_cached.sql --remote || true
-<<<<<<< HEAD
       - name: Apply free-models schema
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
