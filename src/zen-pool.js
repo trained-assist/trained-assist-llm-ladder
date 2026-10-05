@@ -578,6 +578,19 @@ export async function poolBoot(env, { fetchImpl = fetch } = {}) {
   return { ok: true, booted: out.dispatched.length > 0, reason: out.reason, dispatched: out.dispatched };
 }
 
+// Cancel a task the caller has given up on — but ONLY while it is still `queued`. A worker that has
+// already claimed it is mid-flight: cancelling would strand that work, and its answer is already paid
+// for. Leaving a queued task behind is the expensive mistake: a worker WILL pick it up and spend
+// real provider quota (500/day, provider-wide) on an answer nobody reads.
+export async function poolAbandon(env, taskId) {
+  const id = String(taskId || '');
+  if (!id || !env.ZEN_DB) return false;
+  const res = await db(env).prepare(
+    "UPDATE zen_pool_tasks SET state = 'abandoned', finished_at = ?1 WHERE id = ?2 AND state = 'queued'"
+  ).bind(nowMs(env), id).run();
+  return !!res?.meta?.changes;
+}
+
 // Wait for an in-flight task: the caller's watchdog fired (504) but the job is still working, and
 // the answer lands in the same row. Polling it is the honest "retry" — starting a second task for
 // the same request would spend the pool's budget twice.

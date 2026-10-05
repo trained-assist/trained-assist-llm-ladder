@@ -7,7 +7,7 @@ import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
-  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, poolCooldown,
+  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, poolCooldown, poolAbandon,
 } from '../src/zen-pool.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
@@ -118,6 +118,11 @@ function fakeD1(seed = {}) {
     if (/UPDATE zen_pool_tasks SET wait_returned_at/.test(sql)) {
       const t = tasks.get(p[1]); if (t) t.wait_returned_at = p[0];
       return { success: true, meta: { changes: t ? 1 : 0 } };
+    }
+    if (/UPDATE zen_pool_tasks SET state = 'abandoned'/.test(sql)) {
+      const t = tasks.get(p[1]);
+      if (t && t.state === 'queued') { t.state = 'abandoned'; return { success: true, meta: { changes: 1 } }; }
+      return { success: true, meta: { changes: 0 } };
     }
     if (/INSERT INTO zen_models/.test(sql)) {
       const [model, status, failures, successes, err, kind, okAt, firstFailed, next, updated] = p;
@@ -713,4 +718,34 @@ test('the pool is skipped for 60s after a cold start (cooldown)', async () => {
   assert.equal(r2.model, 'openrouter/xiaomi/mimo-v2.6-flash');
   assert.equal(gh.calls.length, 1, 'no second boot during the cooldown');
   assert.match(r2.attempts.find((a) => a.model.startsWith('zen-pool/')).error, /warming up/);
+});
+
+// #138 regression: a caller that gives up must NOT leave its task in the queue — a worker would
+// serve it and spend real provider quota (500/day) on an answer nobody reads.
+test('poolAbandon cancels an unclaimed task, but never one a worker already picked up', async () => {
+  const d1 = fakeD1();
+
+  // queued → abandoned (the expensive case: this is the leak)
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW });
+  assert.equal(await poolAbandon({ ZEN_DB: d1, ZEN_NOW_MS: NOW }, 'q1'), true);
+  assert.equal(d1._tasks.get('q1').state, 'abandoned');
+
+  // claimed → untouched (work is underway; cancelling would strand it)
+  d1._tasks.set('c1', { id: 'c1', model: 'm', state: 'claimed', enqueued_at: NOW });
+  assert.equal(await poolAbandon({ ZEN_DB: d1, ZEN_NOW_MS: NOW }, 'c1'), false);
+  assert.equal(d1._tasks.get('c1').state, 'claimed');
+});
+
+test('a failed pool call leaves no unclaimed task behind (the daily cap cannot leak)', async () => {
+  const d1 = fakeD1();
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  // no warm worker and no ring repo → poolInvoke returns 503 without enqueueing anything
+  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
+    env: { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, OPENROUTER_API_KEY: 'k' },
+    config: cfg, store: memoryStore(1),
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'from openrouter' } }] }), text: async () => '' }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal([...d1._tasks.values()].filter((t) => t.state === 'queued').length, 0,
+    'no task may stay queued after the ladder gave up on it');
 });
