@@ -10,6 +10,7 @@ import {
   classify,
   contextCheck,
   createZenClient,
+  slimTool,
   aggregateSse,
   loadState,
   estTokens,
@@ -337,4 +338,27 @@ test('parseArgs: a numeric flag keeps a real value, and a boolean flag takes non
 test('parseArgs: a flag at the very end of argv is a problem', () => {
   const { problems } = parseArgs(['--models'], { models: '' });
   assert.deepEqual(problems, ['--models has no value']);
+});
+
+test('slimTool: длинные описания обрезаются, схема и имена сохраняются', () => {
+  const big = {
+    type: 'function',
+    function: {
+      name: 'shell',
+      description: 'x'.repeat(5000),
+      parameters: {
+        type: 'object',
+        properties: { cmd: { type: 'string', description: 'y'.repeat(5000) } },
+        required: ['cmd'],
+      },
+    },
+  };
+  const out = slimTool(big);
+  assert.equal(out.function.name, 'shell');
+  assert.equal(out.function.description.length, 240);
+  assert.equal(out.function.parameters.properties.cmd.description.length, 240);
+  assert.deepEqual(out.function.parameters.required, ['cmd']);
+  // короткое описание не трогаем
+  const small = slimTool({ type: 'function', function: { name: 'read', description: 'short', parameters: { type: 'object', properties: {} } } });
+  assert.equal(small.function.description, 'short');
 });
