@@ -55,6 +55,12 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         # CREATE TABLE IF NOT EXISTS — idempotent, so this is safe on every deploy.
         run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0003_free_models.sql --remote
+      - name: Migrate trace schema (sub-task tag)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        # Same ADD COLUMN rule as 0002: a duplicate-column error means it is already applied.
+        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0005_app.sql --remote || true
       - name: Provision D1 zen database
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -114,3 +120,15 @@ jobs:
             sleep 10
           done
           exit 1
+      - name: Verify public worker revision
+        env:
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          HEALTH=$(curl -fsS --max-time 10 https://llm-ladder.trainedassist.store/health)
+          ACTUAL_BUILD_SHA=$(printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=JSON.parse(s);if(typeof h.build!=="string"||!h.build)process.exitCode=2;else process.stdout.write(h.build)}catch{process.exitCode=2}})')
+          if [ "$ACTUAL_BUILD_SHA" != "$EXPECTED_BUILD_SHA" ]; then
+            echo "Public Ladder is serving $ACTUAL_BUILD_SHA; expected $EXPECTED_BUILD_SHA" >&2
+            exit 1
+          fi
+          echo "Public Ladder revision verified: $ACTUAL_BUILD_SHA"

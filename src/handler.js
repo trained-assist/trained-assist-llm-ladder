@@ -38,6 +38,16 @@ const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
   + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
   + 'GROUP BY ladder, depth';
+// Per caller sub-task × ladder × served model (#107). The ladder name alone cannot answer
+// "which sub-task burns the money": every one of the agent's ~20 service tools posts
+// `model: "service"`, and the only thing that tells them apart is `x-ladder-app` (the caller's
+// `source:`). Grouped by model as well so each row prices exactly like a rung row.
+const ANALYTICS_APPS_SQL =
+  'SELECT app, ladder, model, COUNT(*) AS calls, '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND app IS NOT NULL '
+  + 'GROUP BY app, ladder, model ORDER BY calls DESC';
 // Raw error counts (top 100 by frequency, same as scripts/analytics.py). Grouping is on
 // the RAW string — digit variants ('can only afford 499' / '776') are merged by
 // normalizeError() below, mirroring analytics.py normalize_error.
@@ -48,6 +58,51 @@ const ANALYTICS_ERRORS_SQL =
   + "AND json_extract(j.value, '$.error') IS NOT NULL "
   + 'AND json_valid(ladder_calls.attempts) '
   + 'GROUP BY err ORDER BY n DESC LIMIT 100';
+
+// Per-model latency + context percentiles. The digest's "top models" block (owner request
+// 2026-10-05): mean latency hides the tail, so the block needs the distribution's shape —
+// p50/p95 of ms and p20/p50/p80 of the prompt size actually sent.
+//
+// SQLite has no percentile() and D1 has no extension to add one, so the percentile is picked
+// by rank: ROW_NUMBER() over each model's rows ordered by the metric, then the outer
+// MAX(CASE …) keeps the value at the nearest-rank index ceil(p·n). Nearest-rank (not
+// interpolation) because a percentile here is an OBSERVED call, not a synthetic one —
+// "the 95th-percentile call took 16.1s" should name a call that really happened.
+//
+// Two rank tracks, two denominators:
+//   · ms     — every ok call, `n` = all calls of the model. Latency exists for streams too.
+//   · tokens_in — only calls that carried usage. Stream rows log NULL (#22), so ranking them
+//     would put 40% of the model at the bottom of the prompt-size distribution and make p20
+//     read like "tiny prompts". Hence the explicit `(tokens_in IS NULL)` sort key to push
+//     NULLs past the real values, and `n_tin` = COUNT(tokens_in) as the denominator.
+//     `with_usage` ships alongside so the reporter can say how much of the model it saw.
+const pct = (p, nCol) =>
+  `MAX(1, MIN(${nCol}, CAST(${p} * ${nCol} AS INTEGER) + CASE WHEN ${p} * ${nCol} > CAST(${p} * ${nCol} AS INTEGER) THEN 1 ELSE 0 END))`;
+const ANALYTICS_MODELS_SQL =
+  'WITH ranked AS (SELECT model, ms, tokens_in, '
+  + 'ROW_NUMBER() OVER (PARTITION BY model ORDER BY ms) AS rms, '
+  + 'COUNT(*) OVER (PARTITION BY model) AS n, '
+  + 'ROW_NUMBER() OVER (PARTITION BY model ORDER BY (tokens_in IS NULL), tokens_in) AS rtin, '
+  + 'COUNT(tokens_in) OVER (PARTITION BY model) AS n_tin '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND model IS NOT NULL) '
+  + 'SELECT model, COUNT(*) AS calls, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL THEN 1 ELSE 0 END) AS with_usage, '
+  + `MAX(CASE WHEN rms = ${pct(0.5, 'n')} THEN ms END) AS ms_p50, `
+  + `MAX(CASE WHEN rms = ${pct(0.95, 'n')} THEN ms END) AS ms_p95, `
+  + `MAX(CASE WHEN rtin = ${pct(0.2, 'n_tin')} THEN tokens_in END) AS tin_p20, `
+  + `MAX(CASE WHEN rtin = ${pct(0.5, 'n_tin')} THEN tokens_in END) AS tin_p50, `
+  + `MAX(CASE WHEN rtin = ${pct(0.8, 'n_tin')} THEN tokens_in END) AS tin_p80 `
+  + 'FROM ranked GROUP BY model ORDER BY calls DESC LIMIT 12';
+
+// Same models, but only the upstream prefix (the text before the first `/`) and the call
+// share — the "разбивка по источникам" line of the digest's top-models block. A separate
+// query rather than a rollup of ANALYTICS_MODELS_SQL: that one is LIMIT 12, so folding it
+// would silently price the source split on the head of the distribution only.
+const ANALYTICS_SOURCES_SQL =
+  "SELECT CASE WHEN instr(model, '/') > 0 THEN substr(model, 1, instr(model, '/') - 1) "
+  + "ELSE '(без префикса)' END AS source, COUNT(*) AS calls "
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND model IS NOT NULL '
+  + 'GROUP BY source ORDER BY calls DESC LIMIT 8';
 
 // Port of analytics.py normalize_error: keep the 'HTTP <status>:' head, mask digits in
 // the payload so one failure with varying counts stays one bucket; cap at 160 chars.
@@ -410,8 +465,11 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const aggRows = (await db.prepare(ANALYTICS_AGG_SQL).bind(since).all()).results || [];
       const rungRows = (await db.prepare(ANALYTICS_RUNGS_SQL).bind(since).all()).results || [];
       const hourlyRows = (await db.prepare(ANALYTICS_HOURLY_SQL).bind(since).all()).results || [];
+      const appRows = (await db.prepare(ANALYTICS_APPS_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
+      const modelRows = (await db.prepare(ANALYTICS_MODELS_SQL).bind(since).all()).results || [];
+      const sourceRows = (await db.prepare(ANALYTICS_SOURCES_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
       // Canonical ladder names only (no aliases since 2026-10-03). The default role
       // 'X:build' collapses to 'X'; non-default roles (:review, :explore) stay separate.
@@ -492,7 +550,59 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         .map(([error, calls]) => ({ error, calls }))
         .sort((a, b) => b.calls - a.calls)
         .slice(0, 20);
-      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, hourly, errors });
+// Per-sub-task cut (#107): which of the caller's tools actually spends. Same ladder collapse as
+      // the other cuts, so `deepseek` + `service` land together; per-row cost is priced exactly
+      // like a rung row. `apps` is empty for callers that send no x-ladder-app (the bench, one-off
+      // curls) — the ladder name stays the coarse view, this is the fine one.
+      const appGroups = new Map();
+      for (const r of appRows) {
+        const app = r.app, ladder = canonName(r.ladder), model = r.model || null;
+        const key = `${app}|${ladder}|${model}`;
+        let e = appGroups.get(key);
+        if (!e) { e = { app, ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; appGroups.set(key, e); }
+        e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
+      }
+      const appsByName = new Map();
+      for (const e of appGroups.values()) {
+        e.cost_usd = costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out);
+        let a = appsByName.get(e.app);
+        if (!a) { a = { app: e.app, calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0, cost_usd: 0, rungs: [] }; appsByName.set(e.app, a); }
+        a.calls += e.calls; a.tokens_in += e.tokens_in; a.tokens_cached += e.tokens_cached;
+        a.tokens_out += e.tokens_out; a.cost_usd += e.cost_usd || 0; a.rungs.push(e);
+      }
+      for (const a of appsByName.values()) {
+        a.rungs.sort((x, y) => y.calls - x.calls);
+        a.cost_usd = a.rungs.reduce((s, r) => s + (r.cost_usd || 0), 0);
+      }
+      const apps = [...appsByName.values()].sort((a, b) => b.cost_usd - a.cost_usd || b.calls - a.calls);
+      // Per-model distribution cut: latency p50/p95 + prompt-size p20/p50/p80, with the source
+      // split as call shares. `with_usage` matters to the reader, not just to the maths — a
+      // model whose percentiles rest on a third of its calls says so rather than implying
+      // the numbers cover the whole model.
+      const models = modelRows.map((r) => ({
+        model: r.model,
+        category: categoryOf(r.model),
+        calls: num(r.calls),
+        with_usage: num(r.with_usage),
+        ms_p50: r.ms_p50 === null ? null : num(r.ms_p50),
+        ms_p95: r.ms_p95 === null ? null : num(r.ms_p95),
+        tin_p20: r.tin_p20 === null ? null : num(r.tin_p20),
+        tin_p50: r.tin_p50 === null ? null : num(r.tin_p50),
+        tin_p80: r.tin_p80 === null ? null : num(r.tin_p80),
+      }));
+      // Source shares are computed against ALL ok calls in the window, not the sum of the
+      // returned rows: ANALYTICS_SOURCES_SQL is its own aggregate, so a tail source still
+      // shows its true share instead of being normalised against the head.
+      const sourceCalls = sourceRows.reduce((s, r) => s + num(r.calls), 0);
+      const sources = sourceRows.map((r) => ({
+        source: r.source,
+        calls: num(r.calls),
+        pct: sourceCalls ? +(num(r.calls) / sourceCalls * 100).toFixed(1) : 0,
+      }));
+      return json(200, {
+        hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out,
+        hourly, apps, models, sources, errors,
+      });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
     }
@@ -530,6 +640,9 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
     const trace = makeTrace(request);
+    // The D1 row must carry the SAME slug as the OpenRouter "Application" cut (#107) — take the
+    // sanitised value, not the raw header, so the two views of one call can never disagree.
+    trace.app = appSlug;
     // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
     console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
     await logCall(env, trace, chat.model, r, started);
