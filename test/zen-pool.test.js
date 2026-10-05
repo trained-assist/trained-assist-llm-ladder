@@ -660,5 +660,29 @@ test('a transient pool fault is retried exactly once, then the ladder walks down
   });
   assert.equal(r.ok, true);
   assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
-  assert.equal(gh.calls.length, 2, 'exactly one retry — a third boot attempt would burn quota');
+  // boot (1) + the invoke's own cold-start dispatch (2) + the retry's (3)
+  assert.equal(gh.calls.length, 3, 'boot + invoke + one retry');
+});
+
+test('a cold pool boots in the background and fails over immediately (no waiting on the boot)', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const gh = fakeGithub(204);
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'or_key' };
+  const origFetch = gh.fetchImpl;
+  gh.fetchImpl = async (url, init) => (String(url).includes('api.github.com')
+    ? origFetch(url, init)
+    : new Response(JSON.stringify({
+        id: 'x', object: 'chat.completion', created: 1, model: 'xiaomi/mimo-v2.6-flash',
+        choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'fallback' } }],
+        usage: { prompt_tokens: 2, completion_tokens: 1 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
+    env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
+  assert.equal(gh.calls.length, 1, 'the cold call booted exactly one worker, then failed over');
+  const poolAttempt = r.attempts.find((a) => a.model.startsWith('zen-pool/'));
+  assert.match(poolAttempt.error, /cold pool/);
 });
