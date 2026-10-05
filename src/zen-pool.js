@@ -38,6 +38,9 @@ export const LAMBDA_WINDOW_MS = 5 * 60_000;
 // A dispatched worker needs ~10-13 s to boot and register; until it does, it must count as
 // "in flight" or every look at the queue would dispatch a second worker for the same task.
 export const BOOT_MS = 25_000;
+// Queue depth allowed per live worker before invoke() refuses at the door (#138). See poolInvoke:
+// the daily cap is small enough that a saturated queue is what actually spends it.
+export const BACKLOG_FACTOR = 2;
 // How long one task occupies a worker (measured 2.7-9.5 s end to end; 10 s is the planning
 // number). Little's law: N = λ·τ — this is what the scale decision is built on.
 export const SERVICE_MS_DEFAULT = 10_000;
@@ -511,6 +514,31 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
     if (!v.ok) return { status: 429, data: { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after } };
   }
 
+  // #138, the load-bearing half. The daily cap is 500 requests per (repo, model) AND provider-wide
+  // — one of the scarcest resources here. Queue depth is what turns that cap into a loss: every task
+  // admitted while the pool is saturated is served by a worker and burns quota on an answer whose
+  // caller already failed over. So refuse AT THE DOOR, before the task exists: no row, no budget
+  // bump, nothing to serve, nothing wasted. The ladder walks down in ~0 s and the pool stays healthy
+  // for the next call. Refusing is also what makes the pool self-limiting: at 500/day it simply
+  // stops taking work instead of silently burning the remainder.
+  //
+  // Sizing: one in-flight task per worker is throughput, so `live × 2` gives every worker a little
+  // runway without letting a burst build a queue. Configurable — a cold pool (live = 0) must still
+  // admit ONE task or it could never start.
+  const live = workers.length;
+  const cap = Math.max(BACKLOG_FACTOR * live, 1);
+  const queued = await readQueued(env);
+  if (queued >= cap) {
+    return {
+      status: 503,
+      data: {
+        error: 'pool_backlog', queued, live, cap,
+        // No '429'/'503' digits: a saturated pool is transient back-pressure, not a quota skip.
+        hint: 'pool is saturated — the task was NOT queued, no quota spent',
+      },
+    };
+  }
+
   const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   await db(env).prepare(
     `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at)
@@ -576,19 +604,6 @@ export async function poolBoot(env, { fetchImpl = fetch } = {}) {
     ).bind('last_boot_at', String(now)).run();
   }
   return { ok: true, booted: out.dispatched.length > 0, reason: out.reason, dispatched: out.dispatched };
-}
-
-// Cancel a task the caller has given up on — but ONLY while it is still `queued`. A worker that has
-// already claimed it is mid-flight: cancelling would strand that work, and its answer is already paid
-// for. Leaving a queued task behind is the expensive mistake: a worker WILL pick it up and spend
-// real provider quota (500/day, provider-wide) on an answer nobody reads.
-export async function poolAbandon(env, taskId) {
-  const id = String(taskId || '');
-  if (!id || !env.ZEN_DB) return false;
-  const res = await db(env).prepare(
-    "UPDATE zen_pool_tasks SET state = 'abandoned', finished_at = ?1 WHERE id = ?2 AND state = 'queued'"
-  ).bind(nowMs(env), id).run();
-  return !!res?.meta?.changes;
 }
 
 // Wait for an in-flight task: the caller's watchdog fired (504) but the job is still working, and

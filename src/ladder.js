@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { poolInvoke, poolWaitForTask, poolBoot, poolCooldown, poolAbandon } from './zen-pool.js';
+import { poolInvoke, poolWaitForTask, poolBoot, poolCooldown } from './zen-pool.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -373,12 +373,11 @@ function attempt(env, model, body, keyIndex, opts) {
 // only delay the failover.
 async function poolCall(env, payload, fetchImpl, graceMs = 15_000) {
   let r = await poolInvoke(env, payload, fetchImpl);
-  const taskIds = r.data?.task_id ? [r.data.task_id] : [];
   if (r.status === 504 && r.data?.task_id) {
     const w = await poolWaitForTask(env, r.data.task_id, { deadlineMs: graceMs });
-    if (w.ok) return { status: 200, data: w.data, taskIds };
+    if (w.ok) return { status: 200, data: w.data };
   }
-  return { ...r, taskIds };
+  return r;
 }
 
 async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
@@ -406,18 +405,10 @@ async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
     wait_ms: timeoutMs || undefined,
   };
   let r = await poolCall(env, payload, fetchImpl);
-  const first = r;
   // ONE retry for a transient fault (a cold pool that just booted, a provider 5xx). A budget
   // refusal (429) is not retried — the cap is real and retrying inside the same minute is wasted.
-  if (r.status !== 200 && r.status !== 429) r = { ...(await poolCall(env, payload, fetchImpl)), previous: first };
+  if (r.status !== 200 && r.status !== 429) r = await poolCall(env, payload, fetchImpl);
   if (r.status !== 200 || !r.data?.ok) {
-    // The caller is about to fail over, but the pool still has THIS call's task(s) queued. Nobody is
-    // waiting for those answers any more, and a worker WILL serve them — spending real zen quota
-    // (500/day, provider-wide) on output nobody reads. Cancel whatever the pool never picked up.
-    // A task already CLAIMED is left alone: work is underway and its answer lands in the row.
-    for (const id of [...(r.taskIds || []), ...(r.previous?.taskIds || [])]) {
-      if (id) await poolAbandon(env, id);
-    }
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
     return { ok: false, error: `zen-pool: ${r.data?.error || r.data?.kind || 'no answer'}` };

@@ -7,7 +7,8 @@ import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
-  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, poolCooldown, poolAbandon,
+  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
+  poolCooldown, poolInvoke, zenPoolRegister,
 } from '../src/zen-pool.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
@@ -720,32 +721,36 @@ test('the pool is skipped for 60s after a cold start (cooldown)', async () => {
   assert.match(r2.attempts.find((a) => a.model.startsWith('zen-pool/')).error, /warming up/);
 });
 
-// #138 regression: a caller that gives up must NOT leave its task in the queue — a worker would
-// serve it and spend real provider quota (500/day) on an answer nobody reads.
-test('poolAbandon cancels an unclaimed task, but never one a worker already picked up', async () => {
-  const d1 = fakeD1();
 
-  // queued → abandoned (the expensive case: this is the leak)
-  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW });
-  assert.equal(await poolAbandon({ ZEN_DB: d1, ZEN_NOW_MS: NOW }, 'q1'), true);
-  assert.equal(d1._tasks.get('q1').state, 'abandoned');
+// #138, the architectural side: the pool refuses AT THE DOOR instead of taking work it cannot
+// serve. A task that never enters the queue costs no quota and has no answer to go unread.
+test('a saturated pool refuses before queueing: no task row, no budget spent (#138)', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const extra = { RING_TOKEN: 'gh-tok' };
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, ...extra };
+  const gh = fakeGithub(204);
 
-  // claimed → untouched (work is underway; cancelling would strand it)
-  d1._tasks.set('c1', { id: 'c1', model: 'm', state: 'claimed', enqueued_at: NOW });
-  assert.equal(await poolAbandon({ ZEN_DB: d1, ZEN_NOW_MS: NOW }, 'c1'), false);
-  assert.equal(d1._tasks.get('c1').state, 'claimed');
+  // one live worker → cap = 2 × 1 = 2; fill the queue to the cap
+  await zenPoolRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+  d1._tasks.set('q2', { id: 'q2', model: 'm', state: 'queued', enqueued_at: NOW - 4 });
+  const budgetBefore = JSON.stringify([...d1._budget.values()]);
+
+  const r = await poolInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?' }, gh.fetchImpl);
+  assert.equal(r.status, 503);
+  assert.equal(r.data.error, 'pool_backlog');
+  assert.equal(d1._tasks.size, 2, 'the refused task must NOT be queued');
+  assert.equal(JSON.stringify([...d1._budget.values()]), budgetBefore, 'and it must not spend provider quota');
 });
 
-test('a failed pool call leaves no unclaimed task behind (the daily cap cannot leak)', async () => {
-  const d1 = fakeD1();
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
-  // no warm worker and no ring repo → poolInvoke returns 503 without enqueueing anything
-  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
-    env: { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, OPENROUTER_API_KEY: 'k' },
-    config: cfg, store: memoryStore(1),
-    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'from openrouter' } }] }), text: async () => '' }),
-  });
-  assert.equal(r.ok, true);
-  assert.equal([...d1._tasks.values()].filter((t) => t.state === 'queued').length, 0,
-    'no task may stay queued after the ladder gave up on it');
+test('a cold pool (no workers) still admits one task — otherwise it could never start', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok' };
+  const gh = fakeGithub(204);   // dispatch succeeds → a worker is booting, not yet registered
+  const r = await poolInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?' }, gh.fetchImpl);
+  assert.equal(r.status, 504, 'admitted, then the watchdog fired with nobody serving yet');
+  assert.equal(d1._tasks.size, 1);
+  assert.ok([...d1._budget.values()].length > 0, 'quota counted for the admitted task');
 });
