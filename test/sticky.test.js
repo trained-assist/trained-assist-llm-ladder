@@ -10,7 +10,14 @@ import { handle } from '../src/handler.js';
 import { memoryStore, pinFresh, pinDirty, pinStats, emptyState } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
-const LADDER = config.ladders.service.build;
+// Behaviour here pins real Go/OpenRouter rungs, so run against a config with the zen-pool head
+// removed: those rungs are cold in tests and would failover, shifting every LADDER index.
+const noZen = (l) => l.filter((m) => !m.startsWith('zen-pool/'));
+const GOCFG = { ...config, ladders: {} };
+for (const [name, roles] of Object.entries(config.ladders)) {
+  GOCFG.ladders[name] = Object.fromEntries(Object.entries(roles).map(([r, l]) => [r, noZen(l)]));
+}
+const LADDER = GOCFG.ladders.service.build;
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
 const ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
@@ -85,7 +92,7 @@ test('S4: the pinned rung is tried FIRST and ignores the global skipUntil; a hit
   // R0 is in shared transient backoff — a fresh conversation would skip it entirely
   store.state.health[R0] = { failures: 2, firstFailureAt: Date.now(), lastFailureAt: Date.now() - 1000, skipUntil: Date.now() + 60000, class: 'transient' };
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, calls), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch({}, calls), conversation: Kh });
   assert.equal(r.ok, true);
   assert.equal(r.model, R0, 'pinned rung is tried despite the shared skip');
   assert.equal(r.pin, 'hit');
@@ -96,7 +103,7 @@ test('S4: a stale pin (rung left the ladder) behaves as a new conversation and r
   const store = memoryStore(2);
   store.state.pins[Kh] = { rung: 'openrouter/retired/model', lastUsedAt: Date.now() };
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, calls), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch({}, calls), conversation: Kh });
   assert.equal(r.model, R0, 'stale pin is ignored — fresh pick');
   assert.equal(r.pin, 'new');
   assert.equal(store.state.pins[Kh].rung, R0, 're-pinned to the rung that answered');
@@ -104,7 +111,7 @@ test('S4: a stale pin (rung left the ladder) behaves as a new conversation and r
 
 test('S4: without a pin key nothing pin-related happens (byte-for-byte today)', async () => {
   const store = memoryStore(2);
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, []), conversation: null });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch({}, []), conversation: null });
   assert.equal(r.pin, null);
   assert.equal(Object.keys(store.state.pins).length, 0, 'no pin written for unkeyed callers');
 });
@@ -117,7 +124,7 @@ test('S5: transient error on a pinned OpenRouter rung → one same-rung retry, p
   for (const m of LADDER) if (m.startsWith('opencode-go/')) store.state.health[m] = { failures: 2, firstFailureAt: Date.now(), lastFailureAt: Date.now() - 1000, skipUntil: Date.now() + 60000, class: 'transient' };
   const beh = { [short(OR)]: (() => { let n = 0; return () => ({ status: ++n === 1 ? 500 : 200, error: 'boom', content: 'ok' }); })() };
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch(beh, calls), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch(beh, calls), conversation: Kh });
   assert.equal(r.ok, true);
   assert.equal(r.model, OR, 'same rung answered the retry');
   assert.equal(r.pin, 'hit', 'the pin never moved');
@@ -129,7 +136,7 @@ test('S5: hard failure of the pinned rung → ONE switch down, pin=moved to the 
   const store = memoryStore(2);
   store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
   const beh = { [short(R0)]: () => ({ status: 500, error: 'boom' }) };
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch(beh, []), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch(beh, []), conversation: Kh });
   assert.equal(r.model, R1, 'moved one rung down');
   assert.equal(r.pin, 'moved');
   assert.equal(store.state.pins[Kh].rung, R1, 're-pinned to the rung that answered');
@@ -139,7 +146,7 @@ test('S5: context overflow while stuck on the pinned rung retorts the error, inv
   const store = memoryStore(2);
   store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
   const beh = { [short(R0)]: () => ({ status: 400, error: 'This request exceeds the context window of the model' }) };
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch(beh, []), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch(beh, []), conversation: Kh });
   assert.equal(r.ok, false);
   assert.equal(r.status, 400, 'the overflow error is returned, not a retry loop');
   assert.equal(r.pin, 'gone');
@@ -151,7 +158,7 @@ test('S6: a pin parked on the paid tail does NOT hold a conversation when Go is 
   const store = memoryStore(2);
   store.state.pins[Kh] = { rung: OR, lastUsedAt: Date.now() };
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, calls), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch({}, calls), conversation: Kh });
   assert.equal(r.model, R0, 'healthy Go answered before the pinned paid rung');
   assert.equal(r.pin, 'moved');
   assert.equal(store.state.pins[Kh].rung, R0, 'pin moved back to Go');
@@ -161,7 +168,7 @@ test('S6: a pin parked on the paid tail does NOT hold a conversation when Go is 
 test('S6: a pin on a Go rung is not moved off the Go tier', async () => {
   const store = memoryStore(2);
   store.state.pins[Kh] = { rung: R0, lastUsedAt: Date.now() };
-  const r = await run(msg, { env, config, store, fetchImpl: recFetch({}, []), conversation: Kh });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: recFetch({}, []), conversation: Kh });
   assert.equal(r.model, R0);
   assert.equal(r.pin, 'hit');
 });
@@ -169,8 +176,8 @@ test('S6: a pin on a Go rung is not moved off the Go tier', async () => {
 // ── S7: stable per-conversation session headers upstream ──────────────────────────────────────
 test('S7: keyed calls send the shared Kh — Go x-opencode-session, OpenRouter x-session-id; unkeyed keeps a random session', async () => {
   const callsKeyed = [];
-  await run(msg, { env, config, store: memoryStore(2), fetchImpl: recFetch({}, callsKeyed), conversation: Kh });
-  await run(msg, { env, config, store: memoryStore(2), fetchImpl: recFetch({}, callsKeyed), conversation: Kh });
+  await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: recFetch({}, callsKeyed), conversation: Kh });
+  await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: recFetch({}, callsKeyed), conversation: Kh });
   const goCalls = callsKeyed.filter(c => c.url.includes('opencode.ai'));
   assert.ok(goCalls.length >= 2);
   assert.ok(goCalls.every(c => c.session === `ladder-${Kh}`), 'stable session header — the Go-side cache can work');
@@ -178,7 +185,7 @@ test('S7: keyed calls send the shared Kh — Go x-opencode-session, OpenRouter x
   assert.ok(orCalls.every(c => c.sid === Kh), 'OpenRouter side carries the same stable id');
 
   const callsUnkeyed = [];
-  await run(msg, { env, config, store: memoryStore(2), fetchImpl: recFetch({}, callsUnkeyed), conversation: null });
+  await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: recFetch({}, callsUnkeyed), conversation: null });
   const u = callsUnkeyed.filter(c => c.url.includes('opencode.ai'));
   assert.ok(u[0].session && u[0].session !== `ladder-${Kh}`, 'unkeyed calls keep a random session as before');
 });

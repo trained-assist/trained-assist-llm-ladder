@@ -9,7 +9,30 @@ const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', impo
 const LADDER = config.ladders.service.build; // canonical name since the 2026-10-03 refactor
 const FREE = config.ladders.free.build;
 const CONVERSATION = config.ladders.conversation.build;
-const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
+// Minimal D1 double for the pool tables — the ladder tests never write to it, but
+// the zen-pool rung calls prepare() before it knows the pool is cold.
+function zenDbStub() {
+  const stmt = {
+    first: async () => null,
+    all: async () => ({ results: [] }),
+    run: async () => ({ meta: { changes: 0 } }),
+  };
+  return { prepare: () => ({ ...stmt, bind: () => stmt }), all: async () => ({ results: [] }) };
+}
+
+const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key', ZEN_DB: zenDbStub() };
+
+// Behaviour tests run against a config with the zen-pool head removed: those rungs are cold in
+// tests (no D1 rows, no workers), so every call would failover — and the GOLADDER[0]/GOFREE[0]
+// indexes below address Go/OpenRouter rungs. Config-assertion tests keep the real `config`.
+const noZen = (l) => l.filter((m) => !m.startsWith('zen-pool/'));
+const GOCFG = { ...config, ladders: {} };
+for (const [name, roles] of Object.entries(config.ladders)) {
+  GOCFG.ladders[name] = Object.fromEntries(Object.entries(roles).map(([r, l]) => [r, noZen(l)]));
+}
+const GOLADDER = GOCFG.ladders.service.build;
+const GOFREE = GOCFG.ladders.free.build;
+const GOCONVERSATION = GOCFG.ladders.conversation.build;
 const short = m => m.replace(/^opencode-go\/|^openrouter\//, '');
 
 // behaviour[model](ctx) → { status, content, finish?, usage? } | 'throw'
@@ -26,23 +49,7 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 
-test('service:classify uses the established Go JSON rung and keeps the service fallback chain', async () => {
-  const classify = rungsFor(config, 'service:classify');
-  assert.equal(classify[0], 'opencode-go/mimo-v2.6-flash');
-  assert.deepEqual(classify, rungsFor(config, 'service:summarize'));
-  const calls = [];
-  const r = await run({ ...msg, model: 'service:classify', response_format: { type: 'json_object' } }, {
-    env, config, store: memoryStore(2), fetchImpl: fakeFetch({
-      'mimo-v2.6-flash': () => ({ status: 200, content: '{"stages":[]}' }),
-    }, calls),
-  });
-  assert.equal(r.ok, true);
-  assert.equal(r.model, classify[0]);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].body.response_format, { type: 'json_object' });
-});
-
-// Floor/diag assertions are pinned to EXPLICIT rung ids — never to LADDER[0]: #39 reordered the
+// Floor/diag assertions are pinned to EXPLICIT rung ids — never to GOLADDER[0]: #39 reordered the
 // real service ladder (space-bunny-free first) and that alone turned the previous version of
 // these tests red (#40 → CI fail), and #67 reordered it again (mimo first). DIAG_REASONING is
 // measured reasoning → 3000 floor; DIAG_SECOND exists only so the failover half of the diag tests
@@ -51,8 +58,10 @@ const DIAG_REASONING = 'opencode-go/mimo-v2.6-flash';
 const DIAG_SECOND = 'opencode-go/deepseek-v4.1-flash';
 const DIAG_CFG = { ...config, ladders: { ...config.ladders, service: { build: [DIAG_REASONING, DIAG_SECOND] } } }; // keyed by the canonical name
 
-test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid last (#36/#42 economics kept)', () => {
+test('config: #67 Pareto-first — zen pool opens, Go mimo next, free ×8 in the tail, paid last (#36/#42 economics kept)', () => {
   assert.deepEqual(LADDER, [
+    'zen-pool/nemotron-3-ultra-free',
+    'zen-pool/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
     'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
@@ -69,10 +78,12 @@ test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid las
     'openrouter/inclusionai/ling-3.0-flash',
     'openrouter/xiaomi/mimo-v2.6-flash',
   ]);
-  // The #42 ban on zen in `service` is lifted: its reason was the relay answering 404, and that
-  // stopped on 2026-09-30 (last zen 404 in D1 at 16:03, 198 successful zen calls since). Zen is
-  // free and answers in ~7s, so it belongs in front of paid OpenRouter as a tail — during the
-  // 2026-10-02 Go-provider incident a dead head is exactly what the tail exists for.
+  // The zen pool opens the service ladder (owner 2026-10-05): a fast free model first, one
+  // attempt, then the ladder rides down. The #42 ban on zen in `service` is lifted: its reason
+  // was the relay answering 404, and that stopped on 2026-09-30 (last zen 404 in D1 at 16:03,
+  // 198 successful zen calls since). Zen is free and answers in ~7s, so it belongs in front of
+  // paid OpenRouter as a tail — during the 2026-10-02 Go-provider incident a dead head is
+  // exactly what the tail exists for.
   const zen = LADDER.filter(m => m.startsWith('opencode-zen/'));
   assert.equal(zen.length, 4, 'the four working zen rungs');
   assert.ok(LADDER.indexOf(zen[0]) > LADDER.findIndex(m => m.endsWith(':free')),
@@ -82,20 +93,24 @@ test('config: #67 Pareto-first — Go mimo opens, free ×8 in the tail, paid las
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 13, 'paid OpenRouter only after Go mimo, all eight free rungs and zen');
+  assert.ok(firstPaid === 15, 'paid OpenRouter only after zen pool, Go mimo, all eight free rungs and zen');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
-  assert.ok(firstGoPaid === 0, 'Pareto-first: the Go subscription rung opens the ladder (#67)');
-  const firstFree = LADDER.findIndex(m => m.endsWith('-free') || m.endsWith(':free'));
-  assert.ok(firstFree === 1 && LADDER.slice(1, 9).every(m => m.endsWith('-free') || m.endsWith(':free')),
+  assert.ok(firstGoPaid === 2, 'Pareto-first: zen pool opens, Go mimo next (#67)');
+  // the eight $0 rungs after the two zen-pool rungs (which also end in -free, hence the skip)
+  const freeTail = LADDER.filter(m => !m.startsWith('zen-pool/'));
+  const firstFree = freeTail.findIndex(m => m.endsWith('-free') || m.endsWith(':free'));
+  assert.ok(firstFree === 1 && freeTail.slice(1, 9).every(m => m.endsWith('-free') || m.endsWith(':free')),
     'the eight free rungs sit in the tail before paid — a Go limit incident still stops there (#36)');
 });
 
 // #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
 // front of the eight working $0 rungs it would poison the free fallback (trained-assist-agent#1899)
 // with four dead steps. This pin keeps zen out of `service` and out of the free head.
-test('config: free = 8 $0 rungs + zen tail (#42)', () => {
+test('config: free = 8 $0 rungs + zen tail + zen pool fallback (#42)', () => {
   assert.deepEqual(FREE, [
+    'zen-pool/nemotron-3-ultra-free',
+    'zen-pool/mimo-v2.6-flash-free',
     'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
@@ -109,25 +124,28 @@ test('config: free = 8 $0 rungs + zen tail (#42)', () => {
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ]);
-  assert.equal(FREE.length, 12, '8 $0 rungs + 4 zen');
-  assert.ok(FREE.every(m => m.startsWith('opencode-zen/') || m.endsWith('-free') || m.endsWith(':free')),
+  assert.equal(FREE.length, 14, 'zen pool ×2 + 8 $0 rungs + 4 zen tail');
+  assert.ok(FREE.every(m => m.startsWith('opencode-zen/') || m.startsWith('zen-pool/') || m.endsWith('-free') || m.endsWith(':free')),
     'every free rung is $0 — no Go subscription, no paid OpenRouter');
-  assert.deepEqual(FREE.slice(8), [
+  assert.deepEqual(FREE.slice(10), [
     'opencode-zen/mimo-v2.6-flash-free',
     'opencode-zen/mimo-v2.5-free',
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
-  ], 'zen is the tail — never ahead of a working rung while the relay can 404');
+  ], 'the opencode-zen relay stays in the tail — it can 404; the zen pool (real 200s) opens');
   assert.ok(FREE.slice(0, 8).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
   assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
 });
 
-test('config: no aliases — every ladder name is canonical (refactor 2026-10-03)', () => {
-  assert.deepEqual(config.aliases, {}, 'aliases removed: one name, one ladder');
-  for (const gone of ['deepseek', 'cheap', 'free-ladder', 'conversations', 'picture', 'picture advanced', 'free_100percent']) {
+test('config: aliases — only the legacy deepseek alias remains, resolving to build', () => {
+  // One name, one ladder — but the legacy `deepseek` name still reaches stored opencode
+  // profiles, so it resolves on READ to the build ladder (owner 2026-10-05).
+  assert.deepEqual(config.aliases, { deepseek: 'build' });
+  for (const gone of ['cheap', 'free-ladder', 'conversations', 'picture', 'picture advanced', 'free_100percent']) {
     assert.equal(config.ladders[gone], undefined, `${gone} is not a ladder`);
     assert.equal(rungsFor(config, gone), null, `${gone} must NOT resolve`);
   }
+  assert.deepEqual(rungsFor(config, 'deepseek'), config.ladders.build.build, 'deepseek resolves to build');
   for (const keep of ['service', 'conversation', 'vision', 'vision advanced', 'free', 'build', 'build advanced', 'plan', 'explore', 'general', 'review', 'doctor', 'research']) {
     assert.ok(config.ladders[keep], `${keep} exists`);
   }
@@ -135,36 +153,36 @@ test('config: no aliases — every ladder name is canonical (refactor 2026-10-03
 
 test('first Go rung answers; Go gets the session header, non-stream, reasoning-safe max_tokens', async () => {
   const calls = [];
-  const r = await run({ ...msg, max_tokens: 5 }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
+  const r = await run({ ...msg, max_tokens: 5 }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, LADDER[0]);
+  assert.equal(r.model, GOLADDER[0]);
   assert.match(calls[0].url, /opencode\.ai\/zen\/go\/v1\/chat\/completions$/);
   assert.ok(calls[0].session);
   assert.equal(calls[0].body.stream, false);
   // #38: the caller's 5 is raised to THIS rung's floor — assert the clamp logic, not the identity
   // of whatever the ladder orders first (identity is test 'reasoning-модель получает 3000…').
-  assert.equal(calls[0].body.max_tokens, minTokensFor(LADDER[0]), 'floor follows the first rung class');
+  assert.equal(calls[0].body.max_tokens, minTokensFor(GOLADDER[0]), 'floor follows the first rung class');
   assert.ok(calls[0].body.max_tokens >= MIN_TOKENS, 'caller max_tokens=5 is raised to at least the common floor');
   assert.equal(calls[0].auth, 'Bearer oc_a');
 });
 
 test('failing rung → next rung; the failed one is skipped on the next call', async () => {
   const store = memoryStore(2);
-  const beh = { [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }) };
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, []) });
-  assert.equal(r.model, LADDER[1]);
+  const beh = { [short(GOLADDER[0])]: () => ({ status: 500, error: 'boom' }) };
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r.model, GOLADDER[1]);
   const calls = [];
-  await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
-  assert.equal(calls[0].model, short(LADDER[1]));
+  await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(calls[0].model, short(GOLADDER[1]));
 });
 
 test('json guard: non-JSON fails the rung, fenced JSON is accepted', async () => {
   const beh = {
-    [short(LADDER[0])]: () => ({ status: 200, content: 'sure thing' }),
-    [short(LADDER[1])]: () => ({ status: 200, content: '```json\n{"kind":"none"}\n```' }),
+    [short(GOLADDER[0])]: () => ({ status: 200, content: 'sure thing' }),
+    [short(GOLADDER[1])]: () => ({ status: 200, content: '```json\n{"kind":"none"}\n```' }),
   };
-  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
-  assert.equal(r.model, LADDER[1]);
+  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r.model, GOLADDER[1]);
   assert.deepEqual(parseJson(r.content), { kind: 'none' });
 });
 
@@ -210,28 +228,28 @@ test('guard-fail → one same-rung retry: recovery keeps the rung (no hop, no he
   // flake #1 only: the retry answers → the rung keeps serving, nothing is recorded against it
   let calls = 0;
   const store = memoryStore(2);
-  const beh = { [short(LADDER[0])]: () => (++calls === 1
+  const beh = { [short(GOLADDER[0])]: () => (++calls === 1
     ? { status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }
     : { status: 200, content: '{"ok":true}' }) };
-  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store, fetchImpl: fakeFetch(beh, []) });
+  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, []) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, LADDER[0], 'retried rung answered — no hop down the ladder');
+  assert.equal(r.model, GOLADDER[0], 'retried rung answered — no hop down the ladder');
   assert.ok(r.attempts.some(a => a.outcome === 'guard-retry'), 'the retry is visible in attempts (flake rate stays measurable)');
   assert.ok(!r.attempts.some(a => a.outcome === 'error'), 'a recovered flake never surfaces as an error');
-  assert.equal(store.state.health[LADDER[0]], undefined, 'no health-skip — one flake must not punish other callers');
+  assert.equal(store.state.health[GOLADDER[0]], undefined, 'no health-skip — one flake must not punish other callers');
 
   // flake #2 both attempts empty → exactly one retry, then the ladder descends and the failure IS recorded
   const store2 = memoryStore(2);
   const beh2 = {
-    [short(LADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }),
-    [short(LADDER[1])]: () => ({ status: 200, content: '{"ok":true}' }),
+    [short(GOLADDER[0])]: () => ({ status: 200, content: '', finish: 'length', usage: EMPTY_USAGE }),
+    [short(GOLADDER[1])]: () => ({ status: 200, content: '{"ok":true}' }),
   };
-  const r2 = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config, store: store2, fetchImpl: fakeFetch(beh2, []) });
+  const r2 = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config: GOCFG, store: store2, fetchImpl: fakeFetch(beh2, []) });
   assert.equal(r2.ok, true);
-  assert.equal(r2.model, LADDER[1], 'a persistent guard-fail still moves down the ladder');
+  assert.equal(r2.model, GOLADDER[1], 'a persistent guard-fail still moves down the ladder');
   assert.equal(r2.attempts.filter(a => a.outcome === 'guard-retry').length, 1, 'exactly one retry per rung');
   assert.ok(r2.attempts.some(a => a.outcome === 'error'), 'the rung still reports the failure');
-  assert.ok(store2.state.health[LADDER[0]], 'persistent guard-fail is recorded in shared health');
+  assert.ok(store2.state.health[GOLADDER[0]], 'persistent guard-fail is recorded in shared health');
 });
 
 // ── #38: the max_tokens floor is per-rung — 3000 for the empirical REASONING_MODELS list, 1500 for the rest ─
@@ -263,7 +281,7 @@ test('reasoning-модель получает 3000, обычная — 1500', as
   const rErr = reasoningRung.attempts.find(a => a.outcome === 'error').error;
   assert.ok(rErr.includes('max_tokens=3000'), `reasoning rung → max_tokens=3000 in the diag, got: ${rErr}`);
   const plainRung = await run({ ...msg, model: 'research:explore' }, {
-    env, config, store: memoryStore(2), pinRung: plain,
+    env, config: GOCFG, store: memoryStore(2), pinRung: plain,
     fetchImpl: fakeFetch({ 'google/gemini-2.5-flash-lite': () => ({ status: 200, content: '', finish: 'length', usage: { prompt_tokens: 9, completion_tokens: 1500 } }) }, []),
   });
   const pErr = plainRung.attempts.find(a => a.outcome === 'error').error;
@@ -272,10 +290,10 @@ test('reasoning-модель получает 3000, обычная — 1500', as
 
 test('Go key limit → rotate to spare key, retry SAME rung', async () => {
   const calls = [];
-  const beh = { [short(LADDER[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 429, error: 'Go usage limit exceeded' } : { status: 200, content: 'ok' }) };
+  const beh = { [short(GOLADDER[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 429, error: 'Go usage limit exceeded' } : { status: 200, content: 'ok' }) };
   const store = memoryStore(2);
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
-  assert.equal(r.model, LADDER[0]);
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.model, GOLADDER[0]);
   assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b']);
   assert.equal(store.state.keys.active, 1, 'next call starts on the spare key');
   assert.equal(r.attempts.find(a => a.outcome === 'key-rotated').key, 0, 'attempts name the key that failed');
@@ -286,11 +304,11 @@ test('spare key answers a non-key failure → the call STAYS on the same Go rung
   // (silent throttle looks like a flaky model) — the probe keeps the call on Go instead of paying
   // for OpenRouter and resetting the caller's prompt cache.
   const store = memoryStore(2);
-  const beh = { [short(LADDER[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }) };
+  const beh = { [short(GOLADDER[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }) };
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, LADDER[0]);
+  assert.equal(r.model, GOLADDER[0]);
   assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b']);
   assert.equal(store.state.keys.active, 0, 'a probe is local — shared rotation state moves only on quota/401');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1);
@@ -298,22 +316,22 @@ test('spare key answers a non-key failure → the call STAYS on the same Go rung
   // Budget is ONE probe per call: the next failing Go rung must not probe again, so a Go outage
   // cannot double the failover latency.
   const beh2 = {
-    [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }),
-    [short(LADDER[1])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }),
+    [short(GOLADDER[0])]: () => ({ status: 500, error: 'boom' }),
+    [short(GOLADDER[1])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }),
   };
   const calls2 = [];
-  const r2 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh2, calls2) });
+  const r2 = await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch(beh2, calls2) });
   assert.equal(r2.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'exactly one probe per call');
-  assert.equal(r2.model, LADDER[2], 'spare already used → the ladder moves on to the next rung (no second probe)');
+  assert.equal(r2.model, GOLADDER[2], 'spare already used → the ladder moves on to the next rung (no second probe)');
 });
 
 test('context overflow on a Go rung does NOT probe the spare key — the key cannot change it', async () => {
-  const beh = { [short(LADDER[0])]: () => ({ status: 400, error: 'This request exceeds the context window of the model' }) };
+  const beh = { [short(GOLADDER[0])]: () => ({ status: 400, error: 'This request exceeds the context window of the model' }) };
   const calls = [];
-  const r = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+  const r = await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 0);
   assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_a'], 'no probe: straight to the next rung');
-  assert.equal(r.model, LADDER[1]);
+  assert.equal(r.model, GOLADDER[1]);
 });
 
 test('a WEEKLY Go allowance parks the key for hours; a plain rate-limit hit keeps the15-minute TTL', () => {
@@ -331,7 +349,7 @@ test('every key limited → paid Go rungs parked, free Go rungs keep serving (#6
   for (const m of LADDER) if (m.startsWith('opencode-go/') && !m.endsWith('-free')) beh[short(m)] = () => ({ status: 429, error: 'usage limit' });
   const store = memoryStore(2);
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
   // service = [mimo, space-bunny, longcat, OR…]: mimo burns both keys → paid Go parked,
   // yet the free Go rung right behind it answers in the SAME call
   assert.equal(r.model, 'opencode-go/space-bunny-free', 'free Go serves while every key is limited');
@@ -342,62 +360,62 @@ test('every key limited → paid Go rungs parked, free Go rungs keep serving (#6
     'paid rung once per key, then the free rung on the last key');
   // next call: paid Go still parked → the free rung is the head that answers
   const calls2 = [];
-  const r2 = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls2) });
+  const r2 = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls2) });
   assert.equal(r2.model, 'opencode-go/space-bunny-free');
   // window lapses → the normal head (paid Go) is back, without any manual step
   for (const m of Object.keys(store.state.health)) store.state.health[m].skipUntil = Date.now() - 1;
   for (const k of Object.keys(store.state.keys.exhausted)) store.state.keys.exhausted[k] = Date.now() - 1;
   const calls3 = [];
-  const r3 = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls3) });
-  assert.equal(r3.model, LADDER[0]);
+  const r3 = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls3) });
+  assert.equal(r3.model, GOLADDER[0]);
 });
 
 test('non-key failure on a Go rung probes the spare key once, but never burns shared state', async () => {
-  const beh = { [short(LADDER[0])]: () => ({ status: 503, error: 'temporarily overloaded' }) };
+  const beh = { [short(GOLADDER[0])]: () => ({ status: 503, error: 'temporarily overloaded' }) };
   const store = memoryStore(2);
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch(beh, calls) });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
   assert.equal(store.state.keys.active, 0, 'a model-level fault never moves shared key state');
   assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b', 'Bearer oc_a'],
     'same rung retried on the spare key, then failover to rung 2 on the active key');
-  assert.equal(r.model, LADDER[1]);
+  assert.equal(r.model, GOLADDER[1]);
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1);
 });
 
 test('no Go keys → OpenRouter only; no keys → 503; unknown ladder → 404', async () => {
   const calls = [];
-  const r = await run(msg, { env: { OPENROUTER_API_KEY: 'k' }, config, store: memoryStore(0), fetchImpl: fakeFetch({}, calls) });
+  const r = await run(msg, { env: { OPENROUTER_API_KEY: 'k' }, config: GOCFG, store: memoryStore(0), fetchImpl: fakeFetch({}, calls) });
   assert.equal(r.model, LADDER.find(m => m.startsWith('openrouter/')));
-  assert.equal((await run(msg, { env: {}, config, store: memoryStore(0), fetchImpl: fakeFetch({}, []) })).status, 503);
-  assert.equal((await run({ ...msg, model: 'nope' }, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, []) })).status, 404);
+  assert.equal((await run(msg, { env: {}, config: GOCFG, store: memoryStore(0), fetchImpl: fakeFetch({}, []) })).status, 503);
+  assert.equal((await run({ ...msg, model: 'nope' }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, []) })).status, 404);
 });
 
 test('stale skip on every rung does not black-hole the call', async () => {
   const store = memoryStore(2);
   for (const m of LADDER) store.state.health[m] = { failures: 9, firstFailureAt: Date.now(), skipUntil: Date.now() + 60000 };
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, []) });
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, []) });
   assert.equal(r.ok, true);
 });
 
 test('a transient Go skip is capped at 30s after the last failure (fleet returns to Go); real limits keep their TTL', async () => {
   const old = { failures: 5, firstFailureAt: Date.now() - 60000, lastFailureAt: Date.now() - 31000, skipUntil: Date.now() + 240000 };
   const store = memoryStore(2);
-  store.state.health[LADDER[0]] = { ...old, class: 'transient' };
+  store.state.health[GOLADDER[0]] = { ...old, class: 'transient' };
   const calls = [];
-  await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls) });
-  assert.equal(calls[0].model, short(LADDER[0]), 'a transient skip older than 30s is ignored — Go is re-tested');
+  await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls) });
+  assert.equal(calls[0].model, short(GOLADDER[0]), 'a transient skip older than 30s is ignored — Go is re-tested');
 
   const fresh = memoryStore(2);
-  fresh.state.health[LADDER[0]] = { ...old, lastFailureAt: Date.now() - 10000, class: 'transient' };
+  fresh.state.health[GOLADDER[0]] = { ...old, lastFailureAt: Date.now() - 10000, class: 'transient' };
   const calls2 = [];
-  await run(msg, { env, config, store: fresh, fetchImpl: fakeFetch({}, calls2) });
-  assert.equal(calls2[0].model, short(LADDER[1]), 'a fresh transient skip is honoured');
+  await run(msg, { env, config: GOCFG, store: fresh, fetchImpl: fakeFetch({}, calls2) });
+  assert.equal(calls2[0].model, short(GOLADDER[1]), 'a fresh transient skip is honoured');
 
   const quota = memoryStore(2);
-  quota.state.health[LADDER[0]] = { ...old, class: 'quota' };
+  quota.state.health[GOLADDER[0]] = { ...old, class: 'quota' };
   const calls3 = [];
-  await run(msg, { env, config, store: quota, fetchImpl: fakeFetch({}, calls3) });
-  assert.equal(calls3[0].model, short(LADDER[1]), 'a quota park is never capped');
+  await run(msg, { env, config: GOCFG, store: quota, fetchImpl: fakeFetch({}, calls3) });
+  assert.equal(calls3[0].model, short(GOLADDER[1]), 'a quota park is never capped');
 });
 
 test('totalTimeoutMs stops walking the ladder', async () => {
@@ -405,13 +423,13 @@ test('totalTimeoutMs stops walking the ladder', async () => {
   for (const m of LADDER) beh[short(m)] = () => ({ status: 500, error: 'boom' });
   const slow = fakeFetch(beh, []);
   const fetchImpl = async (u, i) => { await new Promise(r => setTimeout(r, 300)); return slow(u, i); };
-  const r = await run(msg, { env, config, store: memoryStore(2), fetchImpl, totalTimeoutMs: 700 });
+  const r = await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl, totalTimeoutMs: 700 });
   assert.equal(r.ok, false);
   assert.ok(r.attempts.filter(a => a.outcome === 'error').length < LADDER.length);
 });
 
 test('state: per-model exponential backoff restarts for every model; key rotation + snapshot heal', () => {
-  assert.deepEqual([1, 2, 3, 4, 10].map(n => backoffFor(n)), [15000, 30000, 60000, 120000, 300000]);
+  assert.deepEqual([1, 2, 3, 4, 10].map(n => backoffFor(n)), [2000, 4000, 8000, 16000, 300000]);
   const st = emptyState();
   assert.deepEqual(rotateKey(st, 2, 1000, 0), { rotated: true, fromIndex: 0, toIndex: 1 });
   const r = rotateKey(st, 2, 1000, 10);
@@ -464,9 +482,9 @@ test('free-headed ladder rotates Go keys round-robin across calls (#81)', async 
 
 test('free ladder: stream answered by the first rung with output, bytes replayed intact', async () => {
   const calls = [];
-  const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
+  const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: streamFetch({}, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, FREE[0]);
+  assert.equal(r.model, GOFREE[0]);
   assert.equal(calls[0].body.stream, true);
   const text = await readAll(r.stream);
   assert.match(text, /"role":"assistant"/, 'the buffered role frame is replayed');
@@ -476,30 +494,30 @@ test('free ladder: stream answered by the first rung with output, bytes replayed
 
 test('stream: a rung that ends / errors before the first token fails over; role-only frame does not commit', async () => {
   const beh = {
-    [short(FREE[0])]: () => ({ events: [delta({ role: 'assistant' })] }),                       // ends with no output
-    [short(FREE[1])]: () => ({ events: [{ error: { message: 'upstream overloaded' } }] }),       // in-stream error
-    [short(FREE[2])]: () => ({ status: 503, error: 'busy' }),
+    [short(GOFREE[0])]: () => ({ events: [delta({ role: 'assistant' })] }),                       // ends with no output
+    [short(GOFREE[1])]: () => ({ events: [{ error: { message: 'upstream overloaded' } }] }),       // in-stream error
+    [short(GOFREE[2])]: () => ({ status: 503, error: 'busy' }),
   };
   const calls = [];
-  const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch(beh, calls) });
-  assert.equal(r.model, FREE[3]);
+  const r = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: streamFetch(beh, calls) });
+  assert.equal(r.model, GOFREE[3]);
   assert.deepEqual(r.attempts.map(a => a.outcome), ['key-probe', 'error', 'error', 'error', 'ok'],
     'the first Go rung also gets the one spare-key probe; the rest fail over rung by rung');
 });
 
 test('stream: tool_calls delta counts as the first token (tools passed through)', async () => {
   const tools = [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }];
-  const beh = { [short(FREE[0])]: ({ body }) => { assert.deepEqual(body.tools, tools); return { events: [delta({ tool_calls: [{ index: 0, function: { name: 'bash', arguments: '{}' } }] }), '[DONE]'] }; } };
-  const r = await run({ model: 'free', stream: true, tools, messages: [{ role: 'user', content: 'ls' }] }, { env, config, store: memoryStore(2), fetchImpl: streamFetch(beh, []) });
-  assert.equal(r.model, FREE[0]);
+  const beh = { [short(GOFREE[0])]: ({ body }) => { assert.deepEqual(body.tools, tools); return { events: [delta({ tool_calls: [{ index: 0, function: { name: 'bash', arguments: '{}' } }] }), '[DONE]'] }; } };
+  const r = await run({ model: 'free', stream: true, tools, messages: [{ role: 'user', content: 'ls' }] }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: streamFetch(beh, []) });
+  assert.equal(r.model, GOFREE[0]);
   assert.match(await readAll(r.stream), /tool_calls/);
 });
 
 test('non-stream: tool_calls with empty content is a valid answer', async () => {
   const f = async (url, init) => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: null, tool_calls: [{ id: 't', type: 'function', function: { name: 'bash', arguments: '{}' } }] } }] }), text: async () => '' });
-  const r = await run({ model: 'free', messages: [{ role: 'user', content: 'ls' }], tools: [{ type: 'function', function: { name: 'bash' } }] }, { env, config, store: memoryStore(2), fetchImpl: f });
+  const r = await run({ model: 'free', messages: [{ role: 'user', content: 'ls' }], tools: [{ type: 'function', function: { name: 'bash' } }] }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: f });
   assert.equal(r.ok, true);
-  assert.equal(r.model, FREE[0]);
+  assert.equal(r.model, GOFREE[0]);
 });
 
 test('provider rejects response_format (400) → same rung retried once without it', async () => {
@@ -509,34 +527,34 @@ test('provider rejects response_format (400) → same rung retried once without 
     if (body.response_format) return { ok: false, status: 400, text: async () => 'response_format is not supported by this model' };
     return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }), text: async () => '' };
   };
-  const r = await run({ model: 'free', response_format: { type: 'json_object' }, messages: [{ role: 'user', content: 'json' }] }, { env, config, store: memoryStore(2), fetchImpl: f });
-  assert.equal(r.model, FREE[0]);
+  const r = await run({ model: 'free', response_format: { type: 'json_object' }, messages: [{ role: 'user', content: 'json' }] }, { env, config: GOCFG, store: memoryStore(2), fetchImpl: f });
+  assert.equal(r.model, GOFREE[0]);
   assert.deepEqual(seen, [true, false]);
 });
 
 test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung rejected', async () => {
   const store = memoryStore(2);
-  store.state.health[LADDER[1]] = { failures: 3, firstFailureAt: Date.now(), skipUntil: Date.now() + 60000 };
+  store.state.health[GOLADDER[1]] = { failures: 3, firstFailureAt: Date.now(), skipUntil: Date.now() + 60000 };
   const calls = [];
-  const r = await run(msg, { env, config, store, fetchImpl: fakeFetch({}, calls), pinRung: LADDER[1] });
-  assert.equal(r.model, LADDER[1]);
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls), pinRung: GOLADDER[1] });
+  assert.equal(r.model, GOLADDER[1]);
   assert.equal(calls.length, 1);
-  const beh = { [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }) };
-  const r2 = await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, []), pinRung: LADDER[1] });
+  const beh = { [short(GOLADDER[1])]: () => ({ status: 500, error: 'boom' }) };
+  const r2 = await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, []), pinRung: GOLADDER[1] });
   assert.equal(r2.ok, false);
   assert.equal(r2.attempts.length, 1);
-  assert.equal((await run(msg, { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
+  assert.equal((await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
 });
 
 test('config: doctor = Go MiMo first, then stronger Go models, paid OpenRouter mimo last (owner 2026-09-28)', () => {
-  const expected = ['zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
+  const expected = ['zen-pool/nemotron-3-ultra-free', 'zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
     'opencode-go/deepseek-v4-pro', 'openrouter/xiaomi/mimo-v2.6-flash'];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
 test('config: research is split by role — Go reads first, paid Gemini tail (owner 2026-09-30, issue #28)', () => {
-  const reader = ['zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'openrouter/google/gemini-2.5-flash-lite'];
-  const thinker = ['zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/xiaomi/mimo-v2.6-flash'];
+  const reader = ['zen-pool/nemotron-3-ultra-free', 'zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'openrouter/google/gemini-2.5-flash-lite'];
+  const thinker = ['zen-pool/nemotron-3-ultra-free', 'zen-pool/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', 'openrouter/xiaomi/mimo-v2.6-flash'];
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
@@ -544,6 +562,8 @@ test('config: research is split by role — Go reads first, paid Gemini tail (ow
 
 test('config: conversation = hh-skill writing — gemini-3.1-flash-lite-preview first (owner 2026-10-01)', () => {
   const expected = [
+    'zen-pool/nemotron-3-ultra-free',
+    'zen-pool/mimo-v2.6-flash-free',
     'openrouter/google/gemini-3.1-flash-lite-preview',
     'openrouter/google/gemini-2.5-flash',
     'opencode-go/mimo-v2.6-flash',
@@ -572,19 +592,21 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   const advanced = ['opencode-go/mimo-v2.6-flash', ...paid];
   // The zen pool opens every interactive ladder (owner 2026-10-04): one fast free model, one
   // attempt, then the ladder rides down. `build` carries a second pool rung as its fallback.
-  const ZEN = 'zen-pool/mimo-v2.6-flash-free';
-  const zenHead = [ZEN];
+  const ZEN = 'zen-pool/nemotron-3-ultra-free';
+  const ZEN2 = 'zen-pool/mimo-v2.6-flash-free';
+  const zenHead = ['zen-pool/nemotron-3-ultra-free', 'zen-pool/mimo-v2.6-flash-free'];
 
-  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool + base free ×3 + платный хвост, без mimo');
-  assert.deepEqual(config.ladders['build advanced'].build, [ZEN, ...advanced], 'build advanced = zen pool + mimo + платный хвост');
+  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool ×2 + base free ×3 + платный хвост, без mimo');
+  assert.deepEqual(config.ladders['build advanced'].build, [ZEN, ZEN2, ...advanced], 'build advanced = zen pool + mimo + платный хвост');
   for (const role of ['plan', 'general', 'review']) {
-    assert.deepEqual(config.ladders[role], { build: [ZEN, ...advanced] }, `${role} advanced-first — роль=лестница (#71)`);
+    assert.deepEqual(config.ladders[role], { build: [ZEN, ZEN2, ...advanced] }, `${role} advanced-first — роль=лестница (#71)`);
   }
 
   // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
   // gemini-2.5-flash-lite 1048576, xiaomi mimo 1050000; ling-3.0-flash = 262144 и не годится.
   const explore = config.ladders.explore.build;
   assert.deepEqual(explore, [
+    'zen-pool/nemotron-3-ultra-free',
     'zen-pool/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
     'openrouter/google/gemini-2.5-flash-lite',
@@ -609,28 +631,31 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.ok(!f100.some(m => m.startsWith('openrouter/') && !m.endsWith(':free')), 'no paid rung');
 
   assert.ok(!JSON.stringify(config.ladders.build).includes('opencode-zen/'), 'zen stays out (#42)');
-  assert.ok(!JSON.stringify(config.ladders.build).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in build base');
-  // контракт #67 не тронут
-  assert.equal(config.ladders.service.build[0], 'opencode-go/mimo-v2.6-flash', 'service stays Pareto-first');
+  // nemotron-3-ultra-free is in build as the owner's second zen rung (after mimo) — it is a
+  // fallback, not the head, so a flake there costs one hop, not the conversation.
+  assert.ok(config.ladders.build.build.includes('zen-pool/nemotron-3-ultra-free'), 'ultra:free is the second zen rung in build');
+  // #67 не тронут: Go mimo всё ещё первый платный rung, за ним — бесплатный хвост
+  assert.equal(config.ladders.service.build[2], 'opencode-go/mimo-v2.6-flash', 'Go mimo opens the paid segment');
+  assert.equal(config.ladders.service.build[0], 'zen-pool/nemotron-3-ultra-free', 'zen pool opens the ladder');
 });
 
 test('ladder: conversation walks top-down — 3.1-flash-lite-preview answers, 2.5-flash only on its failure', async () => {
   const calls = [];
-  const beh = { [short(CONVERSATION[0])]: () => ({ status: 500, error: 'boom' }) };
+  const beh = { [short(GOCONVERSATION[0])]: () => ({ status: 500, error: 'boom' }) };
   const r = await run({ model: 'conversation', messages: [{ role: 'user', content: 'hi' }] },
-    { env, config, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
+    { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch(beh, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, CONVERSATION[1]);
+  assert.equal(r.model, GOCONVERSATION[1]);
   // upstream sees the provider prefix stripped (openrouter/ is routing, not part of the id)
-  assert.deepEqual(calls.map(c => c.model), [short(CONVERSATION[0]), short(CONVERSATION[1])]);
+  assert.deepEqual(calls.map(c => c.model), [short(GOCONVERSATION[0]), short(GOCONVERSATION[1])]);
 });
 
 test('ladder: conversation ladder_rung pins the requested model without failover (model switch / bench)', async () => {
   const calls = [];
   const r = await run({ model: 'conversation', messages: [{ role: 'user', content: 'hi' }] },
-    { env, config, store: memoryStore(2), fetchImpl: fakeFetch({}, calls), pinRung: CONVERSATION[1] });
+    { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, calls), pinRung: GOCONVERSATION[1] });
   assert.equal(r.ok, true);
-  assert.equal(r.model, CONVERSATION[1]);
+  assert.equal(r.model, GOCONVERSATION[1]);
   assert.equal(calls.length, 1, 'pinned rung, no walk');
 });
 
@@ -720,14 +745,14 @@ test('sanitize: garbage slug falls back to llm-ladder (never a half-repaired one
 });
 
 test('run() threads appSlug/appTitle down to the OpenRouter upstream; Go stays clean', async () => {
-  const beh = { [short(LADDER[0])]: () => ({ status: 500, error: 'boom' }), [short(LADDER[1])]: () => ({ status: 500, error: 'boom' }) };
+  const beh = { [short(GOLADDER[0])]: () => ({ status: 500, error: 'boom' }), [short(GOLADDER[1])]: () => ({ status: 500, error: 'boom' }) };
   const calls = [];
   const f = async (url, init) => {
     calls.push({ url, headers: init.headers });
     const body = JSON.parse(init.body);
     return { ok: false, status: 500, text: async () => (beh[body.model] ? beh[body.model]().error : 'x') };
   };
-  await run(msg, { env, config, store: memoryStore(2), fetchImpl: f, appSlug: 'gtd-intent', appTitle: 'GTD Intent' });
+  await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: f, appSlug: 'gtd-intent', appTitle: 'GTD Intent' });
   const go = calls.filter(c => c.url.includes('opencode.ai'));
   const or = calls.filter(c => c.url.includes('openrouter.ai'));
   assert.ok(go.length >= 2 && or.length >= 1, 'walked Go rungs then OpenRouter');
@@ -758,7 +783,7 @@ test('zen upstreamRequest: relay URL + relay token, no OpenRouter attribution, m
 
 // #42 (owner): zen left service for the free ladder TAIL, so the live service walk no longer
 // contains a zen rung. The relay mechanics below are what matter here — pin them to an explicit
-// config (the DIAG_CFG pattern) instead of to LADDER[0]/LADDER[1].
+// config (the DIAG_CFG pattern) instead of to GOLADDER[0]/GOLADDER[1].
 const ZEN_WALK = [
   'opencode-go/space-bunny-free',
   'opencode-go/longcat-2.5-preview-free',

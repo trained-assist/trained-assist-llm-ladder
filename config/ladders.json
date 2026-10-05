@@ -9,6 +9,8 @@
   "ladders": {
     "service": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -26,6 +28,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -43,6 +47,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -60,6 +66,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -77,6 +85,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -94,6 +104,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "classify": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -111,6 +123,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "summarize": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -128,6 +142,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "format": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -144,6 +160,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "route": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -161,6 +179,8 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "gate": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -180,6 +200,7 @@
     },
     "doctor": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
@@ -187,6 +208,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
@@ -194,6 +216,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
@@ -201,6 +224,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
@@ -208,6 +232,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/qwen3.7-plus",
@@ -217,30 +242,35 @@
     },
     "research": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "opencode-go/deepseek-v4.1-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "openrouter/google/gemini-2.5-flash-lite"
@@ -248,6 +278,8 @@
     },
     "conversation": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "openrouter/google/gemini-3.1-flash-lite-preview",
         "openrouter/google/gemini-2.5-flash",
         "opencode-go/mimo-v2.6-flash"
@@ -255,6 +287,7 @@
     },
     "build": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
@@ -265,6 +298,7 @@
     },
     "plan": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "openrouter/inclusionai/ling-3.0-flash",
@@ -273,6 +307,7 @@
     },
     "explore": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "openrouter/google/gemini-2.5-flash-lite",
@@ -281,6 +316,7 @@
     },
     "general": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "openrouter/inclusionai/ling-3.0-flash",
@@ -289,6 +325,7 @@
     },
     "review": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "openrouter/inclusionai/ling-3.0-flash",
@@ -297,6 +334,7 @@
     },
     "build advanced": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
         "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
         "openrouter/inclusionai/ling-3.0-flash",
@@ -317,6 +355,8 @@
     },
     "free": {
       "build": [
+        "zen-pool/nemotron-3-ultra-free",
+        "zen-pool/mimo-v2.6-flash-free",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -332,5 +372,7 @@
       ]
     }
   },
-  "aliases": {}
+  "aliases": {
+    "deepseek": "build"
+  }
 }

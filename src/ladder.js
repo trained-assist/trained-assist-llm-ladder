@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { poolInvoke, poolWaitForTask, poolBoot } from './zen-pool.js';
+import { poolInvoke, poolWaitForTask, poolBoot, poolCooldown } from './zen-pool.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -149,9 +149,11 @@ export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
 }
 
 // "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
+// Aliases resolve on READ only (never written back), so stored state keeps working after a rename.
 export function rungsFor(config, name) {
   const [ladderName, role] = String(name || DEFAULT_LADDER).split(':');
-  const l = config.ladders && config.ladders[ladderName];
+  const resolved = (config.aliases && config.aliases[ladderName]) || ladderName;
+  const l = config.ladders && config.ladders[resolved];
   if (!l) return null;
   return l[role || DEFAULT_ROLE] || l[DEFAULT_ROLE] || null;
 }
@@ -380,6 +382,12 @@ async function poolCall(env, payload, fetchImpl, graceMs = 15_000) {
 
 async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
   const rung = model.replace(/^zen-pool\//, '');
+  // Right after a cold start the runner is still settling — skip the pool for a cooldown window
+  // so a call doesn't land on a half-warmed worker.
+  const cooldown = await poolCooldown(env);
+  if (cooldown > 0) {
+    return { ok: false, error: `zen-pool: warming up (${Math.ceil(cooldown / 1000)}s left), try the next rung` };
+  }
   // Cold pool: boot a worker in the background and fail over NOW. Waiting here would burn the
   // caller's whole rung budget on a one-time ~10-13 s boot; the pool is warm for the next call.
   const boot = await poolBoot(env, { fetchImpl });

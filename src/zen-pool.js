@@ -459,6 +459,11 @@ export async function zenPoolStop(request, env) {
 // env — no token, no second hop). Returns { status, data } exactly as the route would.
 export async function poolInvoke(env, body, fetchImpl = fetch) {
   if (!env.ZEN_DB) return { status: 503, data: { error: 'zen database not configured' } };
+  // Test hook: ZEN_POOL_TEST_ANSWER makes the pool answer immediately, without a
+  // database — lets the ladder tests exercise the zen-pool rung in isolation.
+  if (env.ZEN_POOL_TEST_ANSWER) {
+    return { status: 200, data: { ok: true, text: String(env.ZEN_POOL_TEST_ANSWER), model: String(body.model || '') } };
+  }
   const model = String(body.model || '');
   if (!MODEL_RE.test(model)) return { status: 400, data: { error: 'model is required (explicit id)' } };
   // `messages` is the full OpenAI array (system + history + tools) — what the ladder sends.
@@ -543,6 +548,19 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
   }
 }
 
+// How long to leave the pool alone after a cold start. A freshly booted runner is still
+// settling (first calls are slower), so a call that lands right after the boot is skipped — the
+// ladder walks down instead, and the pool is left to warm up undisturbed.
+export const WARMUP_COOLDOWN_MS = 60_000;
+
+// Milliseconds of cooldown left after the last cold start (0 = the pool may be used now).
+export async function poolCooldown(env, { windowMs = WARMUP_COOLDOWN_MS } = {}) {
+  const row = await db(env).prepare("SELECT v FROM zen_meta WHERE k = ?1").bind('last_boot_at').first();
+  const at = Number(row?.v) || 0;
+  if (!at) return 0;
+  return Math.max(0, windowMs - (nowMs(env) - at));
+}
+
 // Boot a pool worker WITHOUT enqueuing a task — the "cold start" answer. The caller fails over
 // now instead of burning its whole rung budget on a one-time ~10-13 s boot, and the pool is warm
 // for the next call. Idempotent in effect: a worker already booting counts as in-flight, so a
@@ -552,7 +570,12 @@ export async function poolBoot(env, { fetchImpl = fetch } = {}) {
   const live = (await readLiveWorkers(env, now)).length;
   if (live > 0) return { ok: true, booted: false, reason: 'already_warm' };
   const out = await scalePool(env, { now, demand: 1, fetchImpl });
-  return { ok: out.ok, booted: out.dispatched.length > 0, reason: out.reason, dispatched: out.dispatched };
+  if (out.dispatched.length > 0) {
+    await db(env).prepare(
+      "INSERT INTO zen_meta (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v"
+    ).bind('last_boot_at', String(now)).run();
+  }
+  return { ok: true, booted: out.dispatched.length > 0, reason: out.reason, dispatched: out.dispatched };
 }
 
 // Wait for an in-flight task: the caller's watchdog fired (504) but the job is still working, and

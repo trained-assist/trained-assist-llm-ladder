@@ -7,7 +7,7 @@ import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
-  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS,
+  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, poolCooldown,
 } from '../src/zen-pool.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
@@ -685,4 +685,32 @@ test('a cold pool boots in the background and fails over immediately (no waiting
   assert.equal(gh.calls.length, 1, 'the cold call booted exactly one worker, then failed over');
   const poolAttempt = r.attempts.find((a) => a.model.startsWith('zen-pool/'));
   assert.match(poolAttempt.error, /cold pool/);
+});
+
+test('the pool is skipped for 60s after a cold start (cooldown)', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const gh = fakeGithub(204);
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'or_key' };
+  const origFetch = gh.fetchImpl;
+  gh.fetchImpl = async (url, init) => (String(url).includes('api.github.com')
+    ? origFetch(url, init)
+    : new Response(JSON.stringify({
+        id: 'x', object: 'chat.completion', created: 1, model: 'xiaomi/mimo-v2.6-flash',
+        choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'fallback' } }],
+        usage: { prompt_tokens: 2, completion_tokens: 1 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+  // First call: cold pool → boots one worker, fails over.
+  const r1 = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] },
+    { env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl });
+  assert.equal(r1.model, 'openrouter/xiaomi/mimo-v2.6-flash');
+  assert.equal(gh.calls.length, 1);
+
+  // Second call right after: the pool is in cooldown → skipped without even trying to boot.
+  const r2 = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] },
+    { env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl });
+  assert.equal(r2.model, 'openrouter/xiaomi/mimo-v2.6-flash');
+  assert.equal(gh.calls.length, 1, 'no second boot during the cooldown');
+  assert.match(r2.attempts.find((a) => a.model.startsWith('zen-pool/')).error, /warming up/);
 });
