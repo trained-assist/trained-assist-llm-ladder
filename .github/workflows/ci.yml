@@ -114,3 +114,15 @@ jobs:
             sleep 10
           done
           exit 1
+      - name: Verify public worker revision
+        env:
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          HEALTH=$(curl -fsS --max-time 10 https://llm-ladder.trainedassist.store/health)
+          ACTUAL_BUILD_SHA=$(printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=JSON.parse(s);if(typeof h.build!=="string"||!h.build)process.exitCode=2;else process.stdout.write(h.build)}catch{process.exitCode=2}})')
+          if [ "$ACTUAL_BUILD_SHA" != "$EXPECTED_BUILD_SHA" ]; then
+            echo "Public Ladder is serving $ACTUAL_BUILD_SHA; expected $EXPECTED_BUILD_SHA" >&2
+            exit 1
+          fi
+          echo "Public Ladder revision verified: $ACTUAL_BUILD_SHA"
