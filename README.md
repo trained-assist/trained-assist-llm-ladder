@@ -124,7 +124,7 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 | GET | `/v1/models` | ladders as model ids (`service`, `service:gate`, `vision`, …) |
 | GET | `/v1/state` | model health + key-rotation snapshot |
 | GET | `/v1/go-usage` | remaining Go allowance per pool key (rolling/weekly/monthly % + reset) |
-| GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, **per-sub-task (`apps`) cut**, failover depth, top errors |
+| GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, **per-sub-task (`apps`) cut** + `no_app` coverage, per-model latency/context percentiles + source split (`models`/`sources`), failover depth, top errors |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
 | GET | `/v1/free-models?provider=&available=0\|1` | the free-model inventory (D1 `free_models`) with context/price + last probe |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
@@ -135,13 +135,26 @@ Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (s
 
 OpenRouter attribution: send `x-ladder-app: <slug>` and `x-ladder-app-title` — the worker adds `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-App-Visibility` on `openrouter/*` rungs only.
 
-`x-ladder-app` is also **stored** on the trace row (migration `0004_app.sql`) and is the
+`x-ladder-app` is also **stored** on the trace row (migration `0005_app.sql`) and is the
 discriminator for the `apps` cut in `/v1/analytics`: it is the only thing that tells apart the
 ~20 service sub-tasks, since all of them post `model: "service"`. Send the concrete tool/task
 name (`gtd-intent`, `tg-format`, `session-summary`, `failure-classifier`, …) — the agent
-already sends it as its `source:` value, and the worker stores the same sanitised slug it
-sends to OpenRouter, so the two views can never disagree. Rows with no header are skipped by
-the cut; the ladder name stays the coarse view.
+already sends it as its `source:` value.
+
+A headerless call stores **`app = null`, never the router's own name** (#136). The two
+destinations want different answers for "no app", and conflating them made unattributed traffic
+file itself as the largest application in the cut:
+
+| | OpenRouter `HTTP-Referer` | `ladder_calls.app` |
+|---|---|---|
+| no header | `…/app/llm-ladder` — upstream needs a name, and there the request honestly *is* the generic proxy | `null` — no caller ever sends `llm-ladder`, so writing it here invents an application |
+| valid slug | `…/app/<slug>` | `<slug>` |
+| garbage | `…/app/llm-ladder` (never half-repaired, #33) | `null` |
+
+Both sides run the same regex, so a row and the OpenRouter view of one call can never name it
+differently — they differ only in the fallback. `/v1/analytics` reports the unattributed
+served calls as `no_app.calls` alongside the `apps` cut, so coverage stays visible instead of
+the block silently shrinking; the ladder name remains the coarse view for rows with no header.
 
 ---
 

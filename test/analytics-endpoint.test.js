@@ -7,7 +7,7 @@ const ENV = { LADDER_TOKEN: 't' };
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
 // canned rows for that statement — routed by SQL shape (agg / depth / errors), not
 // by call order, so the queries can be reordered or extended freely.
-function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], depthRows = [], errorRows = [], modelRows = [], sourceRows = [], fail = false } = {}) {
+function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], noAppRows = [], depthRows = [], errorRows = [], modelRows = [], sourceRows = [], fail = false } = {}) {
   const calls = [];
   return {
     _calls: calls,
@@ -21,6 +21,7 @@ function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], de
             if (sql.includes('json_each')) return { results: errorRows };
             if (sql.includes('AS hour')) return { results: hourlyRows };
             if (sql.includes('GROUP BY app, ladder, model')) return { results: appRows };
+            if (sql.includes('app IS NULL')) return { results: noAppRows };
             if (sql.includes('ROW_NUMBER()')) return { results: modelRows };
             if (sql.includes('instr(model')) return { results: sourceRows };
             if (sql.includes('GROUP BY ladder, model')) return { results: rungRows };
@@ -187,7 +188,7 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 8, 'all eight queries issued');
+  assert.equal(d1._calls.length, 9, 'all nine queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
@@ -200,12 +201,35 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   assert.match(d1._calls[3].sql, /GROUP BY app, ladder, model/, 'per-sub-task cut');
   assert.match(d1._calls[3].sql, /app IS NOT NULL/);
   assert.match(d1._calls[3].sql, /ok = 1/, 'only served calls are priced');
-  assert.match(d1._calls[4].sql, /json_array_length\(attempts\)/);
-  assert.match(d1._calls[4].sql, /json_valid\(attempts\)/);
-  assert.match(d1._calls[5].sql, /json_each\(ladder_calls\.attempts\)/);
-  assert.match(d1._calls[5].sql, /GROUP BY err/);
-  assert.match(d1._calls[6].sql, /ROW_NUMBER\(\) OVER \(PARTITION BY model/, 'model percentile cut');
-  assert.match(d1._calls[7].sql, /instr\(model, '\/'\)/, 'source-prefix cut');
+  assert.match(d1._calls[4].sql, /app IS NULL/, 'coverage count, not a grouped cut');
+  assert.match(d1._calls[4].sql, /COUNT\(\*\)/, 'one row, no GROUP BY');
+  assert.match(d1._calls[4].sql, /ok = 1/, 'counted over served calls, to match the apps cut it complements');
+  assert.match(d1._calls[5].sql, /json_array_length\(attempts\)/);
+  assert.match(d1._calls[5].sql, /json_valid\(attempts\)/);
+  assert.match(d1._calls[6].sql, /json_each\(ladder_calls\.attempts\)/);
+  assert.match(d1._calls[6].sql, /GROUP BY err/);
+  assert.match(d1._calls[7].sql, /ROW_NUMBER\(\) OVER \(PARTITION BY model/, 'model percentile cut');
+  assert.match(d1._calls[8].sql, /instr\(model, '\/'\)/, 'source-prefix cut');
+});
+
+test('GET /v1/analytics: no_app is reported alongside apps — coverage is visible (#136)', async () => {
+  // The bug this exists for: `llm-ladder` (sanitizeAppSlug's default) was written as an app name,
+  // so unattributed traffic outranked every real application and the block looked complete.
+  // With the placeholder gone those rows leave `apps`; without `no_app` the block would just look
+  // smaller, and "fewer callers" would be indistinguishable from "fewer callers admitting it".
+  const d1 = fakeD1({
+    appRows: [{ app: 'tg-format', ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 30, tin: 3000, tcached: 0, tout: 300 }],
+    noAppRows: [{ calls: 264 }],
+  });
+  const b = await (await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1')).json();
+  assert.equal(b.no_app.calls, 264);
+  assert.deepEqual(b.apps.map(a => a.app), ['tg-format'], 'the unattributed calls are NOT listed as an app');
+  assert.ok(!JSON.stringify(b.apps).includes('llm-ladder'), 'the router never appears as an application');
+});
+
+test('GET /v1/analytics: no D1 rows → no_app is 0, not NaN/undefined', async () => {
+  const b = await (await get({ ...ENV, LADDER_TRACE_DB: fakeD1() }, '?hours=1')).json();
+  assert.deepEqual(b.no_app, { calls: 0 });
 });
 
 test('GET /v1/analytics: empty window → zero totals, no ladders', async () => {

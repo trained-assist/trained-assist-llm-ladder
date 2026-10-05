@@ -2,7 +2,7 @@
 // `node --test` (the sandbox imports it), while src/index.js remains the Worker entry: it wraps this
 // handler and exports the LadderState Durable Object for the platform binding.
 
-import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
+import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
 import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
@@ -48,6 +48,13 @@ const ANALYTICS_APPS_SQL =
   + 'SUM(COALESCE(tokens_out, 0)) AS tout '
   + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND app IS NOT NULL '
   + 'GROUP BY app, ladder, model ORDER BY calls DESC';
+// Attribution coverage (#136): served calls that named no app. The apps cut skips these rows by
+// construction (`app IS NOT NULL`), so without this number the digest's application block would
+// quietly shrink the moment the 'llm-ladder' placeholder stopped being written — the reader could
+// not tell "fewer callers" from "fewer callers admitting themselves". Counted over ok = 1 to
+// match the cut: a failed call is not traffic anyone needs attributed.
+const ANALYTICS_NO_APP_SQL =
+  'SELECT COUNT(*) AS calls FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND app IS NULL';
 // Raw error counts (top 100 by frequency, same as scripts/analytics.py). Grouping is on
 // the RAW string — digit variants ('can only afford 499' / '776') are merged by
 // normalizeError() below, mirroring analytics.py normalize_error.
@@ -466,6 +473,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const rungRows = (await db.prepare(ANALYTICS_RUNGS_SQL).bind(since).all()).results || [];
       const hourlyRows = (await db.prepare(ANALYTICS_HOURLY_SQL).bind(since).all()).results || [];
       const appRows = (await db.prepare(ANALYTICS_APPS_SQL).bind(since).all()).results || [];
+      const noAppRows = (await db.prepare(ANALYTICS_NO_APP_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
       const modelRows = (await db.prepare(ANALYTICS_MODELS_SQL).bind(since).all()).results || [];
@@ -575,6 +583,9 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         a.cost_usd = a.rungs.reduce((s, r) => s + (r.cost_usd || 0), 0);
       }
       const apps = [...appsByName.values()].sort((a, b) => b.cost_usd - a.cost_usd || b.calls - a.calls);
+      // Coverage, not a cut: served calls with no app, same window as `apps`. Without it the
+      // application block would read as complete while quietly covering half the traffic (#136).
+      const noApp = num(noAppRows[0] && noAppRows[0].calls);
       // Per-model distribution cut: latency p50/p95 + prompt-size p20/p50/p80, with the source
       // split as call shares. `with_usage` matters to the reader, not just to the maths — a
       // model whose percentiles rest on a third of its calls says so rather than implying
@@ -601,7 +612,7 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       }));
       return json(200, {
         hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out,
-        hourly, apps, models, sources, errors,
+        hourly, apps, no_app: { calls: noApp }, models, sources, errors,
       });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
@@ -625,7 +636,8 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     // OpenRouter app attribution (#33): which of our tools eats this call, for the OpenRouter
     // "Application" analytics cut. Both values are sanitised here (slug → [a-z0-9-]{1,64},
     // default 'llm-ladder') so the ladder itself only ever sees clean values.
-    const appSlug = sanitizeAppSlug(request.headers.get('x-ladder-app'));
+    const appRaw = request.headers.get('x-ladder-app');
+    const appSlug = sanitizeAppSlug(appRaw);
     const appTitle = sanitizeAppTitle(request.headers.get('x-ladder-app-title'));
     const started = Date.now();
     const r = await run(chat, {
@@ -640,9 +652,16 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
     const trace = makeTrace(request);
-    // The D1 row must carry the SAME slug as the OpenRouter "Application" cut (#107) — take the
-    // sanitised value, not the raw header, so the two views of one call can never disagree.
-    trace.app = appSlug;
+    // The D1 row carries the SAME slug as the OpenRouter "Application" cut (#107) — the sanitised
+    // value, not the raw header, so the two views of one call can never disagree.
+    //
+    // …but only when there WAS a slug to sanitise (#136). appSlug's 'llm-ladder' default is the
+    // right name upstream and the wrong name here: no caller ever sends that slug (it comes from
+    // our own constant), so writing it into `app` let the router's own unattributed traffic —
+    // calls with no x-ladder-app at all — file itself as the biggest "application" in the cut.
+    // Null keeps "unknown caller" unknown; /v1/analytics reports those rows as `no_app` so the
+    // coverage is visible instead of silently missing.
+    trace.app = sanitizeAppSlugOrNull(appRaw);
     // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
     console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
     await logCall(env, trace, chat.model, r, started);
