@@ -94,6 +94,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "classify": [
+        "opencode-go/mimo-v2.6-flash",
         "opencode-go/space-bunny-free",
         "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
