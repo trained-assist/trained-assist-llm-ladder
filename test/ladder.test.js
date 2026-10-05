@@ -26,6 +26,22 @@ function fakeFetch(behaviour, calls) {
 }
 const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 
+test('service:classify uses the established Go JSON rung and keeps the service fallback chain', async () => {
+  const classify = rungsFor(config, 'service:classify');
+  assert.equal(classify[0], 'opencode-go/mimo-v2.6-flash');
+  assert.deepEqual(classify, rungsFor(config, 'service:summarize'));
+  const calls = [];
+  const r = await run({ ...msg, model: 'service:classify', response_format: { type: 'json_object' } }, {
+    env, config, store: memoryStore(2), fetchImpl: fakeFetch({
+      'mimo-v2.6-flash': () => ({ status: 200, content: '{"stages":[]}' }),
+    }, calls),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, classify[0]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body.response_format, { type: 'json_object' });
+});
+
 // Floor/diag assertions are pinned to EXPLICIT rung ids — never to LADDER[0]: #39 reordered the
 // real service ladder (space-bunny-free first) and that alone turned the previous version of
 // these tests red (#40 → CI fail), and #67 reordered it again (mimo first). DIAG_REASONING is
