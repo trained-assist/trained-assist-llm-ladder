@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { poolInvoke, poolWaitForTask } from './zen-pool.js';
+import { poolInvoke, poolWaitForTask, poolBoot } from './zen-pool.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -380,6 +380,12 @@ async function poolCall(env, payload, fetchImpl, graceMs = 15_000) {
 
 async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
   const rung = model.replace(/^zen-pool\//, '');
+  // Cold pool: boot a worker in the background and fail over NOW. Waiting here would burn the
+  // caller's whole rung budget on a one-time ~10-13 s boot; the pool is warm for the next call.
+  const boot = await poolBoot(env, { fetchImpl });
+  if (boot.booted) {
+    return { ok: false, error: `zen-pool: cold pool — booting (${boot.reason}), try the next rung` };
+  }
   const payload = {
     model: rung,
     messages: body.messages,

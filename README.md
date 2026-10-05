@@ -295,6 +295,12 @@ The ladder turns a 200 into a normal OpenAI completion, or a synthesised SSE str
 asked to stream. A pool error message deliberately contains no `429`/`503` digits, so the error
 classifier reads it as a short transient backoff instead of a long quota skip.
 
+**Tools are slimmed before they leave the worker.** The opencode agent ships a ~240 KB tool set;
+zen answers `200` with an *empty* body to anything much past a few tens of KB of tools. The worker
+therefore truncates every tool's `description` (and each parameter's) to 240 characters before
+calling zen — the schema is what the model matches on, the prose is not needed. That takes the set
+from ~241 KB to ~40 KB.
+
 ### Idle = no GitHub Actions
 
 Nothing runs while there is no work. A worker exits itself after `idle_exit_ms` (default 10 min)

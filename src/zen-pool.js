@@ -543,6 +543,18 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
   }
 }
 
+// Boot a pool worker WITHOUT enqueuing a task — the "cold start" answer. The caller fails over
+// now instead of burning its whole rung budget on a one-time ~10-13 s boot, and the pool is warm
+// for the next call. Idempotent in effect: a worker already booting counts as in-flight, so a
+// second cold call inside the boot window dispatches nothing.
+export async function poolBoot(env, { fetchImpl = fetch } = {}) {
+  const now = nowMs(env);
+  const live = (await readLiveWorkers(env, now)).length;
+  if (live > 0) return { ok: true, booted: false, reason: 'already_warm' };
+  const out = await scalePool(env, { now, demand: 1, fetchImpl });
+  return { ok: out.ok, booted: out.dispatched.length > 0, reason: out.reason, dispatched: out.dispatched };
+}
+
 // Wait for an in-flight task: the caller's watchdog fired (504) but the job is still working, and
 // the answer lands in the same row. Polling it is the honest "retry" — starting a second task for
 // the same request would spend the pool's budget twice.
