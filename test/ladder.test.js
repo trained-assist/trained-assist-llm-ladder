@@ -106,12 +106,15 @@ test('config: free = 8 $0 rungs + zen tail (#42)', () => {
   assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
 });
 
-test('config: no aliases — every ladder name is canonical (refactor 2026-10-03)', () => {
-  assert.deepEqual(config.aliases, {}, 'aliases removed: one name, one ladder');
-  for (const gone of ['deepseek', 'cheap', 'free-ladder', 'conversations', 'picture', 'picture advanced', 'free_100percent']) {
+test('config: aliases — only the legacy deepseek alias remains, resolving to build', () => {
+  // One name, one ladder — but the legacy `deepseek` name still reaches stored opencode
+  // profiles, so it resolves on READ to the build ladder (owner 2026-10-05).
+  assert.deepEqual(config.aliases, { deepseek: 'build' });
+  for (const gone of ['cheap', 'free-ladder', 'conversations', 'picture', 'picture advanced', 'free_100percent']) {
     assert.equal(config.ladders[gone], undefined, `${gone} is not a ladder`);
     assert.equal(rungsFor(config, gone), null, `${gone} must NOT resolve`);
   }
+  assert.deepEqual(rungsFor(config, 'deepseek'), config.ladders.build.build, 'deepseek resolves to build');
   for (const keep of ['service', 'conversation', 'vision', 'vision advanced', 'free', 'build', 'build advanced', 'plan', 'explore', 'general', 'review', 'doctor', 'research']) {
     assert.ok(config.ladders[keep], `${keep} exists`);
   }
@@ -557,9 +560,9 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   // The zen pool opens every interactive ladder (owner 2026-10-04): one fast free model, one
   // attempt, then the ladder rides down. `build` carries a second pool rung as its fallback.
   const ZEN = 'zen-pool/mimo-v2.6-flash-free';
-  const zenHead = [ZEN];
+  const zenHead = ['zen-pool/mimo-v2.6-flash-free', 'zen-pool/nemotron-3-ultra-free'];
 
-  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool + base free ×3 + платный хвост, без mimo');
+  assert.deepEqual(config.ladders.build.build, [...zenHead, ...base, ...paid], 'build = zen pool ×2 + base free ×3 + платный хвост, без mimo');
   assert.deepEqual(config.ladders['build advanced'].build, [ZEN, ...advanced], 'build advanced = zen pool + mimo + платный хвост');
   for (const role of ['plan', 'general', 'review']) {
     assert.deepEqual(config.ladders[role], { build: [ZEN, ...advanced] }, `${role} advanced-first — роль=лестница (#71)`);
@@ -593,7 +596,9 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.ok(!f100.some(m => m.startsWith('openrouter/') && !m.endsWith(':free')), 'no paid rung');
 
   assert.ok(!JSON.stringify(config.ladders.build).includes('opencode-zen/'), 'zen stays out (#42)');
-  assert.ok(!JSON.stringify(config.ladders.build).includes('nemotron-3-ultra'), 'ultra:free is flaky — not in build base');
+  // nemotron-3-ultra-free is in build as the owner's second zen rung (after mimo) — it is a
+  // fallback, not the head, so a flake there costs one hop, not the conversation.
+  assert.ok(config.ladders.build.build.includes('zen-pool/nemotron-3-ultra-free'), 'ultra:free is the second zen rung in build');
   // контракт #67 не тронут
   assert.equal(config.ladders.service.build[0], 'opencode-go/mimo-v2.6-flash', 'service stays Pareto-first');
 });
