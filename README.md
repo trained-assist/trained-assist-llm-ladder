@@ -39,11 +39,12 @@ classifiers, summaries, routing. It has **no role suffix by default** — caller
 `{"model": "service"}`.
 
 Roles (opt in with `"model": "service:<role>"`) split by what the call *is*, so each can be
-benchmarked and priced separately:
+benchmarked and priced separately. Every role now opens with the **same zen-pool pair**; what differs
+is the tail *behind* it:
 
-| role | for | policy |
+| role | for | tail behind the zen-pool pair |
 |---|---|---|
-| `build` (default) | generic service call | Pareto-first: mimo → free ×8 → zen ×4 → paid tail |
+| `build` (default) | generic service call | mimo → free ×8 → zen ×4 → paid tail |
 | `classify` | classify, failure-classifier, plan-detect, menu-detect, gtd-intent | free-first (short, cheap) |
 | `summarize` | session-summary, session-digest | mimo → free |
 | `format` | tg-format, content-rewrite, answer-glyph-guard | free-first (mechanical) |
@@ -55,16 +56,16 @@ benchmarked and priced separately:
 
 ### 2. Role ladders (interactive agent work)
 
-Each role is its own ladder. `explore` is big-context (≥1M on every rung); the rest are
-advanced-first (mimo → paid tail).
+Each role is its own ladder. Every text ladder opens with the **zen pool pair**
+(`nemotron-3-ultra-free` → `mimo-v2.6-flash-free`); `explore` is big-context (≥1M on every rung).
 
 | ladder | shape |
 |---|---|
-| `build` | **zen pool ×2** (`mimo-v2.6-flash-free` → `nemotron-3.5-lightning-free`) → space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
-| `build advanced` | mimo → paid tail |
-| `plan` / `general` / `review` | mimo → paid tail |
-| `explore` | mimo (1M) → gemini-2.5-flash-lite (1048576) → xiaomi/mimo (1050000) — contexts measured on OpenRouter 2026-10-02 |
-| `vision` / `vision advanced` | gemini stack for multimodal image+text |
+| `build` | **zen pool ×2** → space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
+| `build advanced` | **zen pool ×2** → mimo → paid tail |
+| `plan` / `general` / `review` | **zen pool ×2** → mimo → paid tail |
+| `explore` | **zen pool ×2** → mimo (1M) → gemini-2.5-flash-lite (1048576) → xiaomi/mimo (1050000) — contexts measured on OpenRouter 2026-10-02 |
+| `vision` / `vision advanced` | gemini stack for multimodal image+text — **no zen-pool**: a text-only call cannot serve an image |
 
 There is **no escalation between levels**: a ladder retries down its own rungs; moving
 `build` → `build advanced` is the caller's call (an opencode profile, `ladder_rung`).
@@ -236,7 +237,8 @@ read it only inside the script, never echo it into a prompt or a file in the rep
   guard.
 - Zen free rungs live in the `free` tail only — never ahead of a working free rung. The one
   exception is `zen-pool/*`: it is a route, not a price (the models are $0), and the owner put it
-  at the head of `build` on 2026-10-04.
+  at the head of every text ladder on 2026-10-05. `vision` / `vision advanced` stay gemini — they
+  answer image+text and a text-only call cannot serve them.
 
 ---
 
@@ -255,6 +257,35 @@ fingerprint the relay uses, and the answer comes back as `tool_calls` / `usage` 
 
 `ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
 `/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
+
+### How a call actually resolves
+
+```
+zen-pool rung
+  ├─ cooldown?     → skip now (a cold pool is still settling)
+  ├─ no workers?   → boot one, fail over immediately (do not wait ~13 s for it)
+  ├─ queue ≥ cap?  → 503 pool_backlog, task NOT queued, no quota spent  ← #138
+  └─ otherwise     → enqueue, wait for the answer, return text + tool_calls + usage
+```
+
+Three budget rules make the cap survive, and each one has a test pinning it:
+
+1. **The daily cap is the scarce thing.** 500 requests/day per (repo, model) *and* provider-wide.
+   A saturated queue is what actually spends it: work admitted when the pool is behind gets served by
+   a worker and burns quota on an answer whose caller already failed over.
+2. **So the pool refuses at the door.** Over `BACKLOG_FACTOR × live workers` queued,
+   `poolInvoke` returns `503 pool_backlog` **before** the task row exists — no row, no budget bump,
+   nothing to serve. The ladder walks down in ~0 s (measured: 1.45 s end-to-end on a saturated pool,
+   versus 70 s when the caller waited out its watchdog).
+3. **An admitted task is always carried to an answer.** There is no cancellation path, and workers
+   never refuse work: a task that entered the queue is work someone is waiting for.
+
+A cold pool (`live = 0`) still admits **one** task, otherwise it could never start. The cooldown
+after a boot is `WARMUP_COOLDOWN_MS`, and `BACKLOG_FACTOR` / `WARMUP_COOLDOWN_MS` live at the top
+of `src/zen-pool.js` — the two knobs that decide how greedy the pool is allowed to be.
+
+Ladders that start with the pair: every text ladder. `vision` / `vision advanced` are the deliberate
+exception — they answer image+text and a text-only call cannot serve them.
 
 ### The contract (frozen — do not rework)
 

@@ -852,3 +852,36 @@ test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forward
   assert.equal(seen[2].headers['HTTP-Referer'], `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`, 'no header → default slug');
   assert.equal(seen[2].headers['X-OpenRouter-App-Visibility'], 'hidden');
 });
+
+// The zen-pool head is the owner's deliberate economics, not an implementation detail: two free zen
+// models ahead of every paid rung on every text ladder. A rename or a reordering here silently sends
+// traffic back to the paid tail, so the exact shape is pinned rather than derived.
+test('CONFIG CONTRACT: the zen-pool head is nemotron-3-ultra-free → mimo-2.6-flash-free, everywhere it fits', () => {
+  const ZEN_HEAD = ['zen-pool/nemotron-3-ultra-free', 'zen-pool/mimo-v2.6-flash-free'];
+
+  // Every text ladder opens with the pair. vision* is the one deliberate exception: it answers
+  // image+text and zen-pool is a text-only call — it would fail every request there.
+  for (const [name, roles] of Object.entries(config.ladders)) {
+    for (const [role, rungs] of Object.entries(roles)) {
+      if (name.startsWith('vision')) {
+        assert.ok(!rungs.some((m) => m.startsWith('zen-pool/')), `${name}/${role}: vision needs multimodal`);
+        continue;
+      }
+      assert.deepEqual(rungs.slice(0, 2), ZEN_HEAD, `${name}/${role} must open with the zen-pool pair`);
+    }
+  }
+
+  // The pair is the ONLY head: no paid rung may precede it, or the free tier is decorative.
+  for (const [name, roles] of Object.entries(config.ladders)) {
+    if (name.startsWith('vision')) continue;
+    const firstPaid = roles.build.findIndex((m) => m.startsWith('openrouter/') && !m.endsWith(':free'));
+    if (firstPaid !== -1) assert.ok(firstPaid >= 2, `${name}: a paid rung sits ahead of the free head`);
+  }
+
+  // The deepseek alias exists because stored opencode profiles still send it. It resolves to the
+  // build ladder (which now opens with zen-pool), NOT to `service` — a wrong target here would
+  // silently move historical traffic onto a different rung order.
+  assert.deepEqual(config.aliases, { deepseek: 'build' });
+  assert.deepEqual(rungsFor(config, 'deepseek'), config.ladders.build.build);
+  assert.deepEqual(rungsFor(config, 'deepseek:build'), config.ladders.build.build);
+});

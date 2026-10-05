@@ -754,3 +754,37 @@ test('a cold pool (no workers) still admits one task — otherwise it could neve
   assert.equal(d1._tasks.size, 1);
   assert.ok([...d1._budget.values()].length > 0, 'quota counted for the admitted task');
 });
+
+// The 70-second incident: the ladder sat on a saturated pool until its watchdog expired, then
+// failed over — burning the caller's whole rung budget for nothing. A saturated pool must be
+// detected on the way IN, so the ladder walks down immediately.
+test('a saturated pool fails the caller over at once instead of holding it for the watchdog', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  await zenPoolRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);
+  // fill past the cap (2 × 1 live worker)
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+  d1._tasks.set('q2', { id: 'q2', model: 'm', state: 'queued', enqueued_at: NOW - 4 });
+  d1._tasks.set('q3', { id: 'q3', model: 'm', state: 'queued', enqueued_at: NOW - 3 });
+
+  const started = Date.now();
+  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
+    env: env2, config: cfg, store: memoryStore(1),
+    fetchImpl: async () => ({
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { content: 'from openrouter' } }] }),
+      text: async () => '',
+    }),
+  });
+  const elapsed = Date.now() - started;
+
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash', 'the caller walks down to the next rung');
+  assert.ok(elapsed < 5_000, `must not hold the caller for the watchdog (took ${elapsed}ms)`);
+  const poolAttempt = r.attempts.find((a) => a.model.startsWith('zen-pool/'));
+  assert.match(poolAttempt.error, /pool_backlog/, 'and must say why, without a status-code digit');
+  assert.equal(d1._tasks.size, 3, 'the refused task was never queued');
+});
