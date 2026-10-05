@@ -395,7 +395,7 @@ test('totalTimeoutMs stops walking the ladder', async () => {
 });
 
 test('state: per-model exponential backoff restarts for every model; key rotation + snapshot heal', () => {
-  assert.deepEqual([1, 2, 3, 4, 10].map(n => backoffFor(n)), [15000, 30000, 60000, 120000, 300000]);
+  assert.deepEqual([1, 2, 3, 4, 10].map(n => backoffFor(n)), [2000, 4000, 8000, 16000, 300000]);
   const st = emptyState();
   assert.deepEqual(rotateKey(st, 2, 1000, 0), { rotated: true, fromIndex: 0, toIndex: 1 });
   const r = rotateKey(st, 2, 1000, 10);

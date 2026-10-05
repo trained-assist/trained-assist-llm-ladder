@@ -8,10 +8,11 @@
 //   }
 //
 // Backoff mirrors trained-assist-agent's model-health.js: transient failures skip a model for
-// base × multiplier^(n-1) (15s → 30s → 60s … cap 5 min) — counted PER MODEL, so every rung starts
-// its own 15s-first schedule; failures older than the window stop counting.
-
-export const DEFAULT_BACKOFF = Object.freeze({ baseMs: 15000, multiplier: 2, capMs: 300000, failureWindowMs: 900000 });
+// base × multiplier^(n-1) — counted PER MODEL, so every rung starts its own schedule; failures
+// older than the window stop counting. The base is 2 s on purpose (owner 2026-10-05): a flake
+// clears in one hop instead of costing 15 s of a conversation, and consecutive failures still
+// back off (2 → 4 → 8 → 16 → 32 → 64 → 128 → 256, cap 5 min) so a dead rung stays quiet.
+export const DEFAULT_BACKOFF = Object.freeze({ baseMs: 2000, multiplier: 2, capMs: 300000, failureWindowMs: 900000 });
 
 export function emptyState() {
   return { health: {}, keys: { active: 0, exhausted: {} }, pins: {} };

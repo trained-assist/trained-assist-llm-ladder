@@ -1,7 +1,7 @@
 {
   "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via relay, zen-pool/* = zen free tier in-process via the pool (same worker, no token). NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling).",
   "backoff": {
-    "baseMs": 15000,
+    "baseMs": 2000,
     "multiplier": 2,
     "capMs": 300000,
     "failureWindowMs": 900000
