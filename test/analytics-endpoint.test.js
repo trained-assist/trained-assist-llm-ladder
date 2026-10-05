@@ -7,7 +7,7 @@ const ENV = { LADDER_TOKEN: 't' };
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
 // canned rows for that statement — routed by SQL shape (agg / depth / errors), not
 // by call order, so the queries can be reordered or extended freely.
-function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], depthRows = [], errorRows = [], fail = false } = {}) {
+function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], depthRows = [], errorRows = [], modelRows = [], sourceRows = [], fail = false } = {}) {
   const calls = [];
   return {
     _calls: calls,
@@ -21,6 +21,8 @@ function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], de
             if (sql.includes('json_each')) return { results: errorRows };
             if (sql.includes('AS hour')) return { results: hourlyRows };
             if (sql.includes('GROUP BY app, ladder, model')) return { results: appRows };
+            if (sql.includes('ROW_NUMBER()')) return { results: modelRows };
+            if (sql.includes('instr(model')) return { results: sourceRows };
             if (sql.includes('GROUP BY ladder, model')) return { results: rungRows };
             return { results: aggRows };
           } };
@@ -185,7 +187,7 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 6, 'all six queries issued');
+  assert.equal(d1._calls.length, 8, 'all eight queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
@@ -202,6 +204,8 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   assert.match(d1._calls[4].sql, /json_valid\(attempts\)/);
   assert.match(d1._calls[5].sql, /json_each\(ladder_calls\.attempts\)/);
   assert.match(d1._calls[5].sql, /GROUP BY err/);
+  assert.match(d1._calls[6].sql, /ROW_NUMBER\(\) OVER \(PARTITION BY model/, 'model percentile cut');
+  assert.match(d1._calls[7].sql, /instr\(model, '\/'\)/, 'source-prefix cut');
 });
 
 test('GET /v1/analytics: empty window → zero totals, no ladders', async () => {
@@ -212,6 +216,8 @@ test('GET /v1/analytics: empty window → zero totals, no ladders', async () => 
   assert.deepEqual(b.ladders, []);
   assert.deepEqual(b.hourly, []);
   assert.deepEqual(b.apps, []);
+  assert.deepEqual(b.models, []);
+  assert.deepEqual(b.sources, []);
 });
 
 test('GET /v1/analytics: no D1 binding → 503; D1 failure → 500 (never throws out of handle)', async () => {
@@ -232,12 +238,65 @@ test('GET /v1/analytics: SUM/COUNT arrive as strings from SQLite — coerced to 
   const d1 = fakeD1({
     aggRows: [{ ladder: 'service', calls: '10', failed: '2', tin: '1000', tout: '50', no_usage: '0' }],
     depthRows: [{ ladder: 'service', depth: '1', calls: '10' }],
+    modelRows: [{ model: 'opencode-go/mimo-v2.6-flash', calls: '10', with_usage: '6', ms_p50: '900', ms_p95: '4200', tin_p20: '300', tin_p50: '900', tin_p80: '2600' }],
+    sourceRows: [{ source: 'opencode-go', calls: '10' }],
   });
   const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
   const b = await r.json();
   assert.equal(b.totals.calls, 10);
   assert.equal(b.totals.tokens_in, 1000);
   assert.deepEqual(b.ladders[0].depth, [{ depth: 1, calls: 10 }]);
+  assert.equal(b.models[0].calls, 10);
+  assert.equal(b.models[0].with_usage, 6);
+  assert.equal(b.models[0].ms_p50, 900);
+  assert.equal(b.models[0].tin_p80, 2600);
+  assert.equal(b.sources[0].calls, 10);
+});
+
+test('GET /v1/analytics: models carry percentiles + category; a NULL percentile stays null', async () => {
+  const d1 = fakeD1({
+    modelRows: [
+      { model: 'opencode-go/space-bunny-free', calls: 18328, with_usage: 11282, ms_p50: 3339, ms_p95: 16082, tin_p20: 342, tin_p50: 2657, tin_p80: 2673 },
+      // A model whose every call was a stream: tokens_in NULL everywhere → no context
+      // percentile at all. It must read as "no data", not as 0 — the digest prints 0 otherwise.
+      { model: 'openrouter/some-model:free', calls: 12, with_usage: 0, ms_p50: 900, ms_p95: 4000, tin_p20: null, tin_p50: null, tin_p80: null },
+    ],
+  });
+  const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
+  const b = await r.json();
+  assert.equal(b.models.length, 2);
+  assert.equal(b.models[0].model, 'opencode-go/space-bunny-free');
+  assert.equal(b.models[0].category, 'go_free', '-free suffix under opencode-go/');
+  assert.equal(b.models[0].ms_p95, 16082);
+  assert.equal(b.models[1].tin_p50, null, 'all-stream model → null context percentile, not 0');
+  assert.equal(b.models[1].ms_p50, 900, 'latency still present without usage');
+});
+
+test('GET /v1/analytics: sources carry call share over the whole window', async () => {
+  const d1 = fakeD1({
+    sourceRows: [
+      { source: 'opencode-go', calls: 28686 },
+      { source: 'openrouter', calls: 1436 },
+      { source: 'opencode-zen', calls: 1396 },
+      { source: 'zen-pool', calls: 157 },
+    ],
+  });
+  const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
+  const b = await r.json();
+  assert.deepEqual(b.sources.map(s => s.source), ['opencode-go', 'openrouter', 'opencode-zen', 'zen-pool']);
+  const total = b.sources.reduce((s, x) => s + x.calls, 0);
+  assert.equal(total, 31675);
+  // Shares must sum to ~100 — a reporter can print the row as-is.
+  const pctSum = b.sources.reduce((s, x) => s + x.pct, 0);
+  assert.ok(Math.abs(pctSum - 100) < 0.5, `pct sums to ${pctSum}`);
+  assert.ok(b.sources[0].pct > 90 && b.sources[0].pct < 91, `head source share ${b.sources[0].pct}`);
+});
+
+test('GET /v1/analytics: sources empty → no division by zero', async () => {
+  const r = await get({ ...ENV, LADDER_TRACE_DB: fakeD1() }, '?hours=1');
+  const b = await r.json();
+  assert.deepEqual(b.sources, []);
+  assert.deepEqual(b.models, []);
 });
 
 test('GET /v1/analytics: errors — digit variants merged, re-sorted, capped at 20', async () => {

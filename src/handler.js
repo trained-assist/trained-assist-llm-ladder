@@ -59,6 +59,51 @@ const ANALYTICS_ERRORS_SQL =
   + 'AND json_valid(ladder_calls.attempts) '
   + 'GROUP BY err ORDER BY n DESC LIMIT 100';
 
+// Per-model latency + context percentiles. The digest's "top models" block (owner request
+// 2026-10-05): mean latency hides the tail, so the block needs the distribution's shape —
+// p50/p95 of ms and p20/p50/p80 of the prompt size actually sent.
+//
+// SQLite has no percentile() and D1 has no extension to add one, so the percentile is picked
+// by rank: ROW_NUMBER() over each model's rows ordered by the metric, then the outer
+// MAX(CASE …) keeps the value at the nearest-rank index ceil(p·n). Nearest-rank (not
+// interpolation) because a percentile here is an OBSERVED call, not a synthetic one —
+// "the 95th-percentile call took 16.1s" should name a call that really happened.
+//
+// Two rank tracks, two denominators:
+//   · ms     — every ok call, `n` = all calls of the model. Latency exists for streams too.
+//   · tokens_in — only calls that carried usage. Stream rows log NULL (#22), so ranking them
+//     would put 40% of the model at the bottom of the prompt-size distribution and make p20
+//     read like "tiny prompts". Hence the explicit `(tokens_in IS NULL)` sort key to push
+//     NULLs past the real values, and `n_tin` = COUNT(tokens_in) as the denominator.
+//     `with_usage` ships alongside so the reporter can say how much of the model it saw.
+const pct = (p, nCol) =>
+  `MAX(1, MIN(${nCol}, CAST(${p} * ${nCol} AS INTEGER) + CASE WHEN ${p} * ${nCol} > CAST(${p} * ${nCol} AS INTEGER) THEN 1 ELSE 0 END))`;
+const ANALYTICS_MODELS_SQL =
+  'WITH ranked AS (SELECT model, ms, tokens_in, '
+  + 'ROW_NUMBER() OVER (PARTITION BY model ORDER BY ms) AS rms, '
+  + 'COUNT(*) OVER (PARTITION BY model) AS n, '
+  + 'ROW_NUMBER() OVER (PARTITION BY model ORDER BY (tokens_in IS NULL), tokens_in) AS rtin, '
+  + 'COUNT(tokens_in) OVER (PARTITION BY model) AS n_tin '
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND model IS NOT NULL) '
+  + 'SELECT model, COUNT(*) AS calls, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL THEN 1 ELSE 0 END) AS with_usage, '
+  + `MAX(CASE WHEN rms = ${pct(0.5, 'n')} THEN ms END) AS ms_p50, `
+  + `MAX(CASE WHEN rms = ${pct(0.95, 'n')} THEN ms END) AS ms_p95, `
+  + `MAX(CASE WHEN rtin = ${pct(0.2, 'n_tin')} THEN tokens_in END) AS tin_p20, `
+  + `MAX(CASE WHEN rtin = ${pct(0.5, 'n_tin')} THEN tokens_in END) AS tin_p50, `
+  + `MAX(CASE WHEN rtin = ${pct(0.8, 'n_tin')} THEN tokens_in END) AS tin_p80 `
+  + 'FROM ranked GROUP BY model ORDER BY calls DESC LIMIT 12';
+
+// Same models, but only the upstream prefix (the text before the first `/`) and the call
+// share — the "разбивка по источникам" line of the digest's top-models block. A separate
+// query rather than a rollup of ANALYTICS_MODELS_SQL: that one is LIMIT 12, so folding it
+// would silently price the source split on the head of the distribution only.
+const ANALYTICS_SOURCES_SQL =
+  "SELECT CASE WHEN instr(model, '/') > 0 THEN substr(model, 1, instr(model, '/') - 1) "
+  + "ELSE '(без префикса)' END AS source, COUNT(*) AS calls "
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND model IS NOT NULL '
+  + 'GROUP BY source ORDER BY calls DESC LIMIT 8';
+
 // Port of analytics.py normalize_error: keep the 'HTTP <status>:' head, mask digits in
 // the payload so one failure with varying counts stays one bucket; cap at 160 chars.
 // Truncation gets an ellipsis — without it the digest shows a raw mid-JSON cut
@@ -423,6 +468,8 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
       const appRows = (await db.prepare(ANALYTICS_APPS_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
+      const modelRows = (await db.prepare(ANALYTICS_MODELS_SQL).bind(since).all()).results || [];
+      const sourceRows = (await db.prepare(ANALYTICS_SOURCES_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
       // Canonical ladder names only (no aliases since 2026-10-03). The default role
       // 'X:build' collapses to 'X'; non-default roles (:review, :explore) stay separate.
@@ -528,7 +575,34 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
         a.cost_usd = a.rungs.reduce((s, r) => s + (r.cost_usd || 0), 0);
       }
       const apps = [...appsByName.values()].sort((a, b) => b.cost_usd - a.cost_usd || b.calls - a.calls);
-      return json(200, { hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out, hourly, apps, errors });
+      // Per-model distribution cut: latency p50/p95 + prompt-size p20/p50/p80, with the source
+      // split as call shares. `with_usage` matters to the reader, not just to the maths — a
+      // model whose percentiles rest on a third of its calls says so rather than implying
+      // the numbers cover the whole model.
+      const models = modelRows.map((r) => ({
+        model: r.model,
+        category: categoryOf(r.model),
+        calls: num(r.calls),
+        with_usage: num(r.with_usage),
+        ms_p50: r.ms_p50 === null ? null : num(r.ms_p50),
+        ms_p95: r.ms_p95 === null ? null : num(r.ms_p95),
+        tin_p20: r.tin_p20 === null ? null : num(r.tin_p20),
+        tin_p50: r.tin_p50 === null ? null : num(r.tin_p50),
+        tin_p80: r.tin_p80 === null ? null : num(r.tin_p80),
+      }));
+      // Source shares are computed against ALL ok calls in the window, not the sum of the
+      // returned rows: ANALYTICS_SOURCES_SQL is its own aggregate, so a tail source still
+      // shows its true share instead of being normalised against the head.
+      const sourceCalls = sourceRows.reduce((s, r) => s + num(r.calls), 0);
+      const sources = sourceRows.map((r) => ({
+        source: r.source,
+        calls: num(r.calls),
+        pct: sourceCalls ? +(num(r.calls) / sourceCalls * 100).toFixed(1) : 0,
+      }));
+      return json(200, {
+        hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out,
+        hourly, apps, models, sources, errors,
+      });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
     }
