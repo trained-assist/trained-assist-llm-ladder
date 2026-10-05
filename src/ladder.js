@@ -103,6 +103,24 @@ export function sanitizeAppSlug(raw) {
   return SLUG_RE.test(s) ? s : DEFAULT_APP_SLUG;
 }
 
+// The same rule, but "no app" stays a VALUE instead of becoming a name (#136).
+//
+// sanitizeAppSlug's default is right for the OpenRouter headers (#33): HTTP-Referer must name
+// something, so a caller with no `x-ladder-app` is honestly the generic proxy — 'llm-ladder' IS
+// what that request is upstream. It is the wrong value for the D1 attribution column: there
+// DEFAULT_APP_SLUG is written as if a tool had claimed it, and no caller ever does (the slug comes
+// from our own constant), so the apps cut cannot tell "unknown caller" from a real app and the
+// router's own traffic outranks every real one — 264 of 466 attributed calls in the first hour
+// after the column landed (2026-10-05).
+//
+// Same regex on purpose: the two must agree on WHICH strings are slugs, so a D1 row and the
+// OpenRouter view of one call can never name it differently. They differ only in what happens
+// when the answer is "not a slug".
+export function sanitizeAppSlugOrNull(raw) {
+  const s = String(raw ?? '').trim().toLowerCase();
+  return SLUG_RE.test(s) ? s : null;
+}
+
 // Display name for X-OpenRouter-Title: strip control characters (header safety), cap the length,
 // blank → the default title.
 export function sanitizeAppTitle(raw) {

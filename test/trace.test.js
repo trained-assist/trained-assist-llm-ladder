@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeTrace, logCall } from '../src/trace.js';
+import { handle } from '../src/handler.js';
+import { memoryStore } from '../src/state.js';
+import { sanitizeAppSlugOrNull, DEFAULT_APP_SLUG } from '../src/ladder.js';
+import ladders from '../config/ladders.json' with { type: 'json' };
 
 function call(extraHeaders = {}) {
   return new Request('https://llm-ladder.trainedassist.store/v1/chat/completions', {
@@ -112,4 +116,70 @@ test('logCall: no trace ids → row still written with nulls; stream call has no
   const r = row(d1._rows[0]);
   for (const k of ['trace_id', 'run_id', 'user_id', 'chat_id', 'session_id', 'tokens_in', 'tokens_out']) assert.equal(r[k], null, k);
   assert.equal(r.ok, 1);
+});
+// ── #136: the router is not an application ──────────────────────────────────
+//
+// Regression tests for the bug where `trace.app = appSlug` wrote sanitizeAppSlug()'s DEFAULT
+// ('llm-ladder') into D1 whenever the caller sent no x-ladder-app. Nothing caught it: both
+// existing app tests call logCall() with a hand-built tracer, so they never cross the handler
+// line that did the damage — mutating that line to a constant kept all 206 tests green.
+//
+// These go through handle() so the handler's own assignment is on the path.
+
+const ROUTER_ENV = { LADDER_TOKEN: 't', OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key' };
+// An openrouter/* rung, not a Go one: the Go lane's upstream guard rejects a fabricated lane
+// outright (503, no upstream call, hence no attribution headers to assert on). This lane reaches
+// the provider, so one call exercises BOTH sides of #136 at once — the D1 row and the headers.
+const TEST_RUNG = ladders.ladders.service.build.find(m => m.startsWith('openrouter/'));
+
+// One served call through the real handler + real config, with a fake D1 to read the row back.
+async function postThroughHandler(headers) {
+  const d1 = fakeD1();
+  const sent = [];
+  const fetchImpl = async (url, init) => {
+    sent.push(init.headers || {});
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'ok' } }] }), text: async () => '' };
+  };
+  // Pin the first service rung so the walk never leaves it (no failover, no store rotation).
+  // The served model does not matter here: the assertion is about what the HANDLER writes into the
+  // trace row, and logCall runs on every outcome — ok or not. The lane returns 503 in this
+  // sandbox because the rung's own upstream guard rejects a fabricated lane; the row is still
+  // written, which is exactly the code path #136 broke.
+  const r = await handle(new Request('https://l.test/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer t', ...headers },
+    body: JSON.stringify({ model: 'service', ladder_rung: TEST_RUNG, messages: [{ role: 'user', content: 'hi' }] }),
+  }), { ...ROUTER_ENV, LADDER_TRACE_DB: d1 }, { store: memoryStore(0), fetchImpl });
+  return { d1, sent, status: r.status };
+}
+
+test('#136: no x-ladder-app → app stays NULL in D1, while OpenRouter still gets the router name', async () => {
+  const { d1, sent } = await postThroughHandler({});
+  assert.equal(d1._rows.length, 1, 'the call was traced');
+  const r = row(d1._rows[0]);
+  // The whole point: absent header must NOT become an application name. DEFAULT_APP_SLUG is our
+  // own constant — no caller ever sends it — so writing it here let the router's own unattributed
+  // traffic outrank every real application in the cut (264 of 466 calls in the first hour).
+  assert.equal(r.app, null, 'absent header → null app, NOT the router slug');
+  assert.notEqual(r.app, DEFAULT_APP_SLUG, 'the router must never file itself as an application');
+  // …and the OpenRouter view must NOT change (#33 regression): upstream still needs a name, and
+  // there "no app" honestly IS the generic proxy.
+  assert.match(sent[0]['HTTP-Referer'], new RegExp(`${DEFAULT_APP_SLUG}$`), 'upstream still gets the router referer');
+});
+
+test('#136: a real slug reaches D1; a garbage slug reaches D1 as null but upstream as the default', async () => {
+  const ok = await postThroughHandler({ 'x-ladder-app': 'tg-format' });
+  assert.equal(row(ok.d1._rows[0]).app, 'tg-format', 'sanitised slug is stored');
+
+  const junk = await postThroughHandler({ 'x-ladder-app': 'GTD Intent/../../etc' });
+  assert.equal(row(junk.d1._rows[0]).app, null, 'a slug we would have to repair is not an app name');
+  assert.match(junk.sent[0]['HTTP-Referer'], new RegExp(`${DEFAULT_APP_SLUG}$`), 'upstream falls back to the router');
+});
+
+test('#136: sanitizeAppSlugOrNull agrees with sanitizeAppSlug on WHAT is a slug, differing only in the fallback', async () => {
+  assert.equal(sanitizeAppSlugOrNull('gtd-intent'), 'gtd-intent');
+  assert.equal(sanitizeAppSlugOrNull(' HH-Messages '), 'hh-messages', 'same trim/lowercase as the OpenRouter side');
+  for (const junk of ['', '  ', 'привет', 'a b', 'a/b', '../../etc/passwd', 'a'.repeat(65), 'a_b', 'a\nb', null, undefined]) {
+    assert.equal(sanitizeAppSlugOrNull(junk), null, JSON.stringify(junk));
+  }
 });
