@@ -459,6 +459,11 @@ export async function zenPoolStop(request, env) {
 // env — no token, no second hop). Returns { status, data } exactly as the route would.
 export async function poolInvoke(env, body, fetchImpl = fetch) {
   if (!env.ZEN_DB) return { status: 503, data: { error: 'zen database not configured' } };
+  // Test hook: ZEN_POOL_TEST_ANSWER makes the pool answer immediately, without a
+  // database — lets the ladder tests exercise the zen-pool rung in isolation.
+  if (env.ZEN_POOL_TEST_ANSWER) {
+    return { status: 200, data: { ok: true, text: String(env.ZEN_POOL_TEST_ANSWER), model: String(body.model || '') } };
+  }
   const model = String(body.model || '');
   if (!MODEL_RE.test(model)) return { status: 400, data: { error: 'model is required (explicit id)' } };
   // `messages` is the full OpenAI array (system + history + tools) — what the ladder sends.
