@@ -117,6 +117,9 @@ breaks the profile loudly (404) unless the profile is updated too.
 ## API
 
 All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
+During a controlled key rotation, the Worker may temporarily accept one
+`LADDER_TOKEN_PREVIOUS` credential. Remove that binding after clients have moved
+to the new `LADDER_TOKEN`; do not leave a retired credential active indefinitely.
 
 | Method | Path | |
 |---|---|---|

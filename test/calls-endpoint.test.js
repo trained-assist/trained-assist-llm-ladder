@@ -36,6 +36,22 @@ test('GET /v1/calls: requires auth — trace ids are not public', async () => {
   assert.equal(bad.status, 401);
 });
 
+test('auth: accepts the current and temporary previous token during a controlled rotation', async () => {
+  const rotatedEnv = { LADDER_TOKEN: 'new-current-token', LADDER_TOKEN_PREVIOUS: 'old-client-token' };
+  const current = await handle(new Request('https://l.test/v1/models', {
+    headers: { authorization: 'Bearer new-current-token' },
+  }), rotatedEnv, {});
+  const previous = await handle(new Request('https://l.test/v1/models', {
+    headers: { authorization: 'Bearer old-client-token' },
+  }), rotatedEnv, {});
+  const rejected = await handle(new Request('https://l.test/v1/models', {
+    headers: { authorization: 'Bearer unrelated-token' },
+  }), rotatedEnv, {});
+  assert.equal(current.status, 200);
+  assert.equal(previous.status, 200);
+  assert.equal(rejected.status, 401);
+});
+
 test('GET /v1/calls: needs at least one filter (an unfiltered read is what /v1/analytics is for)', async () => {
   const r = await handle(authed(''), { ...ENV, LADDER_TRACE_DB: fakeD1() }, {});
   assert.equal(r.status, 400);

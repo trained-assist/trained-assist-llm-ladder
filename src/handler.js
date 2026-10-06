@@ -170,9 +170,13 @@ function bearerToken(request) {
 }
 
 function authorized(request, env) {
-  if (!env.LADDER_TOKEN) return false;
   const token = bearerToken(request);
-  return !!token && timingSafeEqual(token, env.LADDER_TOKEN);
+  if (!token) return false;
+  const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS]
+    .filter((candidate) => typeof candidate === 'string' && candidate.length > 0);
+  let matches = false;
+  for (const candidate of accepted) matches = timingSafeEqual(token, candidate) || matches;
+  return matches;
 }
 
 // Pin kill-switch: LADDER_PIN_ENABLED=false/0/off disables sticky rungs entirely (no pin
