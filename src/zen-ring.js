@@ -24,7 +24,7 @@ export const DEFAULT_IDLE_EXIT_MS = 10 * 60_000;  // a job with no work for this
 export const LEASE_TTL_MS = 90_000;     // a job that stops pulling is dead after this
 export const ORPHAN_TASK_MS = 120_000;  // a claimed task with no answer for this long is requeued
 
-// ---- pool ceiling + autoscaling (owner's numbers, see zen-runner/tz-pul-zhizni.md) -----------
+// ---- ring ceiling + autoscaling (owner's numbers, rationale in docs/zen-runner.md) -----------
 // The account allows 20 simultaneous Actions jobs, so the pool can never exceed that — and two
 // of the 20 stay free so an ordinary push/PR CI run is never starved by our own workers.
 export const RING_CEILING = 20;
