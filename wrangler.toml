@@ -28,7 +28,8 @@ binding = "LADDER_TRACE_DB"
 database_name = "trained-assist-llm-ladder-trace"
 database_id = "00000000-0000-0000-0000-000000000000"
 
-# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY,
+# Secrets (wrangler secret put): LADDER_TOKEN, LADDER_TOKEN_PREVIOUS, LADDER_TOKENS,
+# OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY,
 # OPENCODE_ZEN_RELAY_TOKEN, POOL_TRIGGER_TOKEN, GITHUB_AI_AGENT_RUNS_POOL
 
 # Zen Runner — availability table, budget counters and the runner-repository registry. Separate

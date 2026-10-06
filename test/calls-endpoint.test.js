@@ -52,6 +52,24 @@ test('auth: accepts the current and temporary previous token during a controlled
   assert.equal(rejected.status, 401);
 });
 
+test('auth: accepts multiple additional client tokens without invalidating legacy tokens', async () => {
+  const tokenEnv = {
+    LADDER_TOKEN: 'existing-token',
+    LADDER_TOKEN_PREVIOUS: 'overlap-token',
+    LADDER_TOKENS: 'client-two-token, client-three-token',
+  };
+  for (const token of ['existing-token', 'overlap-token', 'client-two-token', 'client-three-token']) {
+    const response = await handle(new Request('https://l.test/v1/models', {
+      headers: { authorization: `Bearer ${token}` },
+    }), tokenEnv, {});
+    assert.equal(response.status, 200, `${token} should remain usable`);
+  }
+  const rejected = await handle(new Request('https://l.test/v1/models', {
+    headers: { authorization: 'Bearer unknown-token' },
+  }), tokenEnv, {});
+  assert.equal(rejected.status, 401);
+});
+
 test('GET /v1/calls: needs at least one filter (an unfiltered read is what /v1/analytics is for)', async () => {
   const r = await handle(authed(''), { ...ENV, LADDER_TRACE_DB: fakeD1() }, {});
   assert.equal(r.status, 400);
