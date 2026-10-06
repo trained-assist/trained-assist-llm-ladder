@@ -120,6 +120,11 @@ All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 During a controlled key rotation, the Worker may temporarily accept one
 `LADDER_TOKEN_PREVIOUS` credential. Remove that binding after clients have moved
 to the new `LADDER_TOKEN`; do not leave a retired credential active indefinitely.
+For independently issued client credentials, `LADDER_TOKENS` may contain a
+comma-separated list of additional bearer tokens. Existing `LADDER_TOKEN` and
+`LADDER_TOKEN_PREVIOUS` remain valid while additional tokens are added or rotated.
+Store each issued value in the consumer's secret store; never expose this list through
+an API response or logs.
 
 | Method | Path | |
 |---|---|---|

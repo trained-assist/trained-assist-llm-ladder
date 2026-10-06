@@ -172,7 +172,8 @@ function bearerToken(request) {
 function authorized(request, env) {
   const token = bearerToken(request);
   if (!token) return false;
-  const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS]
+  const additional = typeof env.LADDER_TOKENS === 'string' ? env.LADDER_TOKENS.split(',').map((token) => token.trim()) : [];
+  const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS, ...additional]
     .filter((candidate) => typeof candidate === 'string' && candidate.length > 0);
   let matches = false;
   for (const candidate of accepted) matches = timingSafeEqual(token, candidate) || matches;
