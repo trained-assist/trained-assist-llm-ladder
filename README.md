@@ -23,7 +23,7 @@ Rung providers:
 |---|---|
 | `opencode-go/*` | OpenCode Go subscription (per-model monthly $ limits, key rotation) |
 | `openrouter/*` | OpenRouter pay-per-token — `:free` models are $0 |
-| `opencode-zen/*` | Zen free tier, proxied through the GCP relay (`scripts/zen-relay.mjs`) |
+| `opencode-zen/*` | Zen free tier through the configured relay (`scripts/zen-relay.mjs`); relay placement must not depend on the retiring GCP VM |
 | `zen-pool/*` | Zen free tier through the **Zen Pool** — called in-process, same worker, no token |
 
 ---
