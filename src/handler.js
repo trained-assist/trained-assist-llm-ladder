@@ -6,7 +6,7 @@ import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeA
 import { makeTrace, logCall } from './trace.js';
 import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
-import * as pool from './zen-pool.js';
+import * as ring from './zen-ring.js';
 import config from '../config/ladders.json' with { type: 'json' };
 import prices from '../config/prices.json' with { type: 'json' };
 
@@ -226,7 +226,7 @@ const POOL_TASK_MAX_CHARS = 4000;
 // location (epic ai-agent-run-api#1, Ф1): "" = наш пул; ru/eu/us зарезервированы под
 // региональные пулы (вне скоупа) — принимаются, но помечаются reserved и не исполняются.
 const POOL_LOCATIONS = ['', 'ru', 'eu', 'us'];
-const POOL_RESERVED_LOCATIONS = new Set(['ru', 'eu', 'us']);
+const RING_RESERVED_LOCATIONS = new Set(['ru', 'eu', 'us']);
 
 // POST /pool/trigger — own token (POOL_TRIGGER_TOKEN, independent from LADDER_TOKEN),
 // timing-safe compare; env not set → 503 CONFIG. Body ≤ 8 KB → one GitHub
@@ -261,7 +261,7 @@ async function poolTrigger(request, env, fetchImpl) {
   if (!POOL_LOCATIONS.includes(loc)) {
     return oaError(400, `location: expected one of "", "ru", "eu", "us", got ${JSON.stringify(String(loc).slice(0, 50))}`, 'invalid_request_error');
   }
-  const reserved = POOL_RESERVED_LOCATIONS.has(loc);
+  const reserved = RING_RESERVED_LOCATIONS.has(loc);
   const started = Date.now();
   const meta = { route: 'pool/trigger', task_len: task.length, location: loc };
   let res;
@@ -311,17 +311,17 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   if (request.method === 'GET' && url.pathname.startsWith('/zen/result/')) return zen.zenResult(request, env, url.pathname.slice('/zen/result/'.length));
   if (request.method === 'POST' && url.pathname === '/zen/repos') return zen.zenRepos(request, env);
   if (request.method === 'GET' && url.pathname === '/zen/ring/payload') return zen.zenRingPayload(request, env);
-  // Zen Pool — a long-lived job as an API. Same token, same placement, before the ladder gate.
-  if (request.method === 'GET' && url.pathname === '/zen/pool/health') return pool.zenPoolHealth(request, env);
-  if (request.method === 'POST' && url.pathname === '/zen/pool/register') return pool.zenPoolRegister(request, env);
-  if (request.method === 'GET' && url.pathname === '/zen/pool/pull') return pool.zenPoolPull(request, env);
-  if (request.method === 'POST' && url.pathname === '/zen/pool/result') return pool.zenPoolResult(request, env);
-  if (request.method === 'POST' && url.pathname === '/zen/pool/stop') return pool.zenPoolStop(request, env);
-  if (request.method === 'POST' && url.pathname === '/zen/pool/invoke') return pool.zenPoolInvoke(request, env, fetchImpl);
-  if (request.method === 'GET' && url.pathname === '/zen/pool/metrics') return pool.zenPoolMetrics(request, env);
-  if (request.method === 'POST' && url.pathname === '/zen/pool/scale') return pool.zenPoolScale(request, env, fetchImpl);
+  // Zen Ring — a long-lived job as an API. Same token, same placement, before the ladder gate.
+  if (request.method === 'GET' && url.pathname === '/zen/pool/health') return ring.zenRingHealth(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/register') return ring.zenRingRegister(request, env);
+  if (request.method === 'GET' && url.pathname === '/zen/pool/pull') return ring.zenRingPull(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/result') return ring.zenRingResult(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/stop') return ring.zenRingStop(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/invoke') return ring.zenRingInvoke(request, env, fetchImpl);
+  if (request.method === 'GET' && url.pathname === '/zen/pool/metrics') return ring.zenRingMetrics(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/scale') return ring.zenRingScale(request, env, fetchImpl);
   const mResult = /^\/zen\/pool\/result\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
-  if (request.method === 'GET' && mResult) return pool.zenPoolResultById(request, env, mResult[1]);
+  if (request.method === 'GET' && mResult) return ring.zenRingResultById(request, env, mResult[1]);
 
   if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
 

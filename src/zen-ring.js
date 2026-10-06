@@ -1,4 +1,4 @@
-// Zen Pool — a long-lived GitHub Actions job that behaves like an API.
+// Zen Ring — a long-lived GitHub Actions job that behaves like an API.
 //
 // Why this exists: a GitHub-hosted runner has no inbound address (measured — nothing is handed
 // back at dispatch time), so "one dispatch per answer" pays a full cold start (~10-13 s measured)
@@ -27,17 +27,20 @@ export const ORPHAN_TASK_MS = 120_000;  // a claimed task with no answer for thi
 // ---- pool ceiling + autoscaling (owner's numbers, see zen-runner/tz-pul-zhizni.md) -----------
 // The account allows 20 simultaneous Actions jobs, so the pool can never exceed that — and two
 // of the 20 stay free so an ordinary push/PR CI run is never starved by our own workers.
-export const POOL_CEILING = 20;
-export const POOL_RESERVE = 2;
+export const RING_CEILING = 20;
+export const RING_RESERVE = 2;
 // The TTL is the whole point of the pool: one boot (~10-13 s measured) amortised over hours.
 // 167 min is the computed TTL for N≈16 workers at λ≈45/min (T = D·N/λ), safely inside the 6 h
 // job ceiling. A worker still exits earlier on idle_exit_ms; this is the dispatched default.
-export const POOL_TTL_MS = 167 * 60_000;
+export const RING_TTL_MS = 167 * 60_000;
 // λ is measured from the task table over a rolling window: every enqueue is one arrival.
 export const LAMBDA_WINDOW_MS = 5 * 60_000;
 // A dispatched worker needs ~10-13 s to boot and register; until it does, it must count as
 // "in flight" or every look at the queue would dispatch a second worker for the same task.
 export const BOOT_MS = 25_000;
+// Queue depth allowed per live worker before invoke() refuses at the door (#138). See ringInvoke:
+// the daily cap is small enough that a saturated queue is what actually spends it.
+export const BACKLOG_FACTOR = 2;
 // How long one task occupies a worker (measured 2.7-9.5 s end to end; 10 s is the planning
 // number). Little's law: N = λ·τ — this is what the scale decision is built on.
 export const SERVICE_MS_DEFAULT = 10_000;
@@ -138,14 +141,14 @@ export function inflightFrom({ recentDispatches = 0, recentRegistrations = 0 } =
 
 // How many workers SHOULD be live. Two rules, in order:
 //   1. Ф8 — a non-empty queue scales up immediately: at least one more worker than there are
-//      (this is what makes a cold pool answer a real call instead of returning 503);
+//      (this is what makes a cold ring answer a real call instead of returning 503);
 //   2. Little's law — N = λ·τ, so a sustained λ is served without queueing.
 // The ceiling minus the reserve is a hard cap: the account has 20 job slots and two of them stay
 // free for ordinary CI. The reserve is headroom, not a floor — a single cold call boots one worker,
 // not three. An empty queue never scales up: idle workers exit on their own TTL.
 export function desiredWorkers({
   lambdaPerMin: lambda = 0, serviceMs = SERVICE_MS_DEFAULT, queued = 0, demand = 0,
-  live = 0, inflight = 0, ceiling = POOL_CEILING, reserve = POOL_RESERVE,
+  live = 0, inflight = 0, ceiling = RING_CEILING, reserve = RING_RESERVE,
 } = {}) {
   const cap = Math.max(0, Number(ceiling) - Number(reserve));
   const pending = Math.max(Number(queued) || 0, Number(demand) || 0);
@@ -159,7 +162,7 @@ export function desiredWorkers({
 // endpoint reports, so an operator never has to guess why nothing was dispatched.
 export function scaleDecision({
   lambdaPerMin: lambda = 0, serviceMs = SERVICE_MS_DEFAULT, queued = 0, demand = 0,
-  live = 0, inflight = 0, ceiling = POOL_CEILING, reserve = POOL_RESERVE,
+  live = 0, inflight = 0, ceiling = RING_CEILING, reserve = RING_RESERVE,
 } = {}) {
   const desired = desiredWorkers({ lambdaPerMin: lambda, serviceMs, queued, demand, live, inflight, ceiling, reserve });
   const toDispatch = Math.max(0, desired - (Number(live) || 0) - (Number(inflight) || 0));
@@ -222,9 +225,9 @@ async function writeResult(env, task, body, now) {
 
 // ---------------------------------------------------------------- pool metrics + dispatch
 
-const poolCeiling = (env) => Math.max(1, Number(env.ZEN_POOL_CEILING) || POOL_CEILING);
-const poolReserve = (env) => Math.max(0, Number(env.ZEN_POOL_RESERVE) || POOL_RESERVE);
-const poolTtl = (env) => Math.max(60_000, Number(env.ZEN_POOL_TTL_MS) || POOL_TTL_MS);
+const poolCeiling = (env) => Math.max(1, Number(env.ZEN_RING_CEILING) || RING_CEILING);
+const poolReserve = (env) => Math.max(0, Number(env.ZEN_RING_RESERVE) || RING_RESERVE);
+const poolTtl = (env) => Math.max(60_000, Number(env.ZEN_RING_TTL_MS) || RING_TTL_MS);
 
 async function readQueued(env) {
   return (await db(env).prepare('SELECT COUNT(*) AS n FROM zen_pool_tasks WHERE state = ?1').bind('queued').first())?.n ?? 0;
@@ -265,7 +268,7 @@ async function dispatchPoolWorker(env, repo, row, token, { idleExitMs, runId, no
     headers: { authorization: `token ${token}`, 'content-type': 'application/json',
       accept: 'application/vnd.github+json', 'user-agent': 'trained-assist-llm-ladder' },
     body: JSON.stringify({ event_type: 'zen-pool', client_payload: {
-      run_id: runId, idle_exit_ms: idleExitMs, max_tasks: 0, out: 'zen-pool-last.json',
+      run_id: runId, idle_exit_ms: idleExitMs, max_tasks: 0, out: 'zen-rings-last.json',
       requested_at: new Date(now).toISOString(), location: row?.location || '',
     } }),
     signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
@@ -276,7 +279,7 @@ async function dispatchPoolWorker(env, repo, row, token, { idleExitMs, runId, no
 // The autoscaler. Called from /zen/pool/scale (a scheduled workflow) and from /zen/pool/invoke
 // when the pool is cold — the second caller is what makes "scale up the moment a call arrives"
 // true rather than "within the next cron tick". Returns what it decided and what it dispatched.
-export async function scalePool(env, { now, demand = 0, fetchImpl = fetch } = {}) {
+export async function scaleRing(env, { now, demand = 0, fetchImpl = fetch } = {}) {
   const t = now ?? nowMs(env);
   const ceiling = poolCeiling(env), reserve = poolReserve(env), ttl = poolTtl(env);
   if (String(env.ZEN_POOL_AUTOSCALE || '').toLowerCase() === 'off') {
@@ -330,7 +333,7 @@ export async function scalePool(env, { now, demand = 0, fetchImpl = fetch } = {}
 // ---------------------------------------------------------------- routes
 
 // POST /zen/pool/register — the job announces itself and gets a lease.
-export async function zenPoolRegister(request, env) {
+export async function zenRingRegister(request, env) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
@@ -363,7 +366,7 @@ export async function zenPoolRegister(request, env) {
 }
 
 // GET /zen/pool/pull?lease=… — long-poll. 200 {task} | 200 {bye} | 204 (nothing yet).
-export async function zenPoolPull(request, env) {
+export async function zenRingPull(request, env) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
@@ -403,7 +406,7 @@ export async function zenPoolPull(request, env) {
 }
 
 // POST /zen/pool/result — the answer, and the only way the quarantine learns anything.
-export async function zenPoolResult(request, env) {
+export async function zenRingResult(request, env) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
@@ -437,7 +440,7 @@ export async function zenPoolResult(request, env) {
 }
 
 // POST /zen/pool/stop — "а потом её убиваем": the next pull says bye and the job exits cleanly.
-export async function zenPoolStop(request, env) {
+export async function zenRingStop(request, env) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
@@ -457,13 +460,8 @@ export async function zenPoolStop(request, env) {
 // 503 (no warm worker) | 409 (quarantine) | 429 (budget).
 // The pool's core, free of the HTTP shape so the ladder can call it in-process (same worker, same
 // env — no token, no second hop). Returns { status, data } exactly as the route would.
-export async function poolInvoke(env, body, fetchImpl = fetch) {
+export async function ringInvoke(env, body, fetchImpl = fetch) {
   if (!env.ZEN_DB) return { status: 503, data: { error: 'zen database not configured' } };
-  // Test hook: ZEN_POOL_TEST_ANSWER makes the pool answer immediately, without a
-  // database — lets the ladder tests exercise the zen-pool rung in isolation.
-  if (env.ZEN_POOL_TEST_ANSWER) {
-    return { status: 200, data: { ok: true, text: String(env.ZEN_POOL_TEST_ANSWER), model: String(body.model || '') } };
-  }
   const model = String(body.model || '');
   if (!MODEL_RE.test(model)) return { status: 400, data: { error: 'model is required (explicit id)' } };
   // `messages` is the full OpenAI array (system + history + tools) — what the ladder sends.
@@ -496,10 +494,10 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
   // still the honest answer.
   let coldStart = null;
   if (!workers.length) {
-    coldStart = await scalePool(env, { now, demand: 1, fetchImpl });
+    coldStart = await scaleRing(env, { now, demand: 1, fetchImpl });
     if (!coldStart.dispatched.length) {
       return { status: 503, data: { error: 'no warm runner', scaled: coldStart.reason, ceiling: coldStart.ceiling,
-        reserve: coldStart.reserve, hint: coldStart.hint || 'dispatch zen-pool.yml in a ring repository, or use POST /zen/run for a cold dispatch' } };
+        reserve: coldStart.reserve, hint: coldStart.hint || 'dispatch zen-rings.yml in a ring repository, or use POST /zen/run for a cold dispatch' } };
     }
   }
   const repoScope = workers[0]?.repo || coldStart?.dispatched?.[0]?.repo || '*';
@@ -509,6 +507,31 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
     { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
   for (const v of [perRepo, perAll]) {
     if (!v.ok) return { status: 429, data: { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after } };
+  }
+
+  // #138, the load-bearing half. The daily cap is 500 requests per (repo, model) AND provider-wide
+  // — one of the scarcest resources here. Queue depth is what turns that cap into a loss: every task
+  // admitted while the pool is saturated is served by a worker and burns quota on an answer whose
+  // caller already failed over. So refuse AT THE DOOR, before the task exists: no row, no budget
+  // bump, nothing to serve, nothing wasted. The ladder walks down in ~0 s and the pool stays healthy
+  // for the next call. Refusing is also what makes the pool self-limiting: at 500/day it simply
+  // stops taking work instead of silently burning the remainder.
+  //
+  // Sizing: one in-flight task per worker is throughput, so `live × 2` gives every worker a little
+  // runway without letting a burst build a queue. Configurable — a cold ring (live = 0) must still
+  // admit ONE task or it could never start.
+  const live = workers.length;
+  const cap = Math.max(BACKLOG_FACTOR * live, 1);
+  const queued = await readQueued(env);
+  if (queued >= cap) {
+    return {
+      status: 503,
+      data: {
+        error: 'pool_backlog', queued, live, cap,
+        // No '429'/'503' digits: a saturated pool is transient back-pressure, not a quota skip.
+        hint: 'pool is saturated — the task was NOT queued, no quota spent',
+      },
+    };
   }
 
   const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
@@ -554,22 +577,22 @@ export async function poolInvoke(env, body, fetchImpl = fetch) {
 export const WARMUP_COOLDOWN_MS = 60_000;
 
 // Milliseconds of cooldown left after the last cold start (0 = the pool may be used now).
-export async function poolCooldown(env, { windowMs = WARMUP_COOLDOWN_MS } = {}) {
+export async function ringCooldown(env, { windowMs = WARMUP_COOLDOWN_MS } = {}) {
   const row = await db(env).prepare("SELECT v FROM zen_meta WHERE k = ?1").bind('last_boot_at').first();
   const at = Number(row?.v) || 0;
   if (!at) return 0;
   return Math.max(0, windowMs - (nowMs(env) - at));
 }
 
-// Boot a pool worker WITHOUT enqueuing a task — the "cold start" answer. The caller fails over
+// Boot a ring worker WITHOUT enqueuing a task — the "cold start" answer. The caller fails over
 // now instead of burning its whole rung budget on a one-time ~10-13 s boot, and the pool is warm
 // for the next call. Idempotent in effect: a worker already booting counts as in-flight, so a
 // second cold call inside the boot window dispatches nothing.
-export async function poolBoot(env, { fetchImpl = fetch } = {}) {
+export async function ringBoot(env, { fetchImpl = fetch } = {}) {
   const now = nowMs(env);
   const live = (await readLiveWorkers(env, now)).length;
   if (live > 0) return { ok: true, booted: false, reason: 'already_warm' };
-  const out = await scalePool(env, { now, demand: 1, fetchImpl });
+  const out = await scaleRing(env, { now, demand: 1, fetchImpl });
   if (out.dispatched.length > 0) {
     await db(env).prepare(
       "INSERT INTO zen_meta (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v"
@@ -581,7 +604,7 @@ export async function poolBoot(env, { fetchImpl = fetch } = {}) {
 // Wait for an in-flight task: the caller's watchdog fired (504) but the job is still working, and
 // the answer lands in the same row. Polling it is the honest "retry" — starting a second task for
 // the same request would spend the pool's budget twice.
-export async function poolWaitForTask(env, taskId, { deadlineMs = 60_000 } = {}) {
+export async function ringWaitForTask(env, taskId, { deadlineMs = 60_000 } = {}) {
   const deadline = Date.now() + deadlineMs;
   let step = 0;
   for (;;) {
@@ -610,19 +633,19 @@ export async function poolWaitForTask(env, taskId, { deadlineMs = 60_000 } = {})
 // POST /zen/pool/invoke {model, messages?, prompt?, tools?, max_tokens?, wait_ms?} — the whole
 // point: one HTTP call, one answer, no job per call. 200 {text} | 504 {task_id} (answer still
 // lands, fetch it) | 503 (no warm worker) | 409 (quarantine) | 429 (budget).
-export async function zenPoolInvoke(request, env, fetchImpl = fetch) {
+export async function zenRingInvoke(request, env, fetchImpl = fetch) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   const raw = await request.text();
   if (new TextEncoder().encode(raw).length > BODY_MAX_BYTES) return j(413, { error: 'body too large' });
   let body;
   try { body = JSON.parse(raw || '{}'); } catch { return j(400, { error: 'bad json' }); }
-  const { status, data } = await poolInvoke(env, body, fetchImpl);
+  const { status, data } = await ringInvoke(env, body, fetchImpl);
   return j(status, data);
 }
 
 // GET /zen/pool/result/{task_id} — the answer whenever it lands, including after a 504.
-export async function zenPoolResultById(request, env, taskId) {
+export async function zenRingResultById(request, env, taskId) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
@@ -641,7 +664,7 @@ export async function zenPoolResultById(request, env, taskId) {
 
 // GET /zen/pool/metrics — the autoscaler's inputs and its verdict, in one place. This is what the
 // scheduled scale workflow reads and what an operator reads when asking "why is the pool this big".
-export async function zenPoolMetrics(request, env) {
+export async function zenRingMetrics(request, env) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
@@ -656,7 +679,7 @@ export async function zenPoolMetrics(request, env) {
     serviceMs: Number(env.ZEN_POOL_SERVICE_MS) || SERVICE_MS_DEFAULT,
   });
   return j(200, {
-    now, service: 'zen-pool', lambda_per_min: Number(lambda.perMin.toFixed(3)), lambda_count: lambda.count,
+    now, service: 'zen-rings', lambda_per_min: Number(lambda.perMin.toFixed(3)), lambda_count: lambda.count,
     window_ms: lambda.windowMs, queued, workers_live: live, inflight, ceiling, reserve, ttl_ms: ttl,
     autoscale: String(env.ZEN_POOL_AUTOSCALE || 'on').toLowerCase() !== 'off',
     ...decision, dispatches: await recentDispatches(env, 10),
@@ -664,23 +687,23 @@ export async function zenPoolMetrics(request, env) {
 }
 
 // POST /zen/pool/scale {demand?} — run the autoscaler now. The scheduled workflow calls this; so
-// does /zen/pool/invoke on a cold pool. Idempotent in effect: a worker already booting counts as
+// does /zen/pool/invoke on a cold ring. Idempotent in effect: a worker already booting counts as
 // in-flight, so a second call inside the boot window dispatches nothing.
-export async function zenPoolScale(request, env, fetchImpl = fetch) {
+export async function zenRingScale(request, env, fetchImpl = fetch) {
   const auth = await authorized(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
   let body = {};
   try { body = JSON.parse(await request.text() || '{}'); } catch { return j(400, { error: 'bad json' }); }
-  const demand = Math.min(Math.max(Number(body?.demand) || 0, 0), POOL_CEILING);
-  const out = await scalePool(env, { now: nowMs(env), demand, fetchImpl });
+  const demand = Math.min(Math.max(Number(body?.demand) || 0, 0), RING_CEILING);
+  const out = await scaleRing(env, { now: nowMs(env), demand, fetchImpl });
   return j(out.ok ? 200 : 503, out);
 }
 
 // GET /zen/pool/health — how many jobs are live right now (no auth, like /zen/health).
-export async function zenPoolHealth(request, env) {
+export async function zenRingHealth(request, env) {
   const now = nowMs(env);
-  const out = { service: 'zen-pool', ok: !!env.ZEN_DB, workers_live: 0, workers: [], queued: 0,
+  const out = { service: 'zen-rings', ok: !!env.ZEN_DB, workers_live: 0, workers: [], queued: 0,
     ceiling: poolCeiling(env), reserve: poolReserve(env), ttl_ms: poolTtl(env), default_wait_ms: DEFAULT_WAIT_MS };
   if (env.ZEN_DB) {
     try {

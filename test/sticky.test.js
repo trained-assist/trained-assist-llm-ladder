@@ -10,9 +10,9 @@ import { handle } from '../src/handler.js';
 import { memoryStore, pinFresh, pinDirty, pinStats, emptyState } from '../src/state.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url)));
-// Behaviour here pins real Go/OpenRouter rungs, so run against a config with the zen-pool head
+// Behaviour here pins real Go/OpenRouter rungs, so run against a config with the zen-rings head
 // removed: those rungs are cold in tests and would failover, shifting every LADDER index.
-const noZen = (l) => l.filter((m) => !m.startsWith('zen-pool/'));
+const noZen = (l) => l.filter((m) => !m.startsWith('zen-rings/'));
 const GOCFG = { ...config, ladders: {} };
 for (const [name, roles] of Object.entries(config.ladders)) {
   GOCFG.ladders[name] = Object.fromEntries(Object.entries(roles).map(([r, l]) => [r, noZen(l)]));

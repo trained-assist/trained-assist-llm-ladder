@@ -7,8 +7,9 @@ import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
-  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, poolCooldown,
-} from '../src/zen-pool.js';
+  RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
+  ringCooldown, ringInvoke, zenRingRegister,
+} from '../src/zen-ring.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
 const NOW = Date.UTC(2026, 9, 4, 10, 0, 0);
@@ -118,6 +119,11 @@ function fakeD1(seed = {}) {
     if (/UPDATE zen_pool_tasks SET wait_returned_at/.test(sql)) {
       const t = tasks.get(p[1]); if (t) t.wait_returned_at = p[0];
       return { success: true, meta: { changes: t ? 1 : 0 } };
+    }
+    if (/UPDATE zen_pool_tasks SET state = 'abandoned'/.test(sql)) {
+      const t = tasks.get(p[1]);
+      if (t && t.state === 'queued') { t.state = 'abandoned'; return { success: true, meta: { changes: 1 } }; }
+      return { success: true, meta: { changes: 0 } };
     }
     if (/INSERT INTO zen_models/.test(sql)) {
       const [model, status, failures, successes, err, kind, okAt, firstFailed, next, updated] = p;
@@ -322,14 +328,14 @@ test('inflight: dispatches in the boot window minus workers that already registe
 });
 
 test('desired workers: Ф8 boots one on a cold queue, Little law sizes a sustained λ, the ceiling holds', () => {
-  // a cold pool with one call: one worker, not the whole reserve
+  // a cold ring with one call: one worker, not the whole reserve
   assert.equal(desiredWorkers({ queued: 0, demand: 1, live: 0 }), 1);
   // a non-empty queue always adds a worker (Ф8), even if one is already live
   assert.equal(desiredWorkers({ queued: 1, live: 1 }), 2);
   // λ=45/min, τ=10 s -> N=ceil(450/60)=8 (the reserve is headroom under the ceiling, not a floor)
   assert.equal(desiredWorkers({ queued: 1, lambdaPerMin: 45, serviceMs: SERVICE_MS_DEFAULT }), 8);
   // never above ceiling minus reserve: the account has 20 job slots, two stay for ordinary CI
-  assert.equal(desiredWorkers({ queued: 100, lambdaPerMin: 10_000 }), POOL_CEILING - POOL_RESERVE);
+  assert.equal(desiredWorkers({ queued: 100, lambdaPerMin: 10_000 }), RING_CEILING - RING_RESERVE);
   // an empty queue never scales up
   assert.equal(desiredWorkers({ queued: 0, live: 3 }), 3);
 });
@@ -340,7 +346,7 @@ test('scale decision: names why it dispatches, and nothing boots while a worker 
   assert.equal(cold.reason, 'queue_not_empty');
   const inflight = scaleDecision({ queued: 1, live: 0, inflight: 1 });
   assert.equal(inflight.toDispatch, 0);
-  const atCeiling = scaleDecision({ queued: 50, live: POOL_CEILING - POOL_RESERVE });
+  const atCeiling = scaleDecision({ queued: 50, live: RING_CEILING - RING_RESERVE });
   assert.equal(atCeiling.toDispatch, 0);
   assert.equal(atCeiling.reason, 'at_ceiling');
 });
@@ -361,7 +367,7 @@ const postF = (path, body, d1, fetchImpl, extra = {}) =>
     method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(body),
   }), env(d1, extra), { fetchImpl });
 
-test('scale: dispatches zen-pool into a ring repo, records it, and does not double-dispatch while it boots', async () => {
+test('scale: dispatches zen-rings into a ring repo, records it, and does not double-dispatch while it boots', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const gh = fakeGithub();
   const extra = { RING_TOKEN: 'gh-tok' };
@@ -371,11 +377,14 @@ test('scale: dispatches zen-pool into a ring repo, records it, and does not doub
   const out = await res.json();
   assert.equal(out.dispatched.length, 1);
   assert.equal(out.dispatched[0].repo, 'ring/one');
-  assert.equal(out.ttl_ms, POOL_TTL_MS);
+  assert.equal(out.ttl_ms, RING_TTL_MS);
   assert.equal(gh.calls.length, 1);
   assert.match(gh.calls[0].url, /repos\/ring\/one\/dispatches$/);
+  // The repository_dispatch type is frozen, NOT part of the "pool" rename: every ring repo's
+  // workflow declares `on: repository_dispatch: types: [zen-pool]`, so renaming this string
+  // silently stops all 8 repos from ever receiving a boot.
   assert.equal(gh.calls[0].body.event_type, 'zen-pool');
-  assert.equal(gh.calls[0].body.client_payload.idle_exit_ms, POOL_TTL_MS);
+  assert.equal(gh.calls[0].body.client_payload.idle_exit_ms, RING_TTL_MS);
 
   // the worker is booting: a second call inside the boot window must dispatch nothing
   const again = await postF('/zen/pool/scale', { demand: 1 }, d1, gh.fetchImpl, extra);
@@ -404,13 +413,13 @@ test('metrics: λ from the task table, the ceiling and the verdict, in one answe
   assert.equal(m.lambda_count, 3);
   assert.equal(m.lambda_per_min, 0.6);   // 3 arrivals over the 5-min window
   assert.equal(m.queued, 3);
-  assert.equal(m.ceiling, POOL_CEILING);
-  assert.equal(m.reserve, POOL_RESERVE);
+  assert.equal(m.ceiling, RING_CEILING);
+  assert.equal(m.reserve, RING_RESERVE);
   assert.equal(m.autoscale, true);
   assert.equal(m.toDispatch, 1);         // Ф8: the queue is not empty and nothing is live
 });
 
-test('rotation: a spent address hands its lease back, so the pool boots a fresh run on a new one', async () => {
+test('rotation: a spent address hands its lease back, so the ring boots a fresh run on a new one', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const gh = fakeGithub();
   const extra = { RING_TOKEN: 'gh-tok' };
@@ -490,7 +499,7 @@ test('rotation: the local daily budget also rotates — a worker with no quota l
   assert.equal((await health.json()).workers_live, 0);
 });
 
-test('cold start: invoke on an empty pool boots a worker and the answer still lands in the same call', async () => {
+test('cold start: invoke on an empty ring boots a worker and the answer still lands in the same call', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const gh = fakeGithub();
   const extra = { RING_TOKEN: 'gh-tok' };
@@ -513,15 +522,15 @@ test('cold start: invoke on an empty pool boots a worker and the answer still la
   assert.equal(body.cold_start.dispatched[0], 'ring/one');
 });
 
-// ---- the ladder calls the pool in-process (no token, no HTTP hop) --------------------------
+// ---- the ladder calls the ring in-process (no token, no HTTP hop) --------------------------
 
-test('the ladder calls the pool in-process: a zen-pool rung answers a build-ladder call', async () => {
+test('the ladder calls the ring in-process: a zen-rings rung answers a build-ladder call', async () => {
   const d1 = fakeD1();
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
   const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, OPENROUTER_API_KEY: 'or_key' };
   // The pool answers from the DB, so the fallback rung's HTTP is never reached — and if it ever
   // were, this fetch fails loudly instead of silently passing.
-  const fetchImpl = async () => { throw new Error('a zen-pool rung must not reach the network'); };
+  const fetchImpl = async () => { throw new Error('a zen-rings rung must not reach the network'); };
 
   const reg = await post('/zen/pool/register', { worker_id: 'ring/one:1:1', repo: 'ring/one' }, d1);
   const lease = await reg.json();
@@ -553,18 +562,18 @@ test('the ladder calls the pool in-process: a zen-pool rung answers a build-ladd
 
   const r = await pending;
   assert.equal(r.ok, true);
-  assert.equal(r.model, 'zen-pool/mimo-v2.6-flash-free');
+  assert.equal(r.model, 'zen-rings/mimo-v2.6-flash-free');
   assert.equal(r.data.choices[0].message.content, 'on it');
   assert.equal(r.data.choices[0].message.tool_calls[0].function.name, 'shell');
   assert.equal(r.data.choices[0].finish_reason, 'tool_calls');
   assert.deepEqual(r.data.usage, { completion_tokens: 7 });
 });
 
-test('the ladder gets a real SSE stream from a zen-pool rung (agent roles stream)', async () => {
+test('the ladder gets a real SSE stream from a zen-rings rung (agent roles stream)', async () => {
   const d1 = fakeD1();
-  const cfg = { ladders: { build: { build: ['zen-pool/nemotron-3.5-lightning-free'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/nemotron-3.5-lightning-free'] } } };
   const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW };
-  const fetchImpl = async () => { throw new Error('a zen-pool rung must not reach the network'); };
+  const fetchImpl = async () => { throw new Error('a zen-rings rung must not reach the network'); };
 
   const reg = await post('/zen/pool/register', { worker_id: 'ring/one:2:1', repo: 'ring/one' }, d1);
   const lease = await reg.json();
@@ -583,8 +592,8 @@ test('the ladder gets a real SSE stream from a zen-pool rung (agent roles stream
   assert.match(text, /data: \[DONE\]/);
 });
 
-test('a zen-pool rung without ZEN_DB is skipped, not failed — the ladder walks down', async () => {
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+test('a zen-rings rung without ZEN_DB is skipped, not failed — the ladder walks down', async () => {
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
   const env = { OPENROUTER_API_KEY: 'or_key' };  // no ZEN_DB
   const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
     env, config: cfg, store: memoryStore(1),
@@ -599,9 +608,9 @@ test('a zen-pool rung without ZEN_DB is skipped, not failed — the ladder walks
 
 test('a 504 is not a failure: the ladder waits for the in-flight task instead of starting a second one', async () => {
   const d1 = fakeD1();
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free'] } } };
   const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW };
-  const fetchImpl = async () => { throw new Error('a zen-pool rung must not reach the network'); };
+  const fetchImpl = async () => { throw new Error('a zen-rings rung must not reach the network'); };
 
   const reg = await post('/zen/pool/register', { worker_id: 'ring/one:3:1', repo: 'ring/one' }, d1);
   const lease = await reg.json();
@@ -624,7 +633,7 @@ test('a 504 is not a failure: the ladder waits for the in-flight task instead of
 
 test('a budget refusal walks straight down the ladder (no retry, no second task)', async () => {
   const full = fakeD1({ budget: [{ scope: '*', model: '*', minute_count: 50, minute_at: NOW, day_count: 1, day: '2026-10-04' }] });
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
   const env = { ...ENV, ZEN_DB: full, ZEN_NOW_MS: NOW, OPENROUTER_API_KEY: 'or_key' };
   await post('/zen/pool/register', { worker_id: 'ring/one:4:1', repo: 'ring/one' }, full);
   const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
@@ -637,11 +646,11 @@ test('a budget refusal walks straight down the ladder (no retry, no second task)
   });
   assert.equal(r.ok, true);
   assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
-  assert.equal(r.attempts.find((a) => a.model.startsWith('zen-pool/')).outcome, 'error');
-  assert.match(r.attempts.find((a) => a.model.startsWith('zen-pool/')).error, /budget exhausted/);
+  assert.equal(r.attempts.find((a) => a.model.startsWith('zen-rings/')).outcome, 'error');
+  assert.match(r.attempts.find((a) => a.model.startsWith('zen-rings/')).error, /budget exhausted/);
 });
 
-test('a transient pool fault is retried exactly once, then the ladder walks down', async () => {
+test('a transient ring fault is retried exactly once, then the ladder walks down', async () => {
   // Cold pool + a ring repo whose dispatch is refused: the first invoke cannot get a worker.
   // One retry means exactly two boot attempts — never a third.
   const d1 = fakeD1({ repos: [RING] });
@@ -653,7 +662,7 @@ test('a transient pool fault is retried exactly once, then the ladder walks down
     choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'fallback' } }],
     usage: { prompt_tokens: 2, completion_tokens: 1 },
   }), { status: 200, headers: { 'content-type': 'application/json' } }));
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
   const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'or_key' };
   const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }], ladder_timeout_ms: 1000 }, {
     env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl,
@@ -664,10 +673,10 @@ test('a transient pool fault is retried exactly once, then the ladder walks down
   assert.equal(gh.calls.length, 3, 'boot + invoke + one retry');
 });
 
-test('a cold pool boots in the background and fails over immediately (no waiting on the boot)', async () => {
+test('a cold ring boots in the background and fails over immediately (no waiting on the boot)', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const gh = fakeGithub(204);
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
   const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'or_key' };
   const origFetch = gh.fetchImpl;
   gh.fetchImpl = async (url, init) => (String(url).includes('api.github.com')
@@ -683,14 +692,14 @@ test('a cold pool boots in the background and fails over immediately (no waiting
   assert.equal(r.ok, true);
   assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash');
   assert.equal(gh.calls.length, 1, 'the cold call booted exactly one worker, then failed over');
-  const poolAttempt = r.attempts.find((a) => a.model.startsWith('zen-pool/'));
-  assert.match(poolAttempt.error, /cold pool/);
+  const ringAttempt = r.attempts.find((a) => a.model.startsWith('zen-rings/'));
+  assert.match(ringAttempt.error, /cold ring/);
 });
 
-test('the pool is skipped for 60s after a cold start (cooldown)', async () => {
+test('the ring is skipped for 60s after a cold start (cooldown)', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const gh = fakeGithub(204);
-  const cfg = { ladders: { build: { build: ['zen-pool/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
   const env = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'or_key' };
   const origFetch = gh.fetchImpl;
   gh.fetchImpl = async (url, init) => (String(url).includes('api.github.com')
@@ -701,7 +710,7 @@ test('the pool is skipped for 60s after a cold start (cooldown)', async () => {
         usage: { prompt_tokens: 2, completion_tokens: 1 },
       }), { status: 200, headers: { 'content-type': 'application/json' } }));
 
-  // First call: cold pool → boots one worker, fails over.
+  // First call: cold ring → boots one worker, fails over.
   const r1 = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] },
     { env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl });
   assert.equal(r1.model, 'openrouter/xiaomi/mimo-v2.6-flash');
@@ -712,5 +721,73 @@ test('the pool is skipped for 60s after a cold start (cooldown)', async () => {
     { env, config: cfg, store: memoryStore(1), fetchImpl: gh.fetchImpl });
   assert.equal(r2.model, 'openrouter/xiaomi/mimo-v2.6-flash');
   assert.equal(gh.calls.length, 1, 'no second boot during the cooldown');
-  assert.match(r2.attempts.find((a) => a.model.startsWith('zen-pool/')).error, /warming up/);
+  assert.match(r2.attempts.find((a) => a.model.startsWith('zen-rings/')).error, /warming up/);
+});
+
+
+// #138, the architectural side: the pool refuses AT THE DOOR instead of taking work it cannot
+// serve. A task that never enters the queue costs no quota and has no answer to go unread.
+test('a saturated ring refuses before queueing: no task row, no budget spent (#138)', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const extra = { RING_TOKEN: 'gh-tok' };
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, ...extra };
+  const gh = fakeGithub(204);
+
+  // one live worker → cap = 2 × 1 = 2; fill the queue to the cap
+  await zenRingRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+  d1._tasks.set('q2', { id: 'q2', model: 'm', state: 'queued', enqueued_at: NOW - 4 });
+  const budgetBefore = JSON.stringify([...d1._budget.values()]);
+
+  const r = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?' }, gh.fetchImpl);
+  assert.equal(r.status, 503);
+  assert.equal(r.data.error, 'pool_backlog');
+  assert.equal(d1._tasks.size, 2, 'the refused task must NOT be queued');
+  assert.equal(JSON.stringify([...d1._budget.values()]), budgetBefore, 'and it must not spend provider quota');
+});
+
+test('a cold ring (no workers) still admits one task — otherwise it could never start', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok' };
+  const gh = fakeGithub(204);   // dispatch succeeds → a worker is booting, not yet registered
+  const r = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?' }, gh.fetchImpl);
+  assert.equal(r.status, 504, 'admitted, then the watchdog fired with nobody serving yet');
+  assert.equal(d1._tasks.size, 1);
+  assert.ok([...d1._budget.values()].length > 0, 'quota counted for the admitted task');
+});
+
+// The 70-second incident: the ladder sat on a saturated pool until its watchdog expired, then
+// failed over — burning the caller's whole rung budget for nothing. A saturated pool must be
+// detected on the way IN, so the ladder walks down immediately.
+test('a saturated ring fails the caller over at once instead of holding it for the watchdog', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const cfg = { ladders: { build: { build: ['zen-rings/mimo-v2.6-flash-free', 'openrouter/xiaomi/mimo-v2.6-flash'] } } };
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  await zenRingRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);
+  // fill past the cap (2 × 1 live worker)
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+  d1._tasks.set('q2', { id: 'q2', model: 'm', state: 'queued', enqueued_at: NOW - 4 });
+  d1._tasks.set('q3', { id: 'q3', model: 'm', state: 'queued', enqueued_at: NOW - 3 });
+
+  const started = Date.now();
+  const r = await run({ model: 'build', messages: [{ role: 'user', content: 'hi' }] }, {
+    env: env2, config: cfg, store: memoryStore(1),
+    fetchImpl: async () => ({
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { content: 'from openrouter' } }] }),
+      text: async () => '',
+    }),
+  });
+  const elapsed = Date.now() - started;
+
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'openrouter/xiaomi/mimo-v2.6-flash', 'the caller walks down to the next rung');
+  assert.ok(elapsed < 5_000, `must not hold the caller for the watchdog (took ${elapsed}ms)`);
+  const ringAttempt = r.attempts.find((a) => a.model.startsWith('zen-rings/'));
+  assert.match(ringAttempt.error, /pool_backlog/, 'and must say why, without a status-code digit');
+  assert.equal(d1._tasks.size, 3, 'the refused task was never queued');
 });

@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { poolInvoke, poolWaitForTask, poolBoot, poolCooldown } from './zen-pool.js';
+import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -375,10 +375,10 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
 }
 
 function attempt(env, model, body, keyIndex, opts) {
-  // Zen Pool rung — in-process, no HTTP and no token: the pool lives in this same worker, so the
-  // ladder calls its core directly. A cold pool boots a runner (~10-13 s) and the caller's own
+  // Zen Ring rung — in-process, no HTTP and no token: the pool lives in this same worker, so the
+  // ladder calls its core directly. A cold ring boots a runner (~10-13 s) and the caller's own
   // watchdog covers it; a warm one answers in ~3 s.
-  if (model.startsWith('zen-pool/')) return attemptPool(env, model, body, opts);
+  if (model.startsWith('zen-rings/')) return attemptRing(env, model, body, opts);
   return body.stream ? attemptStream(env, model, body, keyIndex, opts) : attemptJson(env, model, body, keyIndex, opts);
 }
 
@@ -389,28 +389,28 @@ function attempt(env, model, body, keyIndex, opts) {
 // short grace for the answer that is already in flight rather than starting a duplicate task. The
 // grace is bounded — the task already had the caller's whole rung budget, so a longer wait would
 // only delay the failover.
-async function poolCall(env, payload, fetchImpl, graceMs = 15_000) {
-  let r = await poolInvoke(env, payload, fetchImpl);
+async function ringCall(env, payload, fetchImpl, graceMs = 15_000) {
+  let r = await ringInvoke(env, payload, fetchImpl);
   if (r.status === 504 && r.data?.task_id) {
-    const w = await poolWaitForTask(env, r.data.task_id, { deadlineMs: graceMs });
+    const w = await ringWaitForTask(env, r.data.task_id, { deadlineMs: graceMs });
     if (w.ok) return { status: 200, data: w.data };
   }
   return r;
 }
 
-async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
-  const rung = model.replace(/^zen-pool\//, '');
-  // Right after a cold start the runner is still settling — skip the pool for a cooldown window
+async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
+  const rung = model.replace(/^zen-rings\//, '');
+  // Right after a cold start the runner is still settling — skip the ring for a cooldown window
   // so a call doesn't land on a half-warmed worker.
-  const cooldown = await poolCooldown(env);
+  const cooldown = await ringCooldown(env);
   if (cooldown > 0) {
-    return { ok: false, error: `zen-pool: warming up (${Math.ceil(cooldown / 1000)}s left), try the next rung` };
+    return { ok: false, error: `zen-rings: warming up (${Math.ceil(cooldown / 1000)}s left), try the next rung` };
   }
-  // Cold pool: boot a worker in the background and fail over NOW. Waiting here would burn the
-  // caller's whole rung budget on a one-time ~10-13 s boot; the pool is warm for the next call.
-  const boot = await poolBoot(env, { fetchImpl });
+  // Cold ring: boot a worker in the background and fail over NOW. Waiting here would burn the
+  // caller's whole rung budget on a one-time ~10-13 s boot; the ring is warm for the next call.
+  const boot = await ringBoot(env, { fetchImpl });
   if (boot.booted) {
-    return { ok: false, error: `zen-pool: cold pool — booting (${boot.reason}), try the next rung` };
+    return { ok: false, error: `zen-rings: cold ring — booting (${boot.reason}), try the next rung` };
   }
   const payload = {
     model: rung,
@@ -422,14 +422,14 @@ async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
     // ladder_timeout_ms ≈ 20000; the default 20000 already covers it.
     wait_ms: timeoutMs || undefined,
   };
-  let r = await poolCall(env, payload, fetchImpl);
-  // ONE retry for a transient fault (a cold pool that just booted, a provider 5xx). A budget
+  let r = await ringCall(env, payload, fetchImpl);
+  // ONE retry for a transient fault (a cold ring that just booted, a provider 5xx). A budget
   // refusal (429) is not retried — the cap is real and retrying inside the same minute is wasted.
-  if (r.status !== 200 && r.status !== 429) r = await poolCall(env, payload, fetchImpl);
+  if (r.status !== 200 && r.status !== 429) r = await ringCall(env, payload, fetchImpl);
   if (r.status !== 200 || !r.data?.ok) {
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
-    return { ok: false, error: `zen-pool: ${r.data?.error || r.data?.kind || 'no answer'}` };
+    return { ok: false, error: `zen-rings: ${r.data?.error || r.data?.kind || 'no answer'}` };
   }
   const content = String(r.data.text || '').trim();
   const hasTools = Array.isArray(r.data.tool_calls) && r.data.tool_calls.length > 0;
@@ -438,7 +438,7 @@ async function attemptPool(env, model, body, { fetchImpl, timeoutMs }) {
   if (hasTools) message.tool_calls = r.data.tool_calls;
   const finish = r.data.finish_reason || (hasTools ? 'tool_calls' : 'stop');
   const completion = {
-    id: `zen-pool-${r.data.task_id || crypto.randomUUID()}`,
+    id: `zen-rings-${r.data.task_id || crypto.randomUUID()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model: rung,
@@ -485,7 +485,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const pool = readPool(env);
   const hasKey = m => (m.startsWith('opencode-go/') ? pool.length > 0
     : m.startsWith('opencode-zen/') ? !!env.OPENCODE_ZEN_RELAY_TOKEN
-    : m.startsWith('zen-pool/') ? !!env.ZEN_DB
+    : m.startsWith('zen-rings/') ? !!env.ZEN_DB
     : !!env.OPENROUTER_API_KEY);
   const keyed = all.filter(hasKey);
   if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [] };
