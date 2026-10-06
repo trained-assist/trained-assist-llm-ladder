@@ -302,12 +302,12 @@ test('GET /v1/analytics: sources carry call share over the whole window', async 
       { source: 'opencode-go', calls: 28686 },
       { source: 'openrouter', calls: 1436 },
       { source: 'opencode-zen', calls: 1396 },
-      { source: 'zen-pool', calls: 157 },
+      { source: 'zen-rings', calls: 157 },
     ],
   });
   const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
   const b = await r.json();
-  assert.deepEqual(b.sources.map(s => s.source), ['opencode-go', 'openrouter', 'opencode-zen', 'zen-pool']);
+  assert.deepEqual(b.sources.map(s => s.source), ['opencode-go', 'openrouter', 'opencode-zen', 'zen-rings']);
   const total = b.sources.reduce((s, x) => s + x.calls, 0);
   assert.equal(total, 31675);
   // Shares must sum to ~100 — a reporter can print the row as-is.

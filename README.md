@@ -24,7 +24,7 @@ Rung providers:
 | `opencode-go/*` | OpenCode Go subscription (per-model monthly $ limits, key rotation) |
 | `openrouter/*` | OpenRouter pay-per-token — `:free` models are $0 |
 | `opencode-zen/*` | Zen free tier, proxied through the GCP relay (`scripts/zen-relay.mjs`) |
-| `zen-pool/*` | Zen free tier through the **Zen Pool** — called in-process, same worker, no token |
+| `zen-rings/*` | Zen free tier through the **ring of GitHub Actions repos** — called in-process, same worker, no token |
 
 ---
 
@@ -251,23 +251,40 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 - Changing a ladder *name* is a breaking change: update every client, then run the contract
   guard.
 - Zen free rungs live in the `free` tail only — never ahead of a working free rung. The one
-  exception is `zen-pool/*`: it is a route, not a price (the models are $0), and the owner put it
-  at the head of `build` on 2026-10-04.
+  exception is `zen-rings/*`: it is a route, not a price (the models are $0), and the owner put it
+  at the head of every text ladder on 2026-10-06 — `nemotron-3-ultra-free` → `mimo-v2.6-flash-free`.
+  `vision` / `vision advanced` are excluded: the rung is text-only and cannot serve an image.
 
 ---
 
-## Zen Pool (zen-pool rungs)
+## Zen Ring (zen-rings rungs)
 
 A GitHub-hosted runner has no inbound address, so "one Actions dispatch per answer" pays a full
-cold start every call. The pool instead keeps **one long-lived job** registered with the worker;
+cold start every call. The ring instead keeps **one long-lived job** registered with the worker;
 a call is a queue push plus the caller's own watchdog, and the answer comes back in the same
 request (measured 2.7–2.9 s warm, 10–13 s for a cold boot).
 
-It lives in **this same worker**, so a `zen-pool/*` rung calls the pool core **in-process**
-(`poolInvoke` in `src/zen-pool.js`) — no token, no second hop, no egress hop. The full OpenAI
+It lives in **this same worker**, so a `zen-rings/*` rung calls the dispatcher **in-process**
+(`ringInvoke` in `src/zen-ring.js`) — no token, no second hop, no egress hop. The full OpenAI
 request travels with the task (`messages` + `tools`), the runner calls zen with the same
 fingerprint the relay uses, and the answer comes back as `tool_calls` / `usage` /
-`finish_reason`. A streaming caller gets a synthesised SSE stream (the pool answers in one blob).
+`finish_reason`. A streaming caller gets a synthesised SSE stream (the job answers in one blob).
+
+**Naming — what was renamed and what deliberately was not.** The term `zen-pool` is gone from the
+ladder's own surface: the rung prefix is `zen-rings/*`, the module is `src/zen-ring.js`, the
+exports are `ringInvoke` / `ringBoot` / `ringCooldown` / `ringWaitForTask` / `scaleRing`. Three
+things still say `pool` because they are a protocol shared with the 8 ring repos, and renaming
+them here without re-provisioning every repo would break the ring:
+
+| frozen | why |
+|---|---|
+| HTTP paths `/zen/pool/register\|pull\|result\|stop\|invoke\|metrics\|scale\|health` | the job-side and ops routes the provisioned worker calls |
+| `repository_dispatch` type `zen-pool` | each ring repo's workflow declares `types: [zen-pool]` |
+| `.github/workflows/zen-pool*.yml`, `scripts/zen-pool*.mjs` | these are the files `zen-ring-sync` copies into every ring repo |
+
+The dispatcher is deliberately a self-contained module (`src/zen-ring.js`): the owner's direction
+is that this logic belongs in the separate [`zen-rings/zen-rings`](https://github.com/zen-rings/zen-rings)
+repository, so moving it out should be a file move, not a rewrite.
 
 `ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
 `/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
@@ -328,10 +345,10 @@ from ~241 KB to ~40 KB.
 ### Idle = no GitHub Actions
 
 Nothing runs while there is no work. A worker exits itself after `idle_exit_ms` (default 10 min)
-and the autoscaler only boots one when a call actually arrives — the first request of a cold pool
+and the autoscaler only boots one when a call actually arrives — the first request of a cold ring
 pays the ~10–13 s boot, every later one is served by the warm job. The 2-min scale cron reads
 `metrics` and dispatches nothing when the queue is empty.
 
-- Pool routes + autoscaler + budget: `docs/zen-runner.md`.
+- Ring routes + autoscaler + budget: `docs/zen-runner.md`.
 - Local client: `npm run zen -- <health|pool|models|metrics|scale|call|result>` (`scripts/zen-pool-client.mjs`).
-- A cold pool is not an error: the call boots a worker and the caller's watchdog covers the boot.
+- A cold ring is not an error: the call boots a worker and the caller's watchdog covers the boot.
