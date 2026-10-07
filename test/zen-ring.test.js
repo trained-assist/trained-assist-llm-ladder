@@ -10,7 +10,7 @@ import {
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
   ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES,
 } from '../src/zen-ring.js';
-import { STALE_TASK_MS } from '../src/zen-runner.js';
+import { STALE_TASK_MS, LIMITS } from '../src/zen-runner.js';
 import { classifyError } from '../src/classify.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
@@ -64,6 +64,11 @@ function fakeD1(seed = {}) {
     return null;
   }
   function all(sql, p) {
+    if (/SELECT model, day_count FROM zen_budget WHERE scope = \?1 AND day = \?2/.test(sql)) {
+      return [...budget.values()]
+        .filter((b) => b.scope === p[0] && b.day === p[1])
+        .map((b) => ({ model: b.model, day_count: b.day_count }));
+    }
     if (/FROM zen_pool_workers WHERE state = \?1 AND lease_expires_at/.test(sql)) {
       return [...workers.values()].filter((w) => w.state === p[0] && w.lease_expires_at > p[1]);
     }
@@ -226,6 +231,36 @@ test('lease expiry: a job that stopped pulling is gone, a stopped one is not sil
   assert.equal(leaseUsable({ state: 'live', lease_expires_at: NOW + 1 }, NOW), true);
   assert.equal(leaseUsable({ state: 'stopping', lease_expires_at: NOW + 1 }, NOW), false);
   assert.equal(leaseUsable({ state: 'live', lease_expires_at: NOW - 1 }, NOW), false);
+});
+
+// The local `dailyBudget` in the worker is only a daily counter if it knows the day. It used to
+// start at zero on every job: a 30-minute run (the workflow's timeout-minutes) could spend the
+// whole local budget and the next run began with a clean slate — so nothing counted the day at
+// all on that layer. bumpCount runs at admission, which makes this ledger the authoritative
+// "already spent today", so it is handed over with the lease.
+test('register hands over today\'s ledger: a fresh job continues the day instead of restarting it', async () => {
+  const repo = 'vovalikessmoothy-png/gha-worker-01';
+  const d1 = fakeD1({ budget: [
+    { scope: repo, model: 'nemotron-3-ultra-free', day_count: 412, day: '2026-10-04' },
+    { scope: repo, model: 'mimo-v2.6-flash-free', day_count: 7, day: '2026-10-04' },
+    { scope: repo, model: 'yesterday', day_count: 999, day: '2026-10-03' },       // another UTC day
+    { scope: 'somebody/else', model: 'nemotron-3-ultra-free', day_count: 700, day: '2026-10-04' }, // not ours
+  ] });
+  const reg = await post('/zen/pool/register', { worker_id: 'gha-worker-01:1:1', repo }, d1);
+  assert.equal(reg.status, 200);
+  const lease = await reg.json();
+
+  assert.equal(lease.day, '2026-10-04', 'the day the counters belong to');
+  assert.equal(lease.budget.limit, LIMITS.perDay, 'the ceiling the same numbers are checked against');
+  assert.deepEqual(lease.budget.models,
+    { 'nemotron-3-ultra-free': 412, 'mimo-v2.6-flash-free': 7 },
+    'only this repo and only today: a stale day and a foreign repo never leak into the seed');
+
+  // a repo with no spend today still gets a usable shape, not a missing field
+  const fresh = await post('/zen/pool/register', { worker_id: 'gha-worker-02:1:1', repo: 'somebody/new' }, d1);
+  assert.equal((await fresh.json()).budget.models.constructor, Object);
+  assert.deepEqual((await (await post('/zen/pool/register', { worker_id: 'gha-worker-03:1:1', repo: 'somebody/else' }, d1)).json()).budget.models,
+    { 'nemotron-3-ultra-free': 700 });
 });
 
 test('register -> pull -> result -> invoke: one job serves a call and the answer comes back in the HTTP response', async () => {
