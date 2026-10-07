@@ -9,10 +9,10 @@
   "ladders": {
     "service": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -25,10 +25,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -41,10 +41,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -57,10 +57,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -73,10 +73,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -89,10 +89,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "classify": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -105,10 +105,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "summarize": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -121,9 +121,9 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "format": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -136,10 +136,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "route": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -152,10 +152,10 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "gate": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -170,6 +170,7 @@
     },
     "doctor": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -178,6 +179,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -186,6 +188,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -194,6 +197,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -202,6 +206,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -212,6 +217,7 @@
     },
     "research": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -219,6 +225,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "plan": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -226,6 +233,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "general": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -233,6 +241,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "review": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -240,6 +249,7 @@
         "openrouter/xiaomi/mimo-v2.6-flash"
       ],
       "explore": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -248,6 +258,7 @@
     },
     "conversation": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/google/gemini-3.1-flash-lite-preview",
@@ -257,9 +268,9 @@
     },
     "build": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/inclusionai/ling-3.0-flash",
         "openrouter/xiaomi/mimo-v2.6-flash"
@@ -267,6 +278,7 @@
     },
     "plan": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -276,6 +288,7 @@
     },
     "explore": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -285,6 +298,7 @@
     },
     "general": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -294,6 +308,7 @@
     },
     "review": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -303,6 +318,7 @@
     },
     "build advanced": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -324,9 +340,9 @@
     },
     "free": {
       "build": [
+        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
-        "opencode-go/longcat-2.5-preview-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
