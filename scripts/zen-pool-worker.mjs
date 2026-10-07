@@ -58,10 +58,12 @@ const workerId = [
   process.env.GITHUB_RUN_ATTEMPT || '1',
 ].join(':');
 
-// Created after register(): the ledger of "already spent today" comes back with the lease, and a
-// client built before that would start every job at zero — which is exactly how the local daily
-// budget stopped being daily. See the seed below.
-let client;
+const client = createZenClient({
+  ratePerMin: 50,
+  dailyBudget: Number(process.env.ZEN_DAILY_BUDGET || 700),
+  rateWaitMaxMs: 0,
+  timeoutMs: Number(process.env.ZEN_TIMEOUT_MS || 90_000),
+});
 
 async function call(path, body, timeoutMs = 30_000) {
   const res = await fetch(base + path, {
@@ -167,31 +169,6 @@ async function serve(task) {
 
 const lease = await register();
 mark('registered', { lease_id: lease.lease_id, pull_hold_ms: lease.pull_hold_ms, idle_exit_ms: lease.idle_exit_ms, workers_live: lease.workers_live });
-
-// Seed today's per-model counters from the controller's ledger. `s.calls` then continues the day
-// instead of restarting it, so `dailyBudget` is reached on the day's real total — a 30-minute job
-// can no longer spend a full budget and hand a clean slate to the next one. The numbers are
-// conservative by construction: bumpCount runs at admission, i.e. before this worker ever sends
-// the request, so the ledger is always >= what this process has actually spent.
-const leaseState = (lease.day && lease.budget)
-  ? {
-      day: lease.day,
-      models: Object.fromEntries(Object.entries(lease.budget.models || {}).map(([m, calls]) => [m, { calls, cooldownUntil: 0 }])),
-    }
-  : null;
-mark('budget_seeded', {
-  day: lease.day || null,
-  limit: lease.budget?.limit ?? null,
-  models: Object.keys(leaseState?.models || {}).length,
-  spent: Object.values(leaseState?.models || {}).reduce((a, v) => a + v.calls, 0),
-});
-client = createZenClient({
-  ratePerMin: 50,
-  dailyBudget: Number(process.env.ZEN_DAILY_BUDGET || 700),
-  rateWaitMaxMs: 0,
-  timeoutMs: Number(process.env.ZEN_TIMEOUT_MS || 90_000),
-  state: leaseState,
-});
 
 let served = 0;
 for (;;) {
