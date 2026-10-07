@@ -8,7 +8,7 @@ import {
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
-  ringCooldown, ringInvoke, zenRingRegister,
+  ringCooldown, ringInvoke, zenRingRegister, runMaintenance,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
 
@@ -871,4 +871,26 @@ test('a full queue also grows the ring: refusing dispatches a worker, not just a
   assert.equal(r.data.error, 'pool_backlog', 'the caller still fails over — no task, no quota');
   assert.ok(gh.calls.length > before, 'but the ring was asked to grow');
   assert.ok(d1._dispatches.size >= 1, 'and a dispatch was recorded');
+});
+
+// The cadence has to live in the worker: GitHub's own */2 schedule delivered runs 4-7 hours apart
+// (every one of them failing with SCALE_CONFIG_MISSING), so the ring was never grown on a
+// schedule. One tick must both grow the ring and clean up, without depending on any GitHub secret.
+test('one cron tick grows the ring and cleans up — no GitHub workflow involved', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+
+  // a queue nobody is serving + no live worker: the tick must decide to dispatch
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+
+  const out = await runMaintenance(env2, { fetchImpl: gh.fetchImpl });
+  assert.ok(out.scale.ok !== false, 'scale half answers');
+  assert.ok(out.summary.dispatched >= 1, `a worker was dispatched (got ${out.summary.dispatched})`);
+  assert.equal(d1._dispatches.size, 1);
+  assert.ok(Object.hasOwn(out.summary, 'reaped'), 'the reap/sweep half reports too');
+
+  // second tick inside the boot window must not double-dispatch
+  const again = await runMaintenance(env2, { fetchImpl: gh.fetchImpl });
+  assert.equal(again.summary.dispatched, 0, 'idempotent within BOOT_MS');
 });

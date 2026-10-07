@@ -12,7 +12,7 @@
 //
 // Dependency-free of the Workerd runtime (same rule as handler.js) so `node --test` runs it.
 
-import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks } from './zen-runner.js';
+import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks, zenSweep } from './zen-runner.js';
 
 export const DEFAULT_WAIT_MS = 30_000;   // the owner's default watchdog
 export const MIN_WAIT_MS = 1_000;
@@ -254,6 +254,26 @@ async function readInflight(env, now) {
   const dispatched = (await db(env).prepare('SELECT COUNT(*) AS n FROM zen_pool_dispatches WHERE requested_at > ?1').bind(since).first())?.n ?? 0;
   const registered = (await db(env).prepare('SELECT COUNT(*) AS n FROM zen_pool_workers WHERE registered_at > ?1').bind(since).first())?.n ?? 0;
   return inflightFrom({ recentDispatches: dispatched, recentRegistrations: registered });
+}
+
+// One tick of the worker's own cron: grow the ring if the queue is waiting, then bury the dead
+// and re-check quarantined models. This lives HERE, not in a GitHub workflow, because GitHub's
+// `*/2` schedule does not deliver */2 — measured 2026-10-07: runs landed 4-7 hours apart, all
+// failing (SCALE_CONFIG_MISSING), so the ring was never grown on a schedule at all. The worker's
+// own trigger is the only cadence we control.
+export async function runMaintenance(env, { fetchImpl = fetch } = {}) {
+  const safe = (fn) => Promise.resolve().then(fn).catch((e) => ({ ok: false, error: String(e?.message || e) }));
+  const scale = await safe(() => scaleRing(env, { fetchImpl }));
+  const sweep = await safe(() => zenSweep(env, fetchImpl));
+  const summary = {
+    route: 'cron/maintenance',
+    dispatched: (scale.dispatched || []).length,
+    scale_reason: scale.reason || (scale.ok ? 'at_target' : 'n/a'),
+    checked: sweep.checked ?? 0,
+    reaped: sweep.reaped ?? 0,
+  };
+  console.log(JSON.stringify(summary));
+  return { scale, sweep, summary };
 }
 
 export async function recentDispatches(env, limit = 10) {

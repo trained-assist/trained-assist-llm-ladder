@@ -35,7 +35,7 @@
 // in src/handler.js (kept free of the Workerd runtime so plain `node --test` can exercise it).
 
 import { handle } from './handler.js';
-import { zenSweep } from './zen-runner.js';
+import { runMaintenance } from './zen-ring.js';
 
 export { LadderState } from './state-do.js';
 export { handle, makeStore } from './handler.js';
@@ -44,9 +44,10 @@ export default {
   fetch(request, env) {
     return handle(request, env);
   },
-  // Every 15 min: re-check quarantined free models whose backoff expired (wrangler.toml [triggers]).
-  // Bounded by ZEN_SWEEP_MAX and by the same 50/500 budget as an ordinary /zen/run.
+  // Every 2 min (wrangler.toml [triggers]): grow the ring if the queue is waiting, bury dead
+  // tasks, re-check quarantined models. Bounded by ZEN_SWEEP_MAX and by the same 50/500 budget as
+  // an ordinary /zen/run; both halves are idempotent, so a missed or duplicated tick is harmless.
   scheduled(event, env, ctx) {
-    ctx.waitUntil(zenSweep(env));
+    ctx.waitUntil(runMaintenance(env));
   },
 };
