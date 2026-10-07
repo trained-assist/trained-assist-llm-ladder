@@ -112,6 +112,10 @@ breaks the profile loudly (404) unless the profile is updated too.
 4. **Guard**: empty content, or non-JSON when `response_format: json_object`, fails the rung.
 5. Walk down until one answers → that model's completion is returned (`model` field names the winner).
 
+**Budgets and pre-flight refusals** — why a rung gets 20 s, why the pool caps its watchdog at
+90 s, and how the context guards turn a fat prompt into a fast `context`/`413` instead of a
+long wait that ends in an empty body: `docs/why-zen-timeouts-are-large-and-how-context-sets-them.md`.
+
 ---
 
 ## API
@@ -359,6 +363,8 @@ pays the ~10–13 s boot, every later one is served by the warm job. The 2-min s
 `metrics` and dispatches nothing when the queue is empty.
 
 - Ring routes + autoscaler + budget: `docs/zen-runner.md`.
+- Why a rung gets 20 s, why the pool caps at 90 s, and how the context guards refuse a fat
+  prompt *before* the clock starts: `docs/why-zen-timeouts-are-large-and-how-context-sets-them.md`.
 - Local client: `npm run zen -- <health|pool|models|metrics|scale|call|result>` (`scripts/zen-pool-client.mjs`).
 - A cold ring is not an error: the call boots a worker and the caller's watchdog covers the boot.
 
