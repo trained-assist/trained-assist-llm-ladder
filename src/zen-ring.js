@@ -12,7 +12,7 @@
 //
 // Dependency-free of the Workerd runtime (same rule as handler.js) so `node --test` runs it.
 
-import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks, zenSweep } from './zen-runner.js';
+import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, sharedDayCap, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks, zenSweep } from './zen-runner.js';
 
 export const DEFAULT_WAIT_MS = 30_000;   // the owner's default watchdog
 export const MIN_WAIT_MS = 1_000;
@@ -559,10 +559,13 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
     }
   }
   const repoScope = workers[0]?.repo || coldStart?.dispatched?.[0]?.repo || '*';
-  const perRepo = budgetVerdict(await readCounts(env, repoScope, model), now,
-    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
+  const perMin = Number(env.ZEN_PER_MIN) || LIMITS.perMin;
+  const perDay = Number(env.ZEN_PER_DAY) || LIMITS.perDay;
+  const perRepo = budgetVerdict(await readCounts(env, repoScope, model), now, { perMin, perDay });
+  // #133: the provider-wide day cap follows the number of models that moved today, so one model
+  // spending its own quota cannot close the rung for every other model.
   const perAll = budgetVerdict(await readCounts(env, '*', '*'), now,
-    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
+    { perMin, perDay: await sharedDayCap(env, perDay, now) });
   for (const v of [perRepo, perAll]) {
     if (!v.ok) return { status: 429, data: { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after } };
   }
