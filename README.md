@@ -23,7 +23,7 @@ Rung providers:
 |---|---|
 | `opencode-go/*` | OpenCode Go subscription (per-model monthly $ limits, key rotation) |
 | `openrouter/*` | OpenRouter pay-per-token — `:free` models are $0 |
-| `opencode-zen/*` | Zen free tier, proxied through the GCP relay (`scripts/zen-relay.mjs`) |
+| `opencode-zen/*` | **Retired** — Zen free tier via the GCP relay (`scripts/zen-relay.mjs`). No rung uses it: the relay VM's ephemeral IP moved out from under the pinned URL, and `zen-rings/*` covers the same models. Kept only as the free-model **collector** (the inventory still probes zen through it). |
 | `zen-rings/*` | Zen free tier through the **ring of GitHub Actions repos** — called in-process, same worker, no token |
 
 ---
@@ -271,8 +271,8 @@ request (measured 2.7–2.9 s warm, 10–13 s for a cold boot).
 
 It lives in **this same worker**, so a `zen-rings/*` rung calls the dispatcher **in-process**
 (`ringInvoke` in `src/zen-ring.js`) — no token, no second hop, no egress hop. The full OpenAI
-request travels with the task (`messages` + `tools`), the runner calls zen with the same
-fingerprint the relay uses, and the answer comes back as `tool_calls` / `usage` /
+request travels with the task (`messages` + `tools`), the runner calls zen with the
+opencode-client fingerprint zen validates, and the answer comes back as `tool_calls` / `usage` /
 `finish_reason`. A streaming caller gets a synthesised SSE stream (the job answers in one blob).
 
 **Naming — what was renamed and what deliberately was not.** The term `zen-pool` is gone from the

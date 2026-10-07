@@ -131,7 +131,16 @@ function ladderRungs(config) {
   const rungs = new Set();
   for (const roles of Object.values(config?.ladders || {})) {
     for (const list of Object.values(roles || {})) {
-      for (const rung of list || []) rungs.add(String(rung));
+      for (const rung of list || []) {
+        const id = String(rung);
+        rungs.add(id);
+        // `zen-rings/<model>` and `opencode-zen/<model>` are the same weights over different
+        // transports (the SHARED mapping in test/free-models.test.js), but only `opencode-zen/*`
+        // rows are ever emitted — the collector's prefix. A model served through the ring must
+        // still read as in-ladder, or the inventory reports a model nobody uses while a rung
+        // points straight at it.
+        if (id.startsWith('zen-rings/')) rungs.add(`opencode-zen/${id.slice('zen-rings/'.length)}`);
+      }
     }
   }
   return rungs;
