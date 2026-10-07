@@ -12,7 +12,7 @@
 //
 // Dependency-free of the Workerd runtime (same rule as handler.js) so `node --test` runs it.
 
-import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, sharedDayCap, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks, zenSweep } from './zen-runner.js';
+import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, sharedDayCap, utcDay, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks, zenSweep } from './zen-runner.js';
 
 export const DEFAULT_WAIT_MS = 30_000;   // the owner's default watchdog
 export const MIN_WAIT_MS = 1_000;
@@ -379,15 +379,30 @@ export async function zenRingRegister(request, env) {
   if (!workerId) return j(400, { error: 'worker_id is required (repo:run:attempt)' });
   const leaseId = crypto.randomUUID();
   const idleExit = Math.min(Math.max(Number(body.idle_exit_ms) || DEFAULT_IDLE_EXIT_MS, 60_000), 6 * 3_600_000);
+  const repo = String(body.repo || '').slice(0, 120);
   await db(env).prepare(
     `INSERT INTO zen_pool_workers (id, worker_id, repo, run_id, run_attempt, egress_ip, runner_name, node,
        state, tasks_served, idle_exit_ms, lease_expires_at, registered_at, last_seen_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'live', 0, ?9, ?10, ?11, ?11)
      ON CONFLICT(id) DO UPDATE SET state='live', tasks_served=0, lease_expires_at=?10, last_seen_at=?11`
-  ).bind(leaseId, workerId, String(body.repo || '').slice(0, 120), String(body.run_id || '').slice(0, 80),
+  ).bind(leaseId, workerId, repo, String(body.run_id || '').slice(0, 80),
     String(body.run_attempt || '').slice(0, 20), String(body.egress_ip || '').slice(0, 64),
     String(body.runner_name || '').slice(0, 120), String(body.node || '').slice(0, 40),
     idleExit, now + LEASE_TTL_MS, now).run();
+
+  // The day is counted HERE — bumpCount runs at admission, before a task is ever dispatched —
+  // so this is the authoritative "already spent today" for this repo. The worker's own
+  // `dailyBudget` used to start at zero on every job: a 30-minute run could spend the whole
+  // local budget and the next run forgot it, which is not a daily counter at all. Handing the
+  // numbers over at registration makes the worker seed its per-model counters from the ledger,
+  // so `dailyBudget` finally means "today" and the two layers agree instead of racing.
+  const day = utcDay(now);
+  const spent = await db(env).prepare(
+    'SELECT model, day_count FROM zen_budget WHERE scope = ?1 AND day = ?2'
+  ).bind(repo, day).all();
+  const budgetModels = {};
+  for (const r of spent.results || []) budgetModels[r.model] = Number(r.day_count) || 0;
+
   const live = await readLiveWorkers(env, now);
   return j(200, {
     lease_id: leaseId,
@@ -397,6 +412,8 @@ export async function zenRingRegister(request, env) {
     poll_step_ms: POLL_STEP_MS,
     workers_live: live.length,
     worker_ids: live.map((w) => w.worker_id),
+    day,
+    budget: { limit: Number(env.ZEN_PER_DAY) || LIMITS.perDay, models: budgetModels },
   });
 }
 
