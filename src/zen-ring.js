@@ -12,7 +12,7 @@
 //
 // Dependency-free of the Workerd runtime (same rule as handler.js) so `node --test` runs it.
 
-import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo } from './zen-runner.js';
+import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo, STALE_TASK_MS, reapStaleTasks } from './zen-runner.js';
 
 export const DEFAULT_WAIT_MS = 30_000;   // the owner's default watchdog
 export const MIN_WAIT_MS = 1_000;
@@ -189,6 +189,10 @@ async function readLiveWorkers(env, now) {
 // Claim the oldest queued task. The `state='queued'` guard in the UPDATE is what makes two
 // pollers racing for the same task safe: exactly one of them sees changes = 1.
 async function claimTask(env, workerId, leaseId, now) {
+  // FIRST bury the dead. Without this the poll loop recycles them forever: orphan requeue below
+  // puts an unanswered row back in `queued`, the next pull claims it, and it never ends — the
+  // worker churns, `tasks_served` stays flat, and the rung stays shut (see reapStaleTasks).
+  await reapStaleTasks(env, now);
   await db(env).prepare(
     'UPDATE zen_pool_tasks SET state = ?1, worker_id = NULL, lease_id = NULL WHERE state = ?2 AND claimed_at < ?3'
   ).bind('queued', 'claimed', now - ORPHAN_TASK_MS).run();
@@ -229,8 +233,12 @@ const poolCeiling = (env) => Math.max(1, Number(env.ZEN_RING_CEILING) || RING_CE
 const poolReserve = (env) => Math.max(0, Number(env.ZEN_RING_RESERVE) || RING_RESERVE);
 const poolTtl = (env) => Math.max(60_000, Number(env.ZEN_RING_TTL_MS) || RING_TTL_MS);
 
+// Only tasks a caller can still be waiting for count against the door (see STALE_TASK_MS): a row
+// nobody has touched for 10 minutes is not back-pressure, it is litter.
 async function readQueued(env) {
-  return (await db(env).prepare('SELECT COUNT(*) AS n FROM zen_pool_tasks WHERE state = ?1').bind('queued').first())?.n ?? 0;
+  const freshSince = nowMs(env) - STALE_TASK_MS;
+  return (await db(env).prepare('SELECT COUNT(*) AS n FROM zen_pool_tasks WHERE state = ?1 AND enqueued_at >= ?2')
+    .bind('queued', freshSince).first())?.n ?? 0;
 }
 
 // λ: every row in zen_pool_tasks was one arrival, so a window count is the whole measurement —
