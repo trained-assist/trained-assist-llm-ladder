@@ -361,3 +361,13 @@ pays the ~10–13 s boot, every later one is served by the warm job. The 2-min s
 - Ring routes + autoscaler + budget: `docs/zen-runner.md`.
 - Local client: `npm run zen -- <health|pool|models|metrics|scale|call|result>` (`scripts/zen-pool-client.mjs`).
 - A cold ring is not an error: the call boots a worker and the caller's watchdog covers the boot.
+
+## Observability — Error Watcher
+
+The ladder publishes C12 error events to [trained-assist-error-watcher](https://github.com/trained-assist/trained-assist-error-watcher) for every failed `/v1/chat/completions` call. Events are fire-and-forget (never block the call path) and include correlation IDs from `x-ladder-*` headers.
+
+Set `ERROR_WATCHER_URL` and `ERROR_WATCHER_KEY` as Worker secrets to enable publishing. Without them, the ladder falls back to D1 trace + Workers Observability only.
+
+- Error event contract: [OBSERVABILITY-AND-ERROR-CONTRACT.md](https://github.com/trained-assist/trained-agent-architecture/blob/main/OBSERVABILITY-AND-ERROR-CONTRACT.md)
+- Watcher spec: [SYSTEM-ERROR-WATCHER.md](https://github.com/trained-assist/trained-agent-architecture/blob/main/SYSTEM-ERROR-WATCHER.md)
+- Architecture: [trained-agent-architecture](https://github.com/trained-assist/trained-agent-architecture)
