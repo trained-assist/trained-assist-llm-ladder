@@ -124,8 +124,14 @@ async function serve(task) {
     maxTokens: task.max_tokens || 300,
   });
   const text = res.ok ? String(res.message?.content ?? '').trim() : '';
+  // A tool-call answer with no text IS an answer — the rest of the stack already treats it that
+  // way (`attemptJson` in src/ladder.js: «A tool-call answer with no text is a valid answer»),
+  // but this worker required text as well. An agent that got a tool call back was therefore
+  // written down as a FAILED task with an empty body, which the ladder reports as
+  // `zen-rings: ok` and then health-skips the head rung for every other caller.
+  const hasTools = res.ok && Array.isArray(res.message?.tool_calls) && res.message.tool_calls.length > 0;
   const record = {
-    ok: !!res.ok && text.length > 0,
+    ok: !!res.ok && (text.length > 0 || hasTools),
     model: task.model,
     prompt: task.prompt,
     text,

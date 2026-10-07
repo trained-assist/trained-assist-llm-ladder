@@ -434,6 +434,39 @@ test('state: per-model exponential backoff restarts for every model; key rotatio
   assert.equal(snapshot(st, 2, 2000).keys.active, 1, 'healed keys: active stays usable');
 });
 
+// ── context-class is a property of the request, never a shared exhaustion ─────────────────────
+// classify.js spells it out («the next task on this rung (from any user) is very likely a
+// normal-sized prompt that would work fine»), but failureClass() collapsed 'context' into
+// 'transient', so every fat prompt put the head rung into SHARED health for 2 s → 4 s → … (30 s
+// cap for zen). Measured: one 1.1 MB agent prompt arrived ~24×/hour, i.e. the head rung was
+// dark for a large slice of every hour while the paid tail was 402 — that is what `every rung
+// failed` and a hung opencode turn look like from the inside.
+test('a context-class failure is recorded but never health-skips the rung for other callers', async () => {
+  const store = memoryStore(2);
+  let headCalls = 0;
+  const beh = {
+    [short(GOLADDER[0])]: () => (++headCalls === 1
+      ? { status: 413, error: 'input is too long for the free tier: 1146453 bytes, limit 50000' }
+      : { status: 200, content: '{"ok":true}' }),
+    [short(GOLADDER[1])]: () => ({ status: 200, content: '{"ok":true}' }),
+  };
+  const body = { ...msg, response_format: { type: 'json_object' } };
+
+  const r1 = await run(body, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, []) });
+  assert.equal(r1.ok, true, 'the ladder walks down instead of failing the caller');
+  assert.ok(r1.attempts.some(a => a.model === GOLADDER[0] && a.outcome === 'error'), 'the refusal is reported');
+
+  const h = store.state.health[GOLADDER[0]];
+  assert.ok(h, 'the failure IS recorded — it stays visible in /v1/state');
+  assert.equal(h.class, 'context', 'classified as a property of the request, not the rung');
+  assert.equal(h.skipUntil, 0, 'and never a shared skip (null would mean dead, a timestamp would mean dark for everyone)');
+
+  const r2 = await run(body, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, []) });
+  assert.ok(r2.attempts.some(a => a.model === GOLADDER[0]),
+    'the NEXT caller still gets the head rung — a transient skip filters it out of rungs entirely');
+  assert.equal(r2.model, GOLADDER[0], 'and this time it answers');
+});
+
 // ── Streaming (opencode as a client of the free ladder) ────────────────────────────────────────
 const enc = new TextEncoder();
 function sseBody(events, { delayFirstMs = 0, endWithoutOutput = false } = {}) {

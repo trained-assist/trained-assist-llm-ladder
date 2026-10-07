@@ -3,7 +3,9 @@
 //
 //   state = {
 //     health: { [model]: { failures, firstFailureAt, lastFailureAt, class, skipUntil } },
-//                          // skipUntil: epoch ms, or null = config-class (never auto-clears)
+//                          // skipUntil: epoch ms = skip everyone until then;
+//                          //           null = config-class (dead until a success clears it);
+//                          //            0  = context-class (recorded, but the rung stays eligible)
 //     keys:   { active: <pool index>, exhausted: { [index]: <epoch ms until usable> } },
 //   }
 //
@@ -30,6 +32,11 @@ export function recordFailure(state, model, { cls = 'transient', retryAfterMs } 
   e.lastFailureAt = now;
   e.class = cls;
   if (cls === 'config') e.skipUntil = null;
+  // Recorded but never shared: a context-class failure is a property of THIS request (the prompt
+  // did not fit), so the rung stays eligible for everyone else. `0` is the deliberate "not
+  // skipped" marker — `null` means the opposite (config = dead until a success clears it) and
+  // both readers key off that: `skipped()` tests `=== null`, the gate tests `until > now`.
+  else if (cls === 'context') e.skipUntil = 0;
   else if (cls === 'transient') e.skipUntil = now + backoffFor(e.failures, policy);
   else e.skipUntil = now + (Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : backoffFor(e.failures, policy));
   state.health[model] = e;
