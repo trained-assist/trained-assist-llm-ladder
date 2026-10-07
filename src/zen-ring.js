@@ -532,6 +532,14 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   const cap = Math.max(BACKLOG_FACTOR * live, 1);
   const queued = await readQueued(env);
   if (queued >= cap) {
+    // A full queue under ONE worker is a capacity problem, not a health problem — so grow the ring
+    // while refusing, instead of only waiting for somebody else to do it. scaleRing is idempotent
+    // inside BOOT_MS (25 s), so a burst of refusals dispatches at most one worker per boot window
+    // rather than one per call; once it registers, cap doubles (2 × live) and the next caller gets
+    // in. The scheduled autoscaler was supposed to do this and cannot: its ZEN_RUNNER_URL /
+    // ZEN_RUNNER_TOKEN were absent from the repository, so every run since at least 2026-10-05 has
+    // died with SCALE_CONFIG_MISSING and the ring was never grown on demand either.
+    await scaleRing(env, { now, demand: queued + 1, fetchImpl });
     return {
       status: 503,
       data: {

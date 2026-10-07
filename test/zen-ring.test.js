@@ -850,3 +850,25 @@ test('the poll loop buries the dead: stale rows are reaped before orphans are re
   assert.deepEqual(stale, [], 'the 45h-old rows are gone, not recycled');
   assert.ok(d1._tasks.has('live1'));
 });
+
+// Refusing is only half the answer: a queue full under a single worker means the ring is too
+// small, so the refusal must also try to grow it. The scheduled autoscaler cannot (its config was
+// missing from the repository), so the hot path is where growth has to come from.
+test('a full queue also grows the ring: refusing dispatches a worker, not just a 503', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+
+  await zenRingRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+  d1._tasks.set('q2', { id: 'q2', model: 'm', state: 'queued', enqueued_at: NOW - 4 });
+
+  const before = gh.calls.length;
+  const r = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?' }, gh.fetchImpl);
+  assert.equal(r.status, 503);
+  assert.equal(r.data.error, 'pool_backlog', 'the caller still fails over — no task, no quota');
+  assert.ok(gh.calls.length > before, 'but the ring was asked to grow');
+  assert.ok(d1._dispatches.size >= 1, 'and a dispatch was recorded');
+});
