@@ -59,10 +59,16 @@ jobs:
           RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
           RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           DAILY_BUDGET: '8000'
+          # Where the provisioned worker files are read from — deploy-time, never hardcoded here.
+          # The ring dispatcher belongs to a repository of its own; this repo must not carry its
+          # name. Unset → this repository, which is today's behaviour.
+          SOURCE_REPO: ${{ vars.ZEN_RING_SOURCE_REPO || github.repository }}
+          SOURCE_REF: ${{ vars.ZEN_RING_SOURCE_REF || 'main' }}
         run: |
           set -euo pipefail
           umask 077
           printf '%s' "$RUNNER_TOKEN" > /tmp/runner-token
+          echo "worker source: $SOURCE_REPO@$SOURCE_REF"
           # Each row carries its own token: the ring is per-repo, so provisioning must be too.
           # A row without a token falls back to GH_RING_ADMIN_PAT (kept for the legacy path).
           jq -c '.[]' .ring/ring.json | while read -r row; do
@@ -71,12 +77,21 @@ jobs:
             if [ -z "$pat" ]; then pat="${ADMIN_PAT:-}"; fi
             if [ -z "$pat" ]; then echo "provision $repo skipped — no token in row and no GH_RING_ADMIN_PAT"; continue; fi
             for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs; do
-              # The ladder repo is the source of truth for the worker code — pull from there, not
-              # from this repo, so a worker change lands in the ring on the next sync. And always
-              # overwrite: the old "skip if present" left stale workers serving empty prompts.
+              # The worker code comes from $SOURCE_REPO (deploy-time variable, see env above) — not
+              # from this repo — so a change in the source lands in the ring on the next sync.
+              # -f: a 404/500 must abort this file, NOT be base64'd into the ring repo as garbage;
+              # the old call without -f would happily push the literal "404: Not Found" body.
+              # Always overwrite: the old "skip if present" left stale workers serving empty prompts.
               # The contents API needs the existing file's sha to overwrite it — without it the PUT
               # answers 422 and the ring keeps the stale worker.
-              content=$(curl -sS "https://raw.githubusercontent.com/trained-assist/trained-assist-llm-ladder/main/$f" | base64 -w0)
+              if ! content=$(curl -fsS "https://raw.githubusercontent.com/$SOURCE_REPO/$SOURCE_REF/$f" | base64 -w0); then
+                echo "provision $repo $f FETCH-FAILED from $SOURCE_REPO@$SOURCE_REF — skipped, not written"
+                continue
+              fi
+              if [ -z "$content" ]; then
+                echo "provision $repo $f EMPTY from $SOURCE_REPO@$SOURCE_REF — skipped, not written"
+                continue
+              fi
               sha=$(curl -sS -H "authorization: Bearer $pat" "https://api.github.com/repos/$repo/contents/$f" | jq -r '.sha // empty')
               jq -n --arg msg "zen-pool: sync $f" --arg content "$content" --arg sha "$sha" \
                 '{message:$msg, content:$content, branch:"main"} + (if $sha != "" then {sha:$sha} else {} end)' > /tmp/req.json

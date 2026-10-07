@@ -395,9 +395,30 @@ export async function zenRepos(request, env) {
 // Cron sweep (every 15 min): re-check at most ZEN_SWEEP_MAX quarantined models whose backoff has
 // expired. This is what makes the exponential ladder self-healing — nobody has to poke the dead
 // ones by hand, and the budget check below means a sweep can never overrun the caps.
+// A queued/claimed row older than this can never be served again: the caller's own watchdog is
+// <= 90 s (wait_ms clamped to [1 s, 90 s]), so nobody is waiting for it. Such rows used to be
+// recycled forever — claimTask requeues an orphan on every pull, the worker claims it again, the
+// answer never comes — which kept `queued` above the door's cap and made the head rung refuse
+// EVERY call with pool_backlog while the worker itself was serving fine. Measured 2026-10-07:
+// 139 `claimed` rows, enqueued_at up to 45 h old, head dead for 17 h, worker alive.
+export const STALE_TASK_MS = 10 * 60_000;
+
+// Drop dead tasks so the queue only ever counts work someone can still be waiting for.
+export async function reapStaleTasks(env, now = Date.now()) {
+  if (!env.ZEN_DB) return { ok: false, reaped: 0 };
+  const res = await env.ZEN_DB.prepare(
+    "DELETE FROM zen_pool_tasks WHERE state IN ('queued', 'claimed') AND enqueued_at < ?1"
+  ).bind(now - STALE_TASK_MS).run();
+  const reaped = res?.meta?.changes ?? 0;
+  if (reaped) console.log(JSON.stringify({ route: 'zen/reap', reaped, older_than_ms: STALE_TASK_MS }));
+  return { ok: true, reaped };
+}
+
 export async function zenSweep(env, fetchImpl = fetch) {
   if (!env.ZEN_DB) return { ok: false, error: 'zen database not configured' };
   const now = nowMs(env);
+  // Before probing models, clear the dead queue that would otherwise hold the head rung shut.
+  const reaped = await reapStaleTasks(env, now);
   const max = Number(env.ZEN_SWEEP_MAX) || 3;
   const due = (await env.ZEN_DB.prepare(
     'SELECT model FROM zen_models WHERE next_check_at <= ?1 AND status != ?2 ORDER BY next_check_at LIMIT ?3'
@@ -414,8 +435,8 @@ export async function zenSweep(env, fetchImpl = fetch) {
     out.push({ model, status: res.status });
     await env.ZEN_DB.prepare('UPDATE zen_models SET next_check_at = ?1 WHERE model = ?2').bind(now + 10 * 60_000, model).run();
   }
-  console.log(JSON.stringify({ route: 'zen/sweep', checked: out.length, out }));
-  return { ok: true, checked: out.length, out };
+  console.log(JSON.stringify({ route: 'zen/sweep', checked: out.length, reaped: reaped.reaped, out }));
+  return { ok: true, checked: out.length, reaped: reaped.reaped, out };
 }
 
 // GET /zen/result/{run_id} — the answer text for one run, so the caller never has to read

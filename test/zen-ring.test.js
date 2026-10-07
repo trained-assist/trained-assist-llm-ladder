@@ -8,8 +8,9 @@ import {
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
-  ringCooldown, ringInvoke, zenRingRegister,
+  ringCooldown, ringInvoke, zenRingRegister, runMaintenance,
 } from '../src/zen-ring.js';
+import { STALE_TASK_MS } from '../src/zen-runner.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
 const NOW = Date.UTC(2026, 9, 4, 10, 0, 0);
@@ -51,6 +52,9 @@ function fakeD1(seed = {}) {
     }
     if (/FROM zen_models WHERE model = \?1/.test(sql)) return models.get(p[0]) || null;
     if (/FROM zen_budget WHERE scope/.test(sql)) return budget.get(`${p[0]}|${p[1]}`) || null;
+    if (/COUNT\(\*\) AS n FROM zen_pool_tasks WHERE state = \?1 AND enqueued_at >= \?2/.test(sql)) {
+      return { n: [...tasks.values()].filter((t) => t.state === p[0] && t.enqueued_at >= p[1]).length };
+    }
     if (/COUNT\(\*\) AS n FROM zen_pool_tasks WHERE state/.test(sql)) return { n: [...tasks.values()].filter((t) => t.state === p[0]).length };
     if (/COUNT\(\*\) AS n FROM zen_pool_tasks WHERE enqueued_at/.test(sql)) return { n: [...tasks.values()].filter((t) => t.enqueued_at > p[0]).length };
     if (/COUNT\(\*\) AS n FROM zen_pool_dispatches/.test(sql)) return { n: [...dispatches.values()].filter((d) => d.requested_at > p[0]).length };
@@ -69,6 +73,13 @@ function fakeD1(seed = {}) {
     return [];
   }
   function run_(sql, p) {
+    if (/DELETE FROM zen_pool_tasks WHERE state IN/.test(sql)) {
+      const before = tasks.size;
+      for (const [k, t] of [...tasks]) {
+        if ((t.state === 'queued' || t.state === 'claimed') && t.enqueued_at < p[0]) tasks.delete(k);
+      }
+      return { success: true, meta: { changes: before - tasks.size } };
+    }
     if (/INSERT INTO zen_pool_workers/.test(sql)) {
       const [id, workerId, repo, runId, attempt, egress, runner, node, idleExit, leaseExp, now] = p;
       workers.set(id, {
@@ -790,4 +801,96 @@ test('a saturated ring fails the caller over at once instead of holding it for t
   const ringAttempt = r.attempts.find((a) => a.model.startsWith('zen-rings/'));
   assert.match(ringAttempt.error, /pool_backlog/, 'and must say why, without a status-code digit');
   assert.equal(d1._tasks.size, 3, 'the refused task was never queued');
+});
+
+// The failure this pins (measured 2026-10-07): the head rung refused EVERY call with
+// pool_backlog for 17 h while the worker itself was fine — `claimed`/`queued` held 139 rows whose
+// enqueued_at was up to 45 h old. A caller's watchdog is <= 90 s, so nobody is ever waiting for a
+// row that old: it is litter, and litter must not ration the door.
+test('dead rows do not hold the door: a 45h-old queued backlog is not counted against the cap', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+
+  await zenRingRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);   // one live worker → cap = 2
+
+  for (let i = 0; i < 5; i++) {
+    d1._tasks.set(`stale${i}`, { id: `stale${i}`, model: 'm', state: 'queued', enqueued_at: NOW - 45 * 3_600_000 });
+  }
+
+  const r = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?', wait_ms: 1_000 }, gh.fetchImpl);
+  assert.notEqual(r.data?.error, 'pool_backlog',
+    'a row nobody can be waiting for must not refuse the call');
+  assert.ok([...d1._tasks.values()].some((t) => t.enqueued_at >= NOW),
+    'the call itself was admitted');
+});
+
+// The same litter, removed where it is born: the poll loop reaps before it requeues orphans,
+// otherwise every pull recycles the dead row (claimed → queued → claimed) forever.
+test('the poll loop buries the dead: stale rows are reaped before orphans are requeued', async () => {
+  const d1 = fakeD1();
+  const reg = await post('/zen/pool/register', { worker_id: 'LLM-t:1:1', repo: 'o/r' }, d1);
+  assert.equal(reg.status, 200);
+  const lease = await reg.json();
+
+  for (let i = 0; i < 3; i++) {
+    d1._tasks.set(`oldq${i}`, { id: `oldq${i}`, model: 'm', state: 'queued', enqueued_at: NOW - 45 * 3_600_000 });
+  }
+  d1._tasks.set('oldc', { id: 'oldc', model: 'm', state: 'claimed', enqueued_at: NOW - 45 * 3_600_000, claimed_at: NOW - 45 * 3_600_000 });
+  d1._tasks.set('live1', { id: 'live1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  assert.equal(pulled.status, 200);
+  const task = (await pulled.json()).task;
+  assert.equal(task.id, 'live1', 'the still-useful task is what the worker gets');
+
+  const stale = [...d1._tasks.values()].filter((t) => t.enqueued_at < NOW - STALE_TASK_MS);
+  assert.deepEqual(stale, [], 'the 45h-old rows are gone, not recycled');
+  assert.ok(d1._tasks.has('live1'));
+});
+
+// Refusing is only half the answer: a queue full under a single worker means the ring is too
+// small, so the refusal must also try to grow it. The scheduled autoscaler cannot (its config was
+// missing from the repository), so the hot path is where growth has to come from.
+test('a full queue also grows the ring: refusing dispatches a worker, not just a 503', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+
+  await zenRingRegister(new Request('https://l.test/x', {
+    method: 'POST', headers: { authorization: 'Bearer zen-tok' }, body: JSON.stringify({ worker_id: 'w:1' }),
+  }), env2);
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+  d1._tasks.set('q2', { id: 'q2', model: 'm', state: 'queued', enqueued_at: NOW - 4 });
+
+  const before = gh.calls.length;
+  const r = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?' }, gh.fetchImpl);
+  assert.equal(r.status, 503);
+  assert.equal(r.data.error, 'pool_backlog', 'the caller still fails over — no task, no quota');
+  assert.ok(gh.calls.length > before, 'but the ring was asked to grow');
+  assert.ok(d1._dispatches.size >= 1, 'and a dispatch was recorded');
+});
+
+// The cadence has to live in the worker: GitHub's own */2 schedule delivered runs 4-7 hours apart
+// (every one of them failing with SCALE_CONFIG_MISSING), so the ring was never grown on a
+// schedule. One tick must both grow the ring and clean up, without depending on any GitHub secret.
+test('one cron tick grows the ring and cleans up — no GitHub workflow involved', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+
+  // a queue nobody is serving + no live worker: the tick must decide to dispatch
+  d1._tasks.set('q1', { id: 'q1', model: 'm', state: 'queued', enqueued_at: NOW - 5 });
+
+  const out = await runMaintenance(env2, { fetchImpl: gh.fetchImpl });
+  assert.ok(out.scale.ok !== false, 'scale half answers');
+  assert.ok(out.summary.dispatched >= 1, `a worker was dispatched (got ${out.summary.dispatched})`);
+  assert.equal(d1._dispatches.size, 1);
+  assert.ok(Object.hasOwn(out.summary, 'reaped'), 'the reap/sweep half reports too');
+
+  // second tick inside the boot window must not double-dispatch
+  const again = await runMaintenance(env2, { fetchImpl: gh.fetchImpl });
+  assert.equal(again.summary.dispatched, 0, 'idempotent within BOOT_MS');
 });

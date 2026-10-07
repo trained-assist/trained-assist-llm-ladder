@@ -288,8 +288,12 @@ them here without re-provisioning every repo would break the ring:
 | `.github/workflows/zen-pool*.yml`, `scripts/zen-pool*.mjs` | these are the files `zen-ring-sync` copies into every ring repo |
 
 The dispatcher is deliberately a self-contained module (`src/zen-ring.js`): the owner's direction
-is that this logic belongs in the separate [`zen-rings/zen-rings`](https://github.com/zen-rings/zen-rings)
-repository, so moving it out should be a file move, not a rewrite.
+is that this logic lives in a repository of its own, so moving it out should be a file move, not a
+rewrite. That repository is **not** named anywhere in this codebase — `zen-ring-sync` reads the
+source of the provisioned worker code from the deploy-time variable
+`ZEN_RING_SOURCE_REPO` (branch `ZEN_RING_SOURCE_REF`, default `main`), falling back to this
+repository itself. Pointing the worker code at another repository is therefore a variable change
+at deploy, not a code change here.
 
 `ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
 `/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
