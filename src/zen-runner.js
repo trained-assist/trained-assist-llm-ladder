@@ -20,7 +20,7 @@ const MODEL_RE = /^[A-Za-z0-9._:@/-]{1,120}$/;
 const REPO_RE = /^[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._-]{1,80}$/;
 
 // Owner's numbers, with headroom under the measured ~90-95/min and ~940/day per (IP, model).
-export const LIMITS = { perMin: 50, perDay: 500 };
+export const LIMITS = { perMin: 50, perDay: 700 };
 // `down` = the provider keeps saying the same thing (measured: 22 identical 500s in a row).
 // Silence for hours is correct there. `flaky` = alive but unreliable (measured: fledge-alpha-free
 // at ~9%) — it must be re-checked often, because every check can catch a working window.
@@ -188,6 +188,22 @@ export async function bumpCount(env, scope, model, now) {
   ).bind(scope, model, now, day).run();
 }
 
+// #133: the provider's daily quota is per MODEL, not one pool split between models — MiMo taking
+// its 500 must not hand Nemotron a `429 budget exhausted (day)` on an untouched quota (measured:
+// with MiMo and two others down, Nemotron kept answering on the same account). So the provider-wide
+// counter's day cap can never be narrower than the sum of the independent allowances: it is
+// `perDay × (model counters that moved today + 1)`. The `+1` is the provider that has not called
+// yet and so has no row to count — without it a brand-new model would be capped at zero.
+//
+// The MINUTE cap is deliberately untouched: OpenRouter `:free` really is ~20/min per account, a
+// shared limit. Only the daily one was a sum masquerading as a limit.
+export async function sharedDayCap(env, perDay, now = Date.now()) {
+  const row = await db(env).prepare(
+    `SELECT COUNT(*) AS n FROM zen_budget WHERE day = ?1 AND NOT (scope = '*' AND model = '*')`
+  ).bind(utcDay(now)).first();
+  return perDay * ((row?.n || 0) + 1);
+}
+
 export async function readModel(env, model) {
   return await db(env).prepare('SELECT * FROM zen_models WHERE model = ?1').bind(model).first();
 }
@@ -276,10 +292,11 @@ export async function zenRun(request, env, fetchImpl = fetch) {
   if (!pick) return j(503, { error: 'no usable runner repository' });
 
   // Budget: the pair (repo, model) is the real quota; '*' is the provider-wide brake.
-  const perRepo = budgetVerdict(await readCounts(env, pick.repo, model), now,
-    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
+  const perMin = Number(env.ZEN_PER_MIN) || LIMITS.perMin;
+  const perDay = Number(env.ZEN_PER_DAY) || LIMITS.perDay;
+  const perRepo = budgetVerdict(await readCounts(env, pick.repo, model), now, { perMin, perDay });
   const perAll = budgetVerdict(await readCounts(env, '*', '*'), now,
-    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
+    { perMin, perDay: await sharedDayCap(env, perDay, now) });
   for (const v of [perRepo, perAll]) {
     if (!v.ok) return j(429, { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after, repo: pick.repo });
   }

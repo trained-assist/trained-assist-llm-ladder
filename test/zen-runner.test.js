@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { handle } from '../src/handler.js';
 import {
-  nextCheckAt, applyReport, budgetVerdict, pickNextRepo, encryptToken, decryptToken, LIMITS, LADDERS,
+  nextCheckAt, applyReport, budgetVerdict, sharedDayCap, pickNextRepo, encryptToken, decryptToken, LIMITS, LADDERS,
 } from '../src/zen-runner.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok', ZEN_TOKEN_KEY: Buffer.alloc(32, 7).toString('base64') };
@@ -46,6 +46,10 @@ function fakeD1(seed = {}) {
     if (/FROM zen_runs WHERE id = \?1/.test(sql)) return runs.get(p[0]) || null;
     if (/COUNT\(\*\) AS n FROM zen_repos WHERE enabled = 1/.test(sql)) return { n: repos.filter((r) => r.enabled).length };
     if (/COUNT\(\*\) AS n FROM zen_models/.test(sql)) return { n: models.size };
+    if (/COUNT\(\*\) AS n FROM zen_budget WHERE day/.test(sql)) {
+      const d = p[0];
+      return { n: [...budget.values()].filter((b) => b.day === d && !(b.scope === '*' && b.model === '*')).length };
+    }
     if (/SELECT repo, enabled/.test(sql)) return null;
     return null;
   }
@@ -159,19 +163,48 @@ test('applyReport: success resets everything; hard kind repeats → down; soft k
   assert.equal(f.next_check_at - NOW, LADDERS.flaky[0]);
 });
 
-test('budgetVerdict: 50/min and 500/day, rolling minute + UTC day', () => {
+test('budgetVerdict: 50/min and 700/day, rolling minute + UTC day', () => {
   assert.equal(LIMITS.perMin, 50);
-  assert.equal(LIMITS.perDay, 500);
+  assert.equal(LIMITS.perDay, 700);
   assert.equal(budgetVerdict({ minute_count: 49, minute_at: NOW, day_count: 0, day: '2026-10-04' }, NOW).ok, true);
   const m = budgetVerdict({ minute_count: 50, minute_at: NOW, day_count: 0, day: '2026-10-04' }, NOW);
   assert.equal(m.ok, false);
   assert.equal(m.reason, 'minute');
   assert.equal(m.retry_after, 60_000);
-  const d = budgetVerdict({ minute_count: 0, minute_at: 0, day_count: 500, day: '2026-10-04' }, NOW);
+  const d = budgetVerdict({ minute_count: 0, minute_at: 0, day_count: 700, day: '2026-10-04' }, NOW);
   assert.equal(d.reason, 'day');
   assert.ok(d.retry_after > 0 && d.retry_after <= 86_400_000, 'retry_after points at the next UTC midnight');
   // a stale minute window and a day from yesterday both read as free
-  assert.equal(budgetVerdict({ minute_count: 50, minute_at: NOW - 61_000, day_count: 500, day: '2026-10-03' }, NOW).ok, true);
+  assert.equal(budgetVerdict({ minute_count: 50, minute_at: NOW - 61_000, day_count: 700, day: '2026-10-03' }, NOW).ok, true);
+});
+
+// #133: the provider-wide day cap must never be narrower than the independent allowances it stands
+// for. One model spending its quota used to close the rung for every other model on a pool whose
+// own quota was untouched — measured as MiMo taking 500 and Nemotron getting 429 the next call.
+test('sharedDayCap: the provider-wide day cap grows with the models that moved today', async () => {
+  const d1 = fakeD1({ budget: [
+    { scope: '*', model: '*', day_count: 699, day: '2026-10-04' },   // the global row never counts itself
+    { scope: 'r/a', model: 'mimo', day_count: 700, day: '2026-10-04' },
+    { scope: 'r/b', model: 'nemotron', day_count: 1, day: '2026-10-04' },
+    { scope: 'r/c', model: 'yesterday', day_count: 700, day: '2026-10-03' },  // a stale day is not "moving today"
+  ] });
+  const env = { ZEN_DB: d1 };
+
+  // two model counters moved today -> cap is 3 x perDay: two allowances plus the one not called yet
+  assert.equal(await sharedDayCap(env, LIMITS.perDay, NOW), LIMITS.perDay * 3);
+  assert.equal(LIMITS.perDay, 700);
+
+  // no counters today: a brand-new pool is not capped at zero, it gets one allowance
+  assert.equal(await sharedDayCap(env, 700, NOW + 86_400_000), 700);
+
+  // and the cap is never narrower than the sum of the independent daily allowances:
+  // one model at its full 700 still leaves room for the others
+  const cap = await sharedDayCap(env, LIMITS.perDay, NOW);
+  const unlimited = budgetVerdict({ minute_count: 0, minute_at: 0, day_count: cap, day: '2026-10-04' }, NOW,
+    { perMin: LIMITS.perMin, perDay: cap });
+  assert.equal(unlimited.ok, false, 'the shared counter is still capped — just not at one model\'s quota');
+  assert.equal(budgetVerdict({ minute_count: 0, minute_at: 0, day_count: 699, day: '2026-10-04' }, NOW,
+    { perMin: LIMITS.perMin, perDay: cap }).ok, true, '699 of 2100 is not exhausted');
 });
 
 test('pickNextRepo: strict round-robin, disabled and skipped rows are left out', () => {
@@ -296,7 +329,7 @@ test('POST /zen/report + GET /zen/models: the dead model goes quiet, the healthy
   assert.ok(by['fledge-free'].next_check_in <= LADDERS.flaky[0], 'the ~9%-alive model is re-checked within a minute');
   assert.equal(by['good-free'].status, 'ok');
   assert.equal(by['good-free'].next_check_in, 6 * 3_600_000);
-  assert.deepEqual(b.limits, { per_min: 50, per_day: 500 });
+  assert.deepEqual(b.limits, { per_min: 50, per_day: 700 });
 
   // and the dead model really is refused at the door
   const refused = await handle(new Request('https://l.test/zen/run', {
