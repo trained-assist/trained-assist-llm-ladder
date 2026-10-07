@@ -26,6 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
+import { estimateTokens, fits } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
@@ -582,6 +583,12 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
 
   const wantJson = body.response_format && body.response_format.type === 'json_object';
   const deadline = totalTimeoutMs ? now + totalTimeoutMs : Infinity;
+  // Size gate (owner 2026-10-07): a rung whose window is smaller than this request cannot answer,
+  // and its refusal is expensive — measured the same day, opencode-go takes ~98K tokens and at
+  // ~123K answers `429 Endpoint is unavailable` while rotating through every key: 48 s of wall
+  // clock, three keys burned, still no answer. Refusing BEFORE the attempt is pure win; the
+  // attempt record stays so /v1/calls shows why the rung was not tried.
+  const inputTokens = estimateTokens(body);
   const attempts = [];
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
@@ -590,6 +597,12 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
      if (isGo && goParked && !model.endsWith('-free')) continue;
      const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
+    // Skipped, not failed: the request is wrong for THIS rung, exactly like a context overflow —
+    // recording a failure would health-skip a perfectly good model for every other caller.
+    if (!fits(model, inputTokens)) {
+      attempts.push({ model, outcome: 'skipped', error: `input ~${inputTokens}t above the rung ceiling` });
+      continue;
+    }
     const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation, appSlug, appTitle };
     let key = keyIndex;
     const tried = new Set([key]);
