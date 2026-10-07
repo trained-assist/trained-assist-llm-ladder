@@ -1,0 +1,22 @@
+{
+  "_comment": "Reference quality of the free models — NOT measured by our own CI, this is external benchmark evidence kept next to the speed test so a rung can be read as 'fast AND good' in one table. Key is the bare model name (the suffix after the last slash) because the same model can appear under several prefixes: opencode-zen/big-pickle and zen-rings/big-pickle are the same weights. Update when a cited benchmark is superseded; an unknown model shows '—' and costs nothing.",
+  "checked": "2026-10-07",
+  "models": {
+    "big-pickle": {
+      "quality": "high",
+      "evidence": "SWE Atlas 50.8% — сильный результат для бесплатной модели"
+    },
+    "space-bunny-free": {
+      "quality": "high",
+      "evidence": "Terminal-Bench 2.1: 52.1% pass@1 — лучший из проверенных"
+    },
+    "nemotron-3-ultra-free": {
+      "quality": "high",
+      "evidence": "NVIDIA Code 85.3% (собственный бенчмарк), LiveCodeBench 86% в агрегированных данных"
+    },
+    "exo-free": {
+      "quality": "unknown",
+      "evidence": "быстр (1.1 s), качественная оценка не собрана — и при этом не является рангом ни в одной лестнице"
+    }
+  }
+}
