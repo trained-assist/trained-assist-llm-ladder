@@ -123,12 +123,26 @@ jobs:
       - name: Verify public worker revision
         env:
           EXPECTED_BUILD_SHA: ${{ github.sha }}
+        # Same retry window as Smoke above: `wrangler deploy` returns before Cloudflare's edge
+        # stops serving the old revision, and the SHA check ran exactly once — so a healthy
+        # deploy went red whenever propagation took longer than the gap between the deploy and
+        # this step. Two runs in a row on 2026-10-07 failed this way (prod still serving the
+        # previous merge's `a8f721b…` while the run expected `251a029…`), with Smoke green
+        # throughout because Smoke only checks HTTP 200.
         run: |
           set -euo pipefail
-          HEALTH=$(curl -fsS --max-time 10 https://llm-ladder.trainedassist.store/health)
-          ACTUAL_BUILD_SHA=$(printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=JSON.parse(s);if(typeof h.build!=="string"||!h.build)process.exitCode=2;else process.stdout.write(h.build)}catch{process.exitCode=2}})')
-          if [ "$ACTUAL_BUILD_SHA" != "$EXPECTED_BUILD_SHA" ]; then
-            echo "Public Ladder is serving $ACTUAL_BUILD_SHA; expected $EXPECTED_BUILD_SHA" >&2
-            exit 1
-          fi
-          echo "Public Ladder revision verified: $ACTUAL_BUILD_SHA"
+          get_build() {
+            curl -fsS --max-time 10 https://llm-ladder.trainedassist.store/health 2>/dev/null \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=JSON.parse(s);process.stdout.write(typeof h.build==="string"?h.build:"")}catch{}})'
+          }
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            ACTUAL_BUILD_SHA=$(get_build || true)
+            if [ "$ACTUAL_BUILD_SHA" = "$EXPECTED_BUILD_SHA" ]; then
+              echo "Public Ladder revision verified: $ACTUAL_BUILD_SHA (try $i)"
+              exit 0
+            fi
+            echo "try $i: serving '$ACTUAL_BUILD_SHA', expected '$EXPECTED_BUILD_SHA'"
+            sleep 6
+          done
+          echo "Public Ladder is serving $ACTUAL_BUILD_SHA; expected $EXPECTED_BUILD_SHA" >&2
+          exit 1
