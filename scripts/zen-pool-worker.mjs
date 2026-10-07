@@ -58,6 +58,52 @@ const workerId = [
   process.env.GITHUB_RUN_ATTEMPT || '1',
 ].join(':');
 
+// Одновременный запуск («hedge») на крупном входе — решение Владельца (2026-10-07):
+// «нужно так или иначе получать хороший success rate на большом контексте, для этого остаётся
+// только одновременный запуск».
+//
+// Почему оно вообще работает: у одной и той же модели за id прячется несколько бэкендов, и они
+// ведут себя по-разному — замер 2026-10-07 на exo-free, 10 вызовов с одинаковым входом 500 000
+// токенов, распределение prompt_tokens: {4: 2, 466718: 2, 840413: 6}. Один из бэкендов вообще
+// не видит вход (prompt_tokens=4) и отвечает вслепую — медленнее всех (19–32 с против 4–7 с).
+// Раз бэкенд выбирается недетерминированно, повторная попытка = новый шанс, а одновременная =
+// тот же шанс без добавленного времени ожидания.
+//
+// Стоимость: каждая попытка сжигает свою квоту (zen считает запросы, не токены). Поэтому
+// гонится только крупный вход; мелкий и так отвечает и удваивать его квоту незачем.
+// Порог подбирается по кривой scripts/zen-context-curve.mjs.
+const HEDGE_ATTEMPTS = Math.max(1, Number(process.env.ZEN_HEDGE_ATTEMPTS) || 2);
+const HEDGE_ABOVE_BYTES = Math.max(0, Number(process.env.ZEN_HEDGE_ABOVE_BYTES) || 20_000);
+
+// Гонка: все попытки уходят одновременно, результат — ПЕРВАЯ успешная. Если ни одна не
+// выиграла, возвращаем первую ошибку: лестница классифицирует её и уйдёт на следующую ступень.
+async function chatHedged(payload, attempts) {
+  if (attempts <= 1) return client.chat(payload);
+  const started = Date.now();
+  return await new Promise((resolve) => {
+    let pending = attempts;
+    let settled = false;
+    let firstError = null;
+    for (let i = 0; i < attempts; i++) {
+      Promise.resolve()
+        .then(() => client.chat(payload))
+        .then((r) => {
+          if (r.ok) {
+            if (!settled) {
+              settled = true;
+              resolve({ ...r, hedge: { attempts, won: i + 1, ms: Date.now() - started } });
+            }
+          } else if (!firstError) firstError = r;
+        })
+        .catch((e) => { if (!firstError) firstError = { ok: false, kind: 'error', error: String(e?.message || e).slice(0, 200) }; })
+        .finally(() => {
+          pending -= 1;
+          if (pending === 0 && !settled) resolve(firstError);
+        });
+    }
+  });
+}
+
 const client = createZenClient({
   ratePerMin: 50,
   dailyBudget: Number(process.env.ZEN_DAILY_BUDGET || 500),
@@ -117,12 +163,16 @@ async function serve(task) {
   const messages = Array.isArray(task.messages) && task.messages.length
     ? task.messages
     : [{ role: 'user', content: task.prompt }];
-  const res = await client.chat({
+  const payload = {
     model: task.model,
     messages,
     ...(Array.isArray(task.tools) && task.tools.length ? { tools: task.tools } : {}),
     maxTokens: task.max_tokens || 300,
-  });
+  };
+  const inputBytes = new TextEncoder().encode(JSON.stringify(messages)).length;
+  const attempts = inputBytes >= HEDGE_ABOVE_BYTES ? HEDGE_ATTEMPTS : 1;
+  mark('chat_start', { input_bytes: inputBytes, attempts });
+  const res = await chatHedged(payload, attempts);
   const text = res.ok ? String(res.message?.content ?? '').trim() : '';
   const record = {
     ok: !!res.ok && text.length > 0,
@@ -135,6 +185,7 @@ async function serve(task) {
     error: res.ok ? null : String(res.error || res.bodySnippet || '').slice(0, 500),
     provider_ms: res.ms ?? null,
     served_ms: Date.now() - started,
+    ...(res.hedge ? { hedge: res.hedge } : {}),
     ...(res.ok && res.message?.tool_calls?.length ? { tool_calls: res.message.tool_calls } : {}),
     ...(res.ok && res.usage ? { usage: res.usage } : {}),
     ...(res.ok && res.finish_reason ? { finish_reason: res.finish_reason } : {}),
@@ -152,6 +203,7 @@ async function serve(task) {
   console.log('POOL_SERVE_RESULT ' + JSON.stringify({
     task_id: task.id, ok: record.ok, model: record.model, kind: record.kind,
     status: record.status, provider_ms: record.provider_ms, served_ms: record.served_ms,
+    hedge: record.hedge || null,
     chars: text.length, text: text.slice(0, 800), error: record.error,
   }));
   const posted = await call('/zen/pool/result', {
