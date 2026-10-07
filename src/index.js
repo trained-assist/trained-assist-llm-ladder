@@ -36,13 +36,15 @@
 
 import { handle } from './handler.js';
 import { runMaintenance } from './zen-ring.js';
+import { resolveErrorPublisher } from './events.js';
 
 export { LadderState } from './state-do.js';
 export { handle, makeStore } from './handler.js';
 
 export default {
   fetch(request, env) {
-    return handle(request, env);
+    const events = resolveErrorPublisher(env);
+    return handle(request, env, { events });
   },
   // Every 2 min (wrangler.toml [triggers]): grow the ring if the queue is waiting, bury dead
   // tasks, re-check quarantined models. Bounded by ZEN_SWEEP_MAX and by the same 50/500 budget as

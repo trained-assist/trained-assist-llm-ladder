@@ -1,5 +1,7 @@
 // Trace plumbing: caller-supplied ids (x-ladder-*) → one D1 row per /v1/chat/completions call.
 // Kept in its own module so tests can import it without dragging in config/ladders.json.
+// options.events: optional error-event publisher (createErrorPublisher from src/events.js).
+//   Called fire-and-forget for failed calls, never throws.
 
 // Caller-supplied ids that let us attribute a ladder call to a task/session/user later.
 // All optional and length-capped; a missing/blank header → null (callers that send none,
@@ -35,23 +37,36 @@ const TRACE_SQL = `INSERT INTO ladder_calls
 // priced ~50x cheaper, so cost = (in-cached)*in_price + out*out_price + cached*cache_price.
 // app (#107) = the caller's sub-task tag, so the cost cut can be per sub-task and not only
 // per ladder — `service` covers ~20 different tools, which is too coarse to prioritise.
-export async function logCall(env, trace, ladder, r, started) {
+export async function logCall(env, trace, ladder, r, started, { events } = {}) {
   const db = env.LADDER_TRACE_DB;
-  if (!db) return;
+  if (!db && !events) return;
   const usage = !r.stream && r.data && r.data.usage ? r.data.usage : null;
   const cached = usage && usage.prompt_tokens_details ? usage.prompt_tokens_details.cached_tokens : null;
   try {
-    await db.prepare(TRACE_SQL).bind(
-      Date.now(),
-      trace.traceId, trace.runId, trace.userId, trace.chatId, trace.sessionId,
-      ladder, r.ok ? 1 : 0, r.model || null, Date.now() - started,
-      JSON.stringify(r.attempts || []),
-      usage ? usage.prompt_tokens ?? null : null,
-      usage ? usage.completion_tokens ?? null : null,
-      cached ?? null,
-      trace.app ?? null,
-    ).run();
+    if (db) {
+      await db.prepare(TRACE_SQL).bind(
+        Date.now(),
+        trace.traceId, trace.runId, trace.userId, trace.chatId, trace.sessionId,
+        ladder, r.ok ? 1 : 0, r.model || null, Date.now() - started,
+        JSON.stringify(r.attempts || []),
+        usage ? usage.prompt_tokens ?? null : null,
+        usage ? usage.completion_tokens ?? null : null,
+        cached ?? null,
+        trace.app ?? null,
+      ).run();
+    }
   } catch (e) {
     console.error('trace d1 insert failed:', e.message);
+  }
+  if (events && !r.ok) {
+    const { buildErrorEvent } = await import('./events.js');
+    const event = buildErrorEvent({
+      trace,
+      ladder,
+      error: r.error || 'every rung failed',
+      outcome: 'failed',
+      retryable: true,
+    });
+    events.publishError(event);
   }
 }
