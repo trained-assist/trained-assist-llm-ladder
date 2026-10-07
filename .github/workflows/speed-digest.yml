@@ -1,0 +1,85 @@
+name: speed-digest
+# The permanent speed benchmark the owner asked for (issue #147 follow-up): "сколько чего и как,
+# ступени — какие модели — время ответа".
+#
+# Why not just use trained-assist-free-models-benchmark's ladder-bench? It measures every rung too,
+# but it (a) runs every 6 h, (b) always ends red — `process.exit(ladderFail ? 1 : 0)` — so the green
+# or red badge carries no information and nobody opens it, and (c) times its own probes, not
+# production traffic. This digest reads what production already records (one row per served call in
+# D1, exposed by GET /v1/analytics), costs zero extra LLM calls, and can run as often as we want.
+#
+# Output goes to the run's Summary tab. Optional Telegram delivery: set TELEGRAM_BOT_TOKEN and
+# TELEGRAM_CHAT_ID as repository (or organisation) secrets and the same text is pushed there too —
+# without them that step is skipped, not failed.
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: window to report on
+        default: "4"
+      slow_ms:
+        description: mark a rung slower than this with a warning (ms)
+        default: "15000"
+      bad_ms:
+        description: mark a rung slower than this as a problem (ms)
+        default: "45000"
+  schedule:
+    # Every 4 h, off the hour to dodge GitHub's cron stampede (same reason analytics.yml uses :37).
+    - cron: '23 */4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Declared at job level so the step below can test them: `secrets` is not available in an
+    # `if` expression, `env` is.
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build digest
+        id: digest
+        env:
+          LLM_LADDER_TOKEN: ${{ secrets.LLM_LADDER_TOKEN }}
+          DIGEST_HOURS: ${{ github.event.inputs.hours || '4' }}
+          DIGEST_SLOW_MS: ${{ github.event.inputs.slow_ms || '15000' }}
+          DIGEST_BAD_MS: ${{ github.event.inputs.bad_ms || '45000' }}
+        run: |
+          set -euo pipefail
+          node scripts/speed-digest.mjs --hours="${DIGEST_HOURS}" | tee digest.md
+          {
+            echo 'DIGEST<<__EOF__'
+            cat digest.md
+            echo '__EOF__'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish to run summary
+        run: cat digest.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Optional: the same text to Telegram. Absent secrets skip the step — a digest must never be
+      # red because a notification channel is not configured yet.
+      - name: Push to Telegram
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        run: |
+          set -euo pipefail
+          # 4096 is the Bot API's message limit; the digest stays well under it, but clip anyway.
+          python3 - <<'PY'
+          import json, os, pathlib, urllib.request
+          text = pathlib.Path('digest.md').read_text()[:4000]
+          payload = json.dumps({
+              'chat_id': os.environ['TELEGRAM_CHAT_ID'],
+              'text': text,
+              'parse_mode': 'Markdown',
+              'disable_web_page_preview': True,
+          }).encode()
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              data=payload, headers={'content-type': 'application/json'})
+          urllib.request.urlopen(req, timeout=30).read()
+          print('telegram: sent')
+          PY

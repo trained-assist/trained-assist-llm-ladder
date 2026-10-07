@@ -129,6 +129,10 @@ report.negative = await negativeTest();
 report.offline = offlineTest();
 if (report.offline.verdict === 'FAIL') failures.push('offline context check did not refuse an over-cap prompt');
 
+// Response time is half of the owner's ranking criterion (the other half is how often a model
+// answers wrongly) — so it is printed everywhere the model is mentioned, not only in the report.
+const p50 = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const i = Math.floor(s.length / 2); return s.length % 2 ? s[i] : Math.round((s[i - 1] + s[i]) / 2); };
+
 for (const model of models) {
   const row = { calls: [], ok: 0, limited: 0, errors: 0, firstAnswer: null, ms: [] };
   for (let i = 0; i < cfg.runs; i++) {
@@ -160,7 +164,7 @@ for (const model of models) {
   row.cooldownUntilIso = row.cooldownUntilIso || (s.cooldownUntil ? new Date(s.cooldownUntil).toISOString() : null);
   report.models[model] = row;
   const tag = row.errors ? `ERROR ${row.lastKind}` : row.limited ? `⛔ ${row.stoppedBy || 'limited'}` : 'ok';
-  console.log(`${model.padEnd(34)} ${String(row.ok).padStart(2)}/${cfg.runs}  ${tag}${row.firstAnswer ? `  «${row.firstAnswer}»` : ''}`);
+  console.log(`${model.padEnd(34)} ${String(row.ok).padStart(2)}/${cfg.runs}  ${tag} ${row.ms.length ? `p50=${p50(row.ms)}ms` : ''}${row.firstAnswer ? `  «${row.firstAnswer}»` : ''}`);
 }
 
 if (cfg.deep) {
@@ -184,15 +188,53 @@ const okCount = Object.values(report.models).filter(m => m.ok > 0).length;
 const limitedCount = Object.values(report.models).filter(m => m.limited > 0).length;
 const errorCount = Object.values(report.models).filter(m => m.errors > 0).length;
 
+// Owner's ranking criterion (2026-10-07): speed and how often a model answers wrongly — not
+// context, not price, not benchmark scores. `ms` was already collected per successful call but
+// never printed, so "which free model answers first" was unmeasurable in the report that people
+// actually read. `p50` itself is declared once, before the per-model loop.
+const ms = (v) => (v == null ? '—' : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${v} ms`);
+const range = (a) => (a.length ? `${ms(Math.min(...a))}–${ms(Math.max(...a))}` : '—');
+
+const ranked = Object.entries(report.models)
+  .filter(([, r]) => r.ok > 0 && p50(r.ms) != null)
+  .sort((a, b) => p50(a[1].ms) - p50(b[1].ms));
+const dead = Object.entries(report.models)
+  .filter(([, r]) => r.ok === 0)
+  .sort((a, b) => (b[1].errors || 0) - (a[1].errors || 0));
+
+const speedTable = [
+  '### 🏎 Скорость и надёжность (главный критерий)',
+  '',
+  ranked.length
+    ? '| # | модель | p50 | разброс | ответили |'
+    : '_ни одна модель не ответила в этом прогоне_',
+  ...(ranked.length ? ['|---:|---|---:|---|---|'] : []),
+  ...ranked.map(([m, r], i) => `| ${i + 1} | \`${m}\` | **${ms(p50(r.ms))}** | ${range(r.ms)} | ${r.ok}/${cfg.runs} |`),
+  '',
+  ...(dead.length
+    ? [
+        '**Не отвечает** (не входит в рейтинг — сравнивать нечего):',
+        '',
+        '| модель | вызовов | ошибок | причина |',
+        '|---|---:|---:|---|',
+        ...dead.map(([m, r]) => `| \`${m}\` | ${cfg.runs} | ${r.errors} | ${r.errors ? `${r.lastKind}: ${String(r.lastError || '').slice(0, 90)}` : r.limited ? `⛔ ${r.stoppedBy || 'limit'}` : '—'} |`),
+      ]
+    : []),
+  '',
+];
+
 const md = [
   '## zen free self-test',
   '',
   `runner: \`${report.runner.os}\` · node ${report.runner.node} · egress \`${report.runner.egress}\`${report.runner.sha ? ` · \`${report.runner.sha.slice(0, 8)}\`` : ''}`,
   `negative (stream:false → 403): **${report.negative.verdict}** (${report.negative.status}) · offline over-cap refusal: **${report.offline.verdict}** · live calls sent: **${liveCalls}**`,
   '',
-  '| model | ok | limited | stoppedBy | cooldownUntil (UTC) | rate peak | answer |',
-  '|---|---|---|---|---|---|---|',
-  ...Object.entries(report.models).map(([m, r]) => `| \`${m}\` | ${r.ok}/${cfg.runs} | ${r.limited ? '⛔' : 0} | ${r.stoppedBy || '—'} | ${r.cooldownUntilIso || '—'} | ${r.ratePeak}/80 | ${r.errors ? `❌ ${r.lastKind}` : r.firstAnswer ? `«${(r.firstAnswer || '').slice(0, 60)}»` : '—'} |`),
+  ...speedTable,
+  '### Все модели',
+  '',
+  '| model | ms p50 | ok | limited | stoppedBy | cooldownUntil (UTC) | rate peak | answer |',
+  '|---|---:|---|---|---|---|---|---|',
+  ...Object.entries(report.models).map(([m, r]) => `| \`${m}\` | ${ms(p50(r.ms))} | ${r.ok}/${cfg.runs} | ${r.limited ? '⛔' : 0} | ${r.stoppedBy || '—'} | ${r.cooldownUntilIso || '—'} | ${r.ratePeak}/80 | ${r.errors ? `❌ ${r.lastKind}` : r.firstAnswer ? `«${(r.firstAnswer || '').slice(0, 60)}»` : '—'} |`),
   '',
   `**${okCount}/${models.length}** free models answered${limitedCount ? `, ${limitedCount} stopped by a limit (⛔ not measured — excluded from the denominator)` : ''}${errorCount ? `, ${errorCount} errored` : ''}.`,
   ...notes.map(n => `> ⚠️ ${n}`),
