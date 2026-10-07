@@ -142,7 +142,7 @@ export function categoryOf(model) {
 export function costUsd(model, tin, tcached, tout) {
   if (!model) return null;
   const p = prices[model];
-  if (!p) return (model.startsWith('opencode-zen/') || model.endsWith('-free') || model.endsWith(':free')) ? 0 : null;
+  if (!p) return (model.startsWith('opencode-zen/') || model.startsWith('zen-rings/') || model.endsWith('-free') || model.endsWith(':free')) ? 0 : null;
   const fresh = Math.max(0, (tin || 0) - (tcached || 0));
   return (fresh * p[0] + (tout || 0) * p[1] + (tcached || 0) * p[2]) / 1e6;
 }
