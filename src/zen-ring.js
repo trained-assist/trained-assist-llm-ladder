@@ -24,6 +24,13 @@ export const DEFAULT_IDLE_EXIT_MS = 10 * 60_000;  // a job with no work for this
 export const LEASE_TTL_MS = 90_000;     // a job that stops pulling is dead after this
 export const ORPHAN_TASK_MS = 120_000;  // a claimed task with no answer for this long is requeued
 
+// Above this input the free tier answers 200 with an EMPTY body instead of a refusal, so the call
+// fails anyway — only after 7–12 s of zen time, a task row, a budget bump and a wasted watchdog.
+// Measured 2026-10-07 over 2497 tasks, success by input size: 64 % (<5 KB), 68 % (5–20 KB),
+// 48 % (20–50 KB), then a cliff — 20 % (50–100 KB), 9 % (100–300 KB), 16–19 % (bigger).
+// 50 KB is where the cliff starts; overridable per environment.
+export const ZEN_MAX_INPUT_BYTES = 50_000;
+
 // ---- ring ceiling + autoscaling (owner's numbers, rationale in docs/zen-runner.md) -----------
 // The account allows 20 simultaneous Actions jobs, so the pool can never exceed that — and two
 // of the 20 stay free so an ordinary push/PR CI run is never starved by our own workers.
@@ -504,6 +511,29 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   }
   const prompt = String(body.prompt ?? '');
   if (!messages && !prompt.trim()) return { status: 400, data: { error: 'prompt is required' } };
+
+  // Refuse fat inputs at the door. zen does not refuse them — it returns 200 with an empty body
+  // (1073 such calls measured, 100 % empty text), which the ladder counts as a failed rung anyway.
+  // So sending this costs the caller 7–12 s of watchdog plus a task row and a budget bump, and
+  // buys nothing: above 50 KB success is 9–20 %, below it 48–68 %.
+  //
+  // The wording is not decoration: `input is too long` is what `classify.js` matches as `context`
+  // — a class that exists precisely because a normal-sized prompt from the NEXT caller still
+  // deserves this rung. Note `failureClass()` in src/ladder.js collapses everything except quota
+  // and config to `transient`, so this lands exactly where a today's empty-body answer lands, only
+  // without the wait.
+  const inputBytes = messages ? new TextEncoder().encode(messages).length : 0;
+  const inputLimit = Number(env.ZEN_MAX_INPUT_BYTES) || ZEN_MAX_INPUT_BYTES;
+  if (inputBytes > inputLimit) {
+    return {
+      status: 413,
+      data: {
+        error: `input is too long for the free tier: ${inputBytes} bytes, limit ${inputLimit}`,
+        bytes: inputBytes, limit: inputLimit,
+        hint: 'the caller walks to the next rung at once — nothing was queued, no quota spent',
+      },
+    };
+  }
   const waitMs = clampWaitMs(body.wait_ms);
   // The clamp is a ceiling, not a floor: an agent turn can need a long answer (a file edit), and
   // the ladder already clamps max_tokens to what the model takes.

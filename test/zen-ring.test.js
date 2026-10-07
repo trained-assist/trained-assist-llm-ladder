@@ -8,9 +8,10 @@ import {
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
-  ringCooldown, ringInvoke, zenRingRegister, runMaintenance,
+  ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
+import { classifyError } from '../src/classify.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
 const NOW = Date.UTC(2026, 9, 4, 10, 0, 0);
@@ -893,4 +894,38 @@ test('one cron tick grows the ring and cleans up — no GitHub workflow involved
   // second tick inside the boot window must not double-dispatch
   const again = await runMaintenance(env2, { fetchImpl: gh.fetchImpl });
   assert.equal(again.summary.dispatched, 0, 'idempotent within BOOT_MS');
+});
+
+// Measured 2026-10-07 over 2497 production tasks: success collapses past 50 KB of input (64 % at
+// <5 KB, 48 % at 20-50 KB, then 9-20 %), and zen answers those with HTTP 200 and an EMPTY body —
+// 1073 calls, 100 % empty text — so the caller still fails over, only after 7-12 s of zen time, a
+// task row and a budget bump. Refusing at the door must be strictly better than that.
+test('a fat input is refused at the door: no task, no quota, no dispatch, no retry', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+  const budgetBefore = JSON.stringify([...d1._budget.values()]);
+
+  const r = await ringInvoke(env2, {
+    model: 'nemotron-3-ultra-free',
+    messages: [{ role: 'user', content: 'x'.repeat(ZEN_MAX_INPUT_BYTES + 1_000) }],
+  }, gh.fetchImpl);
+
+  assert.equal(r.status, 413, 'refused with 413, not 503/429');
+  assert.ok(r.data.bytes > ZEN_MAX_INPUT_BYTES, 'the reported size is the real one');
+  assert.equal(d1._tasks.size, 0, 'no task row was created');
+  assert.equal(JSON.stringify([...d1._budget.values()]), budgetBefore, 'no provider quota spent');
+  assert.equal(gh.calls.length, 0, 'the ring was not even dispatched — this is decided locally');
+
+  // The message must classify as `context`, not as quota: that class exists so a normal-sized
+  // prompt from the NEXT caller still gets this rung. If someone rewords the message the rung
+  // would start getting skipped for everyone, so pin it.
+  assert.equal(classifyError(r.data.error).class, 'context',
+    'wording keeps the refusal out of the quota/config classes');
+
+  // A normal payload must sail through unchanged — the guard must not be trigger-happy.
+  // wait_ms is clamped to the minimum: without a live worker this call would otherwise sit out
+  // the whole 30 s watchdog before answering.
+  const small = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?', wait_ms: 1_000 }, gh.fetchImpl);
+  assert.notEqual(small.status, 413, 'a one-line prompt is not affected');
 });

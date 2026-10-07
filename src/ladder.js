@@ -425,7 +425,10 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
   let r = await ringCall(env, payload, fetchImpl);
   // ONE retry for a transient fault (a cold ring that just booted, a provider 5xx). A budget
   // refusal (429) is not retried — the cap is real and retrying inside the same minute is wasted.
-  if (r.status !== 200 && r.status !== 429) r = await ringCall(env, payload, fetchImpl);
+  // 413 (input too long for the free tier) is decided locally before anything is queued: the same
+  // payload cannot fit on a second attempt either, so there is nothing to retry — unlike a transient
+  // fault or a cold ring, where a second look genuinely can succeed.
+  if (r.status !== 200 && r.status !== 429 && r.status !== 413) r = await ringCall(env, payload, fetchImpl);
   if (r.status !== 200 || !r.data?.ok) {
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
