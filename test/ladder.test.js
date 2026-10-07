@@ -50,7 +50,7 @@ function fakeFetch(behaviour, calls) {
 const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 
 // Floor/diag assertions are pinned to EXPLICIT rung ids — never to GOLADDER[0]: #39 reordered the
-// real service ladder (space-bunny-free first) and that alone turned the previous version of
+// real service ladder (a free rung first) and that alone turned the previous version of
 // these tests red (#40 → CI fail), and #67 reordered it again (mimo first). DIAG_REASONING is
 // measured reasoning → 3000 floor; DIAG_SECOND exists only so the failover half of the diag tests
 // has a stable second rung.
@@ -63,7 +63,6 @@ test('config: #67 Pareto-first — zen ring opens, Go mimo next, free ×8 in the
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
-    'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
@@ -93,7 +92,7 @@ test('config: #67 Pareto-first — zen ring opens, Go mimo next, free ×8 in the
   }
   const paid = m => m.startsWith('openrouter/') && !m.endsWith(':free');
   const firstPaid = LADDER.findIndex(paid);
-  assert.ok(firstPaid === 15, 'paid OpenRouter only after zen ring, Go mimo, all eight free rungs and zen');
+  assert.ok(firstPaid === 14, 'paid OpenRouter only after zen ring, Go mimo, free Go and the free tail');
   assert.ok(LADDER.slice(firstPaid).every(paid), 'paid OpenRouter rungs only at the tail');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
   assert.ok(firstGoPaid === 2, 'Pareto-first: zen ring opens, Go mimo next (#67)');
@@ -111,7 +110,6 @@ test('config: free = 8 $0 rungs + zen tail + zen ring fallback (#42)', () => {
   assert.deepEqual(FREE, [
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
-    'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
@@ -124,10 +122,11 @@ test('config: free = 8 $0 rungs + zen tail + zen ring fallback (#42)', () => {
     'opencode-zen/big-pickle',
     'opencode-zen/nemotron-3.5-lightning-free',
   ]);
-  assert.equal(FREE.length, 14, 'zen ring ×2 + 8 $0 rungs + 4 zen tail');
+  assert.equal(FREE.length, 13, 'zen ring ×2 + 7 $0 rungs (longcat + OR ×6) + 4 zen tail');
   assert.ok(FREE.every(m => m.startsWith('opencode-zen/') || m.startsWith('zen-rings/') || m.endsWith('-free') || m.endsWith(':free')),
     'every free rung is $0 — no Go subscription, no paid OpenRouter');
-  assert.deepEqual(FREE.slice(10), [
+  // slice(-4), а не жёсткий индекс: он переживает удаление любого ранга из середины.
+  assert.deepEqual(FREE.slice(-4), [
     'opencode-zen/mimo-v2.6-flash-free',
     'opencode-zen/mimo-v2.5-free',
     'opencode-zen/big-pickle',
@@ -350,18 +349,18 @@ test('every key limited → paid Go rungs parked, free Go rungs keep serving (#6
   const store = memoryStore(2);
   const calls = [];
   const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
-  // service = [mimo, space-bunny, longcat, OR…]: mimo burns both keys → paid Go parked,
+  // service = [mimo, longcat, OR…]: mimo burns both keys → paid Go parked,
   // yet the free Go rung right behind it answers in the SAME call
-  assert.equal(r.model, 'opencode-go/space-bunny-free', 'free Go serves while every key is limited');
+  assert.equal(r.model, 'opencode-go/longcat-2.5-preview-free', 'free Go serves while every key is limited');
   assert.ok(store.state.health['opencode-go/mimo-v2.6-flash'], 'paid Go rung is parked');
-  assert.equal(store.state.health['opencode-go/space-bunny-free'], undefined, 'free Go rung is never parked');
+  assert.equal(store.state.health['opencode-go/longcat-2.5-preview-free'], undefined, 'free Go rung is never parked');
   assert.deepEqual(calls.filter(c => c.url.includes('opencode.ai')).map(c => c.model),
-    ['mimo-v2.6-flash', 'mimo-v2.6-flash', 'space-bunny-free'],
+    ['mimo-v2.6-flash', 'mimo-v2.6-flash', 'longcat-2.5-preview-free'],
     'paid rung once per key, then the free rung on the last key');
   // next call: paid Go still parked → the free rung is the head that answers
   const calls2 = [];
   const r2 = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls2) });
-  assert.equal(r2.model, 'opencode-go/space-bunny-free');
+  assert.equal(r2.model, 'opencode-go/longcat-2.5-preview-free');
   // window lapses → the normal head (paid Go) is back, without any manual step
   for (const m of Object.keys(store.state.health)) store.state.health[m].skipUntil = Date.now() - 1;
   for (const k of Object.keys(store.state.keys.exhausted)) store.state.keys.exhausted[k] = Date.now() - 1;
@@ -468,7 +467,7 @@ async function readAll(stream) {
 
 test('free-headed ladder rotates Go keys round-robin across calls (#81)', async () => {
   resetFreeGoKeyCursor();
-  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/space-bunny-free'] } } };
+  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/longcat-2.5-preview-free'] } } };
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push(init.headers.Authorization);
@@ -585,7 +584,6 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     'openrouter/xiaomi/mimo-v2.6-flash',
   ];
   const base = [
-    'opencode-go/space-bunny-free',
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
   ];
@@ -785,7 +783,6 @@ test('zen upstreamRequest: relay URL + relay token, no OpenRouter attribution, m
 // contains a zen rung. The relay mechanics below are what matter here — pin them to an explicit
 // config (the DIAG_CFG pattern) instead of to GOLADDER[0]/GOLADDER[1].
 const ZEN_WALK = [
-  'opencode-go/space-bunny-free',
   'opencode-go/longcat-2.5-preview-free',
   'opencode-zen/mimo-v2.6-flash-free',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
