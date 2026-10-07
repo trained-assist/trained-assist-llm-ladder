@@ -1,0 +1,75 @@
+name: ladder-watch
+# Is the ladder answering, and is zen answering through it — every 10 minutes, with a Telegram
+# message when that changes.
+#
+# Why this exists separately from speed-digest: that one reports the last 4 hours once a day-ish,
+# which is useless for "it fell five minutes ago". This one probes the live worker three ways
+# (`/health`, an unpinned `service` call, a call pinned to the zen head rung) and only speaks
+# when the STATE changes — down → one message, up → one message. A two-hour outage is two
+# messages, not twelve, because GitHub Actions has no memory across runs and the memory is
+# `watch-state.json`, restored and saved through actions/cache.
+#
+# Missing TELEGRAM_* secrets skip the notification instead of failing the run: a monitoring
+# channel that is not configured yet must not make the monitor itself look broken.
+#
+# Runs `scripts/ladder-watch.mjs`; see that file for the probe and transition rules.
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 10 min, on the 7s — GitHub's cron stampede sits on the round numbers, and the other
+    # workflows here already live at :13/:23/:37.
+    - cron: '7,17,27,37,47,57 * * * *'
+
+permissions:
+  contents: read
+
+# Two overlapping ticks would race on the state file and could double-notify.
+concurrency:
+  group: ladder-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      LADDER_TOKEN: ${{ secrets.LADDER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore watch state
+        uses: actions/cache/restore@v4
+        with:
+          path: watch-state.json
+          key: ladder-watch-state-${{ github.run_id }}
+          restore-keys: |
+            ladder-watch-state-
+
+      - name: Probe
+        id: probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          node scripts/ladder-watch.mjs --notify --state watch-state.json 2>&1 | tee watch.log
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # Saved even when the probe failed — losing the state would re-send the "still down"
+      # transition rule as if it were a fresh outage.
+      - name: Save watch state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: watch-state.json
+          key: ladder-watch-state-${{ github.run_id }}
+
+      - name: Publish to run summary
+        if: always()
+        run: cat watch.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Fail when a probe failed
+        if: steps.probe.outputs.code != '0'
+        run: |
+          echo "ladder-watch: probe exit ${{ steps.probe.outputs.code }}"
+          exit 1
