@@ -225,9 +225,13 @@ async function writeResult(env, task, body, now) {
     body.ok ? 'ok' : String(body.kind || 'error').slice(0, 40),
     body.ok ? null : String(body.error || '').slice(0, 500),
     Number(body.provider_ms) || null, Number(body.served_ms) || null, now,
-    body.ok && body.tool_calls ? JSON.stringify(body.tool_calls).slice(0, 8000) : null,
-    body.ok && body.usage ? JSON.stringify(body.usage).slice(0, 2000) : null,
-    body.ok ? String(body.finish_reason || '').slice(0, 40) : null,
+    // tool_calls / usage / finish_reason are persisted regardless of `ok`: they are the ONLY
+    // evidence of WHY an answer was empty, and today 45 % of tasks fail exactly that way while
+    // being written down as four NULLs. `text` stays conditional — for a kind='ok' failure it is
+    // empty by definition, so there is nothing to store (#166 keeps the payload small).
+    body.tool_calls ? JSON.stringify(body.tool_calls).slice(0, 8000) : null,
+    body.usage ? JSON.stringify(body.usage).slice(0, 2000) : null,
+    body.finish_reason ? String(body.finish_reason).slice(0, 40) : null,
     task.id,
   ).run();
   await db(env).prepare('UPDATE zen_pool_workers SET tasks_served = tasks_served + 1, last_seen_at = ?1 WHERE id = ?2')

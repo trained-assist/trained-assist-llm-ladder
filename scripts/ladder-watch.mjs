@@ -82,8 +82,14 @@ async function chat({ pinned }) {
   let j = null;
   try { j = JSON.parse(text); } catch { /* a non-JSON body is itself a failure below */ }
   if (!r.ok || j?.error) {
-    const at = j?.error?.attempts?.[0];
-    return { ok: false, detail: `HTTP ${r.status} ${at?.error || j?.error?.message || text.slice(0, 160)}`.trim() };
+    // `every rung failed` is only useful with the per-rung reasons: the attempts array is where
+    // `zen-rings: ok (finish=…, out=…)` and `HTTP 402: insufficient credits` live, and a single
+    // first attempt made a dead paid tail indistinguishable from a cold ring.
+    const ats = (j?.error?.attempts || [])
+      .map((a) => `${String(a.model || '').split('/').pop()}: ${a.error || a.outcome || '?'}`)
+      .join(' | ');
+    const detail = ats || j?.error?.message || text.slice(0, 160);
+    return { ok: false, detail: `HTTP ${r.status} ${detail}`.trim() };
   }
   const content = j?.choices?.[0]?.message?.content ?? '';
   if (!String(content).trim()) return { ok: false, detail: `HTTP 200 but empty content (model=${j?.model})` };

@@ -214,6 +214,13 @@ function failureClass(errorText) {
   const v = errorClass(errorText);
   if (v && v.class === 'quota') return { cls: 'quota', retryAfterMs: v.ttlMs };
   if (v && v.class === 'config') return { cls: 'config' };
+  // The request did not fit this rung's window. classify.js is explicit that this must NOT become
+  // a shared exhaustion — «the next task on this rung (from any user) is very likely a normal-sized
+  // prompt that would work fine» — but collapsing it to 'transient' did exactly that: every fat
+  // prompt put the rung into shared health for 2 s → 4 s → … (capped at 30 s for zen), and one
+  // 1.1 MB agent prompt was disabling the head rung for EVERY other caller ~24×/hour. The request
+  // is wrong, the rung is fine.
+  if (v && v.class === 'context') return { cls: 'context' };
   return { cls: 'transient' };
 }
 
@@ -272,7 +279,9 @@ async function post(fetchImpl, req, signal) {
 // ladder_calls.attempts, no new columns. Missing parts are simply omitted.
 function guardDiag(data, req) {
   const parts = [];
-  const finish = data?.choices?.[0]?.finish_reason;
+  // flat shape too: a pool/ring answer carries finish_reason at the top level, not under
+  // choices[0], so the same sentence explains an empty body from either transport.
+  const finish = data?.choices?.[0]?.finish_reason ?? data?.finish_reason;
   if (finish) parts.push(`finish=${finish}`);
   const usage = data?.usage || {};
   if (usage.completion_tokens != null) parts.push(`out=${usage.completion_tokens}`);
@@ -432,11 +441,24 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
   if (r.status !== 200 || !r.data?.ok) {
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
-    return { ok: false, error: `zen-rings: ${r.data?.error || r.data?.kind || 'no answer'}` };
+    const base = r.data?.error || r.data?.kind || 'no answer';
+    // #34 for the ring path: the pool keeps finish_reason/usage on a failure too, so an empty
+    // body can say WHY — finish=length, out=0, reasoning=N instead of an opaque `zen-rings: ok`.
+    const diag = guardDiag(r.data, { body });
+    // #45 — ONE same-rung retry, but only for the case it was built for: the model answered and
+    // we judged that answer empty. A budget refusal or a cooldown must not be retried (the cap
+    // is real), and a stream caller already paid the whole watchdog for a synthesised stream, so
+    // paying it twice is exactly what the guard-retry comment excludes.
+    const emptyOk = r.data?.kind === 'ok' && !r.data?.ok;
+    return {
+      ok: false,
+      ...(emptyOk && !body.stream ? { guard: true } : {}),
+      error: `zen-rings: ${base}${diag}`,
+    };
   }
   const content = String(r.data.text || '').trim();
   const hasTools = Array.isArray(r.data.tool_calls) && r.data.tool_calls.length > 0;
-  if (!content && !hasTools) return { ok: false, guard: true, error: 'empty answer' };
+  if (!content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(r.data, { body })}` };
   const message = { role: 'assistant', content };
   if (hasTools) message.tool_calls = r.data.tool_calls;
   const finish = r.data.finish_reason || (hasTools ? 'tool_calls' : 'stop');

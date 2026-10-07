@@ -287,6 +287,43 @@ test('watchdog: a slow answer returns 504 with a task_id, and the late answer is
   assert.equal((await late.json()).text, 'finally');
 });
 
+// A FAILED answer is exactly the case that needs diagnosing — it was 45 % of production tasks and
+// used to be written down as four NULLs (text/usage/finish_reason/tool_calls were all conditioned
+// on `body.ok`), which is why `zen-rings: ok` could not be explained. The pool must hand the
+// explanation to whoever asked, whether or not the answer counted as a success.
+test('a failed result still carries finish_reason + usage + tool_calls — the diagnosis survives ok=false', async () => {
+  const d1 = fakeD1();
+  const reg = await post('/zen/pool/register', { worker_id: 'LLM-test:diag:1' }, d1);
+  const lease = await reg.json();
+  const pending = post('/zen/pool/invoke', { model: 'mimo-v2.6-flash-free', prompt: 'why empty?', wait_ms: 5000 }, d1);
+  await new Promise((r) => setTimeout(r, 50));
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  const task = (await pulled.json()).task;
+
+  const res = await post('/zen/pool/result', {
+    task_id: task.id, ok: false, kind: 'ok',
+    finish_reason: 'length', usage: { prompt_tokens: 840, completion_tokens: 0 },
+    tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'shell', arguments: '{}' } }],
+    provider_ms: 900, error: '',
+  }, d1);
+  assert.equal(res.status, 200);
+
+  const answer = await pending;
+  assert.equal(answer.status, 502, 'a failed task still fails the invoke — this is not a success');
+  const data = (await answer.json());
+  assert.equal(data.ok, false);
+  assert.equal(data.finish_reason, 'length', 'finish_reason reaches the ladder even though ok=false');
+  assert.deepEqual(data.usage, { prompt_tokens: 840, completion_tokens: 0 }, 'usage reaches the ladder too');
+  assert.equal(data.tool_calls[0].function.name, 'shell', 'a tool call is not thrown away with the failure');
+
+  const late = await get(`/zen/pool/result/${task.id}`, d1);
+  const row = await late.json();
+  assert.equal(row.state, 'failed');
+  assert.equal(row.finish_reason, 'length', 'the late-read path keeps the diagnosis as well');
+  assert.deepEqual(row.usage, { prompt_tokens: 840, completion_tokens: 0 });
+  assert.equal(row.tool_calls[0].function.name, 'shell');
+});
+
 test('stop: POST /zen/pool/stop makes the next pull say bye, so the job exits instead of idling', async () => {
   const d1 = fakeD1();
   const reg = await post('/zen/pool/register', { worker_id: 'LLM-test:3:1' }, d1);
