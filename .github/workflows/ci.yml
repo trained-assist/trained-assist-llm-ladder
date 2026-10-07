@@ -20,6 +20,14 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
+    # Deploys must not overlap. Two merges in a row start two deploys at once, and the older
+    # run's `Verify public worker revision` then cannot see its own SHA — the edge has already
+    # moved to the newer one — so a perfectly healthy deploy goes red. Queued instead, each run
+    # deploys and verifies its own revision, and the last one to start is the one that should
+    # win anyway.
+    concurrency:
+      group: llm-ladder-deploy
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -111,12 +119,34 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: npx --yes wrangler@4 deploy --var BUILD_SHA:${{ github.sha }}
+      # Two things, not one: reachability AND content. The previous Smoke only checked that
+      # three URLs returned HTTP 200, so a worker that deployed perfectly but loaded ZERO
+      # ladders would sail through — `/health` answers 200 {ok:true, ladders:[]}, `test` never
+      # sees prod, and `Verify public worker revision` is happy because the SHA matches. Every
+      # caller would then get `404 unknown ladder` on a fully green pipeline. The ladder count
+      # is read from this commit's config, so it tracks additions and removals on its own.
       - name: Smoke
         run: |
+          set -uo pipefail
+          BASE=https://llm-ladder.trainedassist.store
+          EXPECTED_LADDERS=$(node -e 'const c=require("./config/ladders.json");process.stdout.write(String(Object.keys(c.ladders).length))')
           for i in 1 2 3 4 5 6; do
-            curl -fsS https://llm-ladder.trainedassist.store/health \
-              && curl -fsS https://llm-ladder.trainedassist.store/zen/health \
-              && curl -fsS https://llm-ladder.trainedassist.store/zen/pool/health && exit 0
+            if curl -fsS --max-time 10 "$BASE/zen/health" >/dev/null \
+              && curl -fsS --max-time 10 "$BASE/zen/pool/health" >/dev/null \
+              && node -e '
+                const base = process.argv[1], want = Number(process.argv[2]);
+                (async () => {
+                  const h = await (await fetch(base + "/health")).json();
+                  if (h.ok !== true) { console.error("health.ok=" + h.ok); process.exit(1); }
+                  const n = Array.isArray(h.ladders) ? h.ladders.length : -1;
+                  if (n !== want) { console.error("serving " + n + " ladders, config has " + want); process.exit(1); }
+                  console.log("health ok, " + n + " ladders");
+                })().catch(e => { console.error(String(e.message || e)); process.exit(1); });
+              ' "$BASE" "$EXPECTED_LADDERS"; then
+              echo "smoke ok (attempt $i)"
+              exit 0
+            fi
+            echo "smoke attempt $i failed"
             sleep 10
           done
           exit 1
