@@ -60,7 +60,7 @@ advanced-first (mimo → paid tail).
 
 | ladder | shape |
 |---|---|
-| `build` | **zen pool ×2** (`mimo-v2.6-flash-free` → `nemotron-3.5-lightning-free`) → space-bunny-free → longcat → ling-sante:free → paid tail. **No mimo.** |
+| `build` | **zen rings ×2** (`nemotron-3-ultra-free` → `mimo-v2.6-flash-free`) → longcat → ling-sante:free → paid tail. **No mimo.** |
 | `build advanced` | mimo → paid tail |
 | `plan` / `general` / `review` | mimo → paid tail |
 | `explore` | mimo (1M) → gemini-2.5-flash-lite (1048576) → xiaomi/mimo (1050000) — contexts measured on OpenRouter 2026-10-02 |
@@ -73,7 +73,7 @@ There is **no escalation between levels**: a ladder retries down its own rungs; 
 
 | ladder | shape |
 |---|---|
-| `free` | hard **$0**: space-bunny-free → longcat → OR `:free` ×6 → zen ×4. Never spends money. |
+| `free` | hard **$0**: zen rings ×2 → longcat → OR `:free` ×6 → zen ×4. Never spends money. |
 | `conversation` | candidate-message writing (hh-skill): gemini-3.1-flash-lite-preview → gemini-2.5-flash → mimo |
 | `doctor` | strongest Go tier for playbook doctor steps: mimo → qwen3.7-plus → deepseek-v4-pro → paid xiaomi |
 | `research` | hermes/researcher reads: mimo → deepseek-v4.1 → paid gemini-2.5-flash-lite (explore) |
