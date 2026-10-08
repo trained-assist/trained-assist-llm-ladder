@@ -10,6 +10,7 @@ Deploy the Worker and set sandbox-only credentials through Wrangler's secret inp
 ```sh
 npx wrangler deploy --config wrangler.auth-sandbox.toml
 printf '%s' "$SANDBOX_LADDER_TOKEN" | npx wrangler secret put LADDER_TOKENS --config wrangler.auth-sandbox.toml
+printf '%s' "$SANDBOX_CLIENT_TOKEN" | npx wrangler secret put LADDER_CLIENT_TOKEN_01 --config wrangler.auth-sandbox.toml
 printf '%s' "$REVOKED_TOKEN_HASHES" | npx wrangler secret put LADDER_REVOKED_TOKEN_HASHES --config wrangler.auth-sandbox.toml
 ```
 

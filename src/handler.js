@@ -183,7 +183,19 @@ async function authorized(request, env) {
     if (isRevoked) return false;
   }
   const additional = typeof env.LADDER_TOKENS === 'string' ? env.LADDER_TOKENS.split(',').map((token) => token.trim()) : [];
-  const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS, ...additional]
+  // Cloudflare secret bindings are not enumerable on `env`; read explicit slots so
+  // each write-only credential can be added or removed without replacing a shared list.
+  const individuallyIssued = [
+    env.LADDER_CLIENT_TOKEN_01, env.LADDER_CLIENT_TOKEN_02,
+    env.LADDER_CLIENT_TOKEN_03, env.LADDER_CLIENT_TOKEN_04,
+    env.LADDER_CLIENT_TOKEN_05, env.LADDER_CLIENT_TOKEN_06,
+    env.LADDER_CLIENT_TOKEN_07, env.LADDER_CLIENT_TOKEN_08,
+    env.LADDER_CLIENT_TOKEN_09, env.LADDER_CLIENT_TOKEN_10,
+    env.LADDER_CLIENT_TOKEN_11, env.LADDER_CLIENT_TOKEN_12,
+    env.LADDER_CLIENT_TOKEN_13, env.LADDER_CLIENT_TOKEN_14,
+    env.LADDER_CLIENT_TOKEN_15, env.LADDER_CLIENT_TOKEN_16,
+  ];
+  const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS, ...additional, ...individuallyIssued]
     .filter((candidate) => typeof candidate === 'string' && candidate.length > 0);
   let matches = false;
   for (const candidate of accepted) matches = timingSafeEqual(token, candidate) || matches;

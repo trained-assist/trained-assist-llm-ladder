@@ -58,8 +58,13 @@ test('auth: accepts multiple additional client tokens without invalidating legac
     LADDER_TOKEN: 'existing-token',
     LADDER_TOKEN_PREVIOUS: 'overlap-token',
     LADDER_TOKENS: 'client-two-token, client-three-token',
+    LADDER_CLIENT_TOKEN_01: 'sandbox-client-token',
+    LADDER_CLIENT_TOKEN_02: 'mcp-test-client-token',
   };
-  for (const token of ['existing-token', 'overlap-token', 'client-two-token', 'client-three-token']) {
+  for (const token of [
+    'existing-token', 'overlap-token', 'client-two-token', 'client-three-token',
+    'sandbox-client-token', 'mcp-test-client-token',
+  ]) {
     const response = await handle(new Request('https://l.test/v1/models', {
       headers: { authorization: `Bearer ${token}` },
     }), tokenEnv, {});
