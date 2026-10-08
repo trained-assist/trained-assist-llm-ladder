@@ -373,6 +373,37 @@ test('input above a rung ceiling skips it — no attempt, no health failure', as
     'a ceiling skip is not a failure — the rung stays healthy for every other caller');
 });
 
+// ── гонка: одна и та же бесплатная Go-модель на двух разных аккаунтах ─────────────────────────
+// «два запуска одной модели на разных аккаунтах го» (владелец, 2026-10-07). Четыре ключа,
+// бесплатный тир без надбавки — параллельный зов стоит только времени, а один тормозящий или
+// залимиченный ключ перестаёт решать исход.
+test('mid-size prompt races the same free Go rung on two accounts — the answer wins, nothing is poisoned', async () => {
+  const calls = [];
+  // один аккаунт отдаёт 500, второй отвечает — гонка обязана выиграть вторым
+  const beh = { [short(GOLADDER[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }) };
+  const store = memoryStore(2);
+  const mid = { ...msg, messages: [{ role: 'user', content: 'x'.repeat(9000) }] };
+  const r = await run(mid, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
+
+  assert.equal(r.ok, true, 'the healthy account answers even though the other one failed');
+  assert.equal(r.model, GOLADDER[0], 'and it is the SAME rung — не фоллбэк, а гонка внутри ранга');
+  assert.equal(calls.length, 2, 'оба ключа запущены одновременно');
+  assert.equal(new Set(calls.map(c => c.auth)).size, 2, 'и это два разных аккаунта');
+  assert.equal(store.state.health[GOLADDER[0]], undefined, 'проигравший ключ не портит здоровье ранга');
+  assert.equal(store.state.keys.active, 0, 'гонка — не ротация: общее состояние ключей не тронуто');
+  assert.equal(r.attempts.filter(a => a.outcome === 'error').length, 0, 'логическая попытка одна, а не два отказа');
+});
+
+test('a small prompt does NOT race — one account, one attempt', async () => {
+  const calls = [];
+  const beh = { [short(GOLADDER[0])]: () => ({ status: 200, content: 'ok' }) };
+  const store = memoryStore(2);
+  const r = await run(msg, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 1, '<2K → hedgePlan.count = 1, гонки нет');
+  assert.equal(r.model, GOLADDER[0]);
+});
+
 // #69: the weekly limit must NOT take the free Go rungs down with the paid ones — they don't
 // consume the allowance, and the incident is exactly when the free head has to keep serving.
 test('every key limited → paid Go rungs parked, free Go rungs keep serving (#69)', async () => {
