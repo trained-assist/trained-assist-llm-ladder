@@ -1,6 +1,7 @@
 {
   "_comment": "Per-1M-token prices for cost estimates in /v1/analytics (issue #94/#93). [input, output, cachedRead]. Go prices are from opencode.ai/docs/go (off-peak for peak/off-peak models — a lower bound), OpenRouter from the public /models list 2026-10-03. $0 rungs (Go *-free, OpenRouter :free, zen free) are omitted → cost 0. Update when a vendor changes prices.",
   "opencode-go/mimo-v2.6-flash": [0.14, 0.28, 0.0028],
+  "opencode-go/muse-spark-1.3-contributor": [0.10, 0.20, 0.002],
   "opencode-go/deepseek-v4-flash": [0.15, 0.60, 0.003],
   "opencode-go/deepseek-v4.1-flash": [0.15, 0.60, 0.003],
   "opencode-go/deepseek-flash": [0.15, 0.60, 0.003],
