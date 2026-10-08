@@ -37,13 +37,26 @@ export const BANDS = Object.freeze([
   { max: Infinity, count: 1, timeoutFactor: 1 },  //  >128K — один (потолки выше уже отсекли лишнее)
 ]);
 
-// Cheap pre-flight estimate: 4 chars/token is the usual English ratio and the same pessimism
-// `estTokens` in scripts/zen-client.mjs uses (there /3.5 for a pre-flight cap check — over-
-// estimating only ever sends a slightly-too-big budget, never a400 after the wait).
+// Cheap pre-flight estimate — but в БАЙТАХ, а не в символах, и это не стилистика.
+//
+// Шлюз Go режет по телу запроса, а не по токенам. Замер 2026-10-08: 392 КБ отвечает,
+// 491 КБ → `429 Upstream request failed: Endpoint is unavailable` с ротацией по всем ключам
+// (48 с, три ключа). На русском тексте байты UTF-8 ≈ 1.8 × символы, поэтому оценка
+// `String.length / 4` ЗАНИЖАЛА счёт в ~1.8 раза и пропускала запросы, которых шлюз уже
+// не принимал: 523 КБ давали «~80K токенов» (в пределах 100 000) и упирались в 429.
+//
+// `bytes / 4` даёт 400 000 байт при потолке 100 000 — это на ~10 % консервативнее реального
+// предела шлюза (~450 КБ). Переплюнуть в безопасную сторону стоит одного пропущенного хопа;
+// недоплюнуть — 429 и трёх сожжённых ключей.
+//
+// Избыточная точность тут не нужна: 4 байта/токен — средняя для английского, и именно поэтому
+// множитель остался 4. Важен порядок величины, а не запятая.
 export function estimateTokens(body) {
   const m = body?.messages;
   if (!Array.isArray(m) || !m.length) return 0;
-  try { return Math.ceil(JSON.stringify(m).length / 4); } catch { return 0; }
+  try {
+    return Math.ceil(new TextEncoder().encode(JSON.stringify(m)).length / 4);
+  } catch { return 0; }
 }
 
 // Ceiling for this rung, or null when nothing is known.
