@@ -41,6 +41,9 @@ const CACHE = arg('cache', path.join(os.homedir(), '.cache/llm-ladder-fat-bench'
 const LIMIT = Number(arg('limit', 0));            // 0 = все
 const BASE = String(arg('base', process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store')).replace(/\/+$/, '');
 const LADDER = arg('ladder', 'service');
+// --rung пинует ранг: единственный способ измерить «а что было бы, если бы бесплатного Go не было»
+// на проде — конфиг мы не меняем, а пин заставляет лестницу пойти именно туда.
+const RUNG = arg('rung', null);
 const TOKEN = (process.env.LADDER_TOKEN
   || (() => { try { return fs.readFileSync(path.join(os.homedir(), '.llm-ladder-token'), 'utf8').trim(); } catch { return ''; } })()).trim();
 
@@ -122,6 +125,7 @@ async function runOne(session) {
     max_tokens: 64,
     ladder_timeout_ms: 120_000,
     'x-ladder-app': 'fat-session-bench',
+    ...(RUNG ? { ladder_rung: RUNG } : {}),
   };
   const t0 = Date.now();
   try {
