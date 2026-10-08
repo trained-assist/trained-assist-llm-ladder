@@ -5,6 +5,15 @@ const CLASSIFIERS = [
   { class: 'config', ttlMs: null, pattern: /subscription required/i },
   { class: 'config', ttlMs: null, pattern: /requires global regions/i },
   { class: 'config', ttlMs: null, pattern: /insufficient account funds/i },
+  // OpenRouter: "Insufficient credits. Add more using https://openrouter.ai/settings/credits" —
+  // баланса 0, каждый вызов на платный ранг уходит в 402. Случай живой с 2026-10-04 (замерено:
+  // 2833 отказа 402 в трассе). Деньги кладёт оператор, поэтому это НЕ transient: без своего TTL
+  // ранг повторно пытается каждые ~2 с (2 → 4 → 8 … сек) и каждый вызов платит за два мёртвых
+  // хопа до отказа. Час — компромисс: после пополнения кредитов ранг возвращается сам, а за час
+  // мёртвый хоп оплачивается дважды вместо тысяч. config-класс здесь НЕ годится: он помечает ранг
+  // `skipUntil = null` = «никогда не пробовать», а успеха, который бы это снял, не будет, пока
+  // ранг и пропущен (см. src/state.js recordFailure).
+  { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /insufficient credits/i },
   // Model slug retired/never had free-tier access — confirmed live against OpenRouter
   // 2026-09-23: e.g. "This model is unavailable for free. The paid version is available
   // now - use this slug instead: ...". This is 'quota' (not 'config'): unlike "subscription
@@ -24,6 +33,14 @@ const CLASSIFIERS = [
   { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /unavailable for free/i },
   { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /model not found/i },
   { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /no endpoints found/i },
+  // OpenRouter's own words: "inclusionai/ling-3.0-flash-sante:free is temporarily rate-limited
+  // upstream. Please retry" — занят апстрим ПРЯМО СЕЙЧАС, а не лимит нашего аккаунта, который
+  // сбрасывается по часам. Без этой строки матчилось общее `rate-limit`/`429` ниже и ранг уходил
+  // в пропуск на ЧАС. Замерено 2026-10-08: так `ling-3.0-flash-sante:free` — единственный бесплатный
+  // ранг в `build` с окном 262K, единственный, куда влезал жирный промпт на 129K токенов — был
+  // выключен на час после одного 429 в 12:11:07, и все жирные промпты этого часа кончались
+  // `every rung failed`. Ровно та же логика, что у `temporarily overloaded` ниже (5 минут).
+  { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /temporarily rate[_\s-]{0,5}limited/i },
   { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /rate[_\s-]{0,5}limit/i },
   { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /\b429\b/ },
   { class: 'quota', ttlMs: 24 * 60 * 60 * 1000, pattern: /usage limit/i },
