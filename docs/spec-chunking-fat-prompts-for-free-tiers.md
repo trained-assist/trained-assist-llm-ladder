@@ -171,6 +171,127 @@ payload: 49 300 байт  ≈ 26 800 символов  ≈ 6 700 токенов 
 Тут работает размерный потолок (PR #169) — раньше это стоило бы **48 с и трёх сожжённых
 ключей** (ротация на `429 Upstream request failed: Endpoint is unavailable`).
 
+### Пример F — отдельный потолок mimo внутри зена (20 000 байт)
+
+У `zen-rings/mimo-v2.6-flash-free` лимит **свой**, а не общий: 20 000 байт, а не 50 000.
+Пин на него с промптом «на 25 КБ», фактически 63 917 байт:
+
+```json
+{ "model": "service",
+  "messages": [ {"role":"system","content":"…"}, {"role":"user","content":"<63 917 байт>"} ],
+  "max_tokens": 40, "ladder_timeout_ms": 90000,
+  "ladder_rung": "zen-rings/mimo-v2.6-flash-free" }
+```
+
+| размер | результат |
+|---|---|
+| **63 910 байт** | ❌ `input is too long for the free tier: 63910 bytes, limit 20000` за **0.6 с** |
+
+Правило: если целевой ранг — mimo, бюджет **18 000 байт**, а не 45 000. Общая таблица лимитов
+(§1) даёт оба числа, но сравнить надо именно с лимитом той модели, на которую идёте.
+
+### Пример G — OpenRouter `:free` с большим контекстом (вписалось)
+
+`openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` — контекст **1 000 000 токенов**
+(контексты всех `:free` лежат в `config/prices.json` / инвентаре `free_models.context`):
+
+```json
+{ "model": "service",
+  "messages": [ … 390 217 байт … ],
+  "max_tokens": 40, "ladder_timeout_ms": 120000,
+  "ladder_rung": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free" }
+```
+
+| размер | результат |
+|---|---|
+| **390 217 байт** | ✅ ответил за **24.8 с** |
+
+Вывод: если промпт жирнее потолка Go (~400 КБ) — его место **не** в Go, а на `:free`-ранге с
+нужным окном. Чанковать при этом всё равно нужно: 25 с — это не 7 с.
+
+### Пример H — за контекстом самой модели OpenRouter
+
+Тот же сеанс промптов, но 6 760 217 байт ≈ 1 693 039 токенов, пин на ранг с окном 262 144:
+
+```json
+{ "model": "service",
+  "messages": [ … 6 760 217 байт ≈ 1 693 039 токенов … ],
+  "max_tokens": 40, "ladder_timeout_ms": 90000,
+  "ladder_rung": "openrouter/inclusionai/ling-3.0-flash-sante:free" }
+```
+
+| размер | результат |
+|---|---|
+| **6 760 217 байт / ~1 693 039 токенов** | ❌ `HTTP 400: maximum context length is 262144 tokens. However, you requested about 1693039 tokens` за **1.3 с** |
+
+Это **не** переполнение лестницы и не переполнение потолка: лестница пропустила запрос, а
+отказал сама модель. Отказ `context`-класса — `recordFailure` пишет `skipUntil = 0`, то есть
+ранг **не** уходит в общий пропуск: следующий вызов с нормальным промптом на него пройдёт.
+
+### Пример I — пара `tool_calls` ↔ `tool` должна ехать в одном чанке
+
+Живой payload с настоящими tool_calls (20 КБ, `llm-ladder-tool-call-example.json`):
+
+```json
+{ "model": "service",
+  "messages": [
+    {"role":"system","content":"Ты — ассистент по разбору кода."},
+    {"role":"user","content":"Посмотри файл и ответь словом: ок"},
+    {"role":"assistant","content":"","tool_calls":[
+      {"id":"call_probe_1","type":"function",
+       "function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}]},
+    {"role":"tool","tool_call_id":"call_probe_1","content":"# trained-assist-llm-ladder\n…"}
+  ],
+  "max_tokens": 40, "ladder_timeout_ms": 60000,
+  "ladder_rung": "opencode-go/longcat-2.5-preview-free" }
+```
+
+| размер | результат |
+|---|---|
+| **4 740 байт** | ✅ ответил за **2.4 с** |
+
+Отрицательный контроль: если `assistant.tool_calls` и его `role: "tool"` разнести по разным
+чанкам, шлюз ответит `400 tool messages must include a non-empty string tool_call_id`. Пара
+(`tool_call_id` ↔ `tool_calls[].id`) — минимальная единица чанкирования, её нельзя рвать.
+
+### Пример J — живой инцидент: не влезает никуда → `every rung failed`
+
+Сессия из инцидента 2026-10-08 (лестница `build`): payload вырос до **559 830 байт ≈ 128 948
+токенов**, и отказала **каждая** ступень — по своей собственной причине:
+
+```json
+{ "model": "build",
+  "messages": [ … 559 830 байт ≈ 128 948 токенов … ],
+  "max_tokens": 32000, "ladder_timeout_ms": 60000 }
+```
+
+| ступень | результат |
+|---|---|
+| `opencode-go/longcat-2.5-preview-free` | ⏭ `input ~128948t above the rung ceiling` (потолок 100 000) |
+| `zen-rings/nemotron-3-ultra-free` | ⛔ `559830 bytes, limit 50000` |
+| `zen-rings/mimo-v2.6-flash-free` | ⛔ `559830 bytes, limit 20000` |
+| `openrouter/inclusionai/ling-3.0-flash-sante:free` | в тот момент был в health-skip после апстрим-`429` |
+| `openrouter/inclusionai/ling-3.0-flash`, `openrouter/xiaomi/mimo-v2.6-flash` | ⛔ `HTTP 402 Insufficient credits` |
+| **итог** | ❌ `every rung failed` за **0.49 с**, вызывающий ретраит впустую |
+
+Тот же запрос, когда ранг `ling-3.0-flash-sante:free` снова в обходе (его окно 262 144
+вмещает и 128K, и 165K):
+
+| размер | результат |
+|---|---|
+| **661 739 байт ≈ 165 419 токенов** | ✅ ответил за **9.3 с** на `build` |
+
+Два вывода, которые и делают это ТЗ обязательным к исполнению:
+
+1. **Отказ 0.49 с — это не поломка лестницы**, а честный отказ по размеру. Считать «что
+   переполнилось» надо **до** отправки: `Buffer.byteLength(JSON.stringify(messages), 'utf8')`
+   против лимита целевого ранга (§1). Локально это делает
+   `npm run diagnose -- --ladder build --since 24h` — он печатает каждую ступень с её
+   собственным лимитом и её собственным числом.
+2. **Один временно пропущенный ранг лишает лестницу единственного места**, куда влезает
+   жирный промпт, и дальше `every rung failed` каскадом. Отсюда требование к чанкеру: не
+   полагаться на «где-нибудь влезет», а резать под **конкретный** лимит конкретного ранга.
+
 ---
 
 ## 4. Что уже есть в репозитории (не изобретать заново)
@@ -182,6 +303,7 @@ payload: 49 300 байт  ≈ 26 800 символов  ≈ 6 700 токенов 
 | `estimateTokens()` в `src/size-policy.js` | та же оценка, которую использует лестница |
 | `BANDS` в `src/size-policy.js` | полосы `<2K / 2–32K / 32–128K / >128K` уже задекларированы |
 | `scripts/zen-client.mjs → contextCheck()` | проверка `input + max_tokens ≤ cap` по модели |
+| **`npm run diagnose`** (`scripts/diagnose-failure.mjs`) | разбор УЖЕ случившегося отказа: какая ступень и на чём именно упёрлась, включая выкинутые из обхода |
 
 ---
 
