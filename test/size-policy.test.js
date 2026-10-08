@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, ceilingFor, fits, hedgePlan, INPUT_CEILING_TOKENS } from '../src/size-policy.js';
+import { estimateTokens, ceilingFor, fits, hedgePlan, ttfbFactor, INPUT_CEILING_TOKENS } from '../src/size-policy.js';
 
 // The ceilings are measurements, not guesses — see src/size-policy.js for where each number came
 // from. A wrong ceiling either wastes a hop (too low) or burns 48 s and three keys (too high),
@@ -54,4 +54,16 @@ test('hedgePlan: bands by token count — 1 / 2 / 3 / 1', () => {
   assert.deepEqual(hedgePlan(127_999), { count: 3, timeoutFactor: 1 });
   assert.deepEqual(hedgePlan(128_000), { count: 1, timeoutFactor: 1 }, 'past the ceiling band it is one rung again');
   assert.deepEqual(hedgePlan(5_000_000), { count: 1, timeoutFactor: 1 }, 'and it never throws');
+});
+
+// Замер 2026-10-08 (трасса за сутки): 21 из 28 отказов `no first token in time` — на payload
+// ≥ 100 КБ, медиана 978 830 байт. Жирный промпт имеет префилл, 15 с ему не хватает.
+test('ttfbFactor: окно первого токена растёт вместе с промптом', () => {
+  assert.equal(ttfbFactor(0), 1, 'пустой запрос — как просили');
+  assert.equal(ttfbFactor(31_999), 1, 'до 32K — без надбавки');
+  assert.equal(ttfbFactor(32_000), 2, '32K — двойное окно (15 с → 30 с)');
+  assert.equal(ttfbFactor(127_999), 2, '128K — всё ещё двойное');
+  assert.equal(ttfbFactor(128_000), 3, '>128K — тройное (15 с → 45 с)');
+  assert.equal(ttfbFactor(248_678), 3, 'медиана инцидента — на максимуме');
+  assert.ok(ttfbFactor(1_000_000) <= 3, 'надбавка ограничена: failover не должен виснуть');
 });
