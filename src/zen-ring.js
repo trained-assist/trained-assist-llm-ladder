@@ -31,6 +31,21 @@ export const ORPHAN_TASK_MS = 120_000;  // a claimed task with no answer for thi
 // 50 KB is where the cliff starts; overridable per environment.
 export const ZEN_MAX_INPUT_BYTES = 50_000;
 
+// One number for every model is wrong, though: they do NOT hold the same size. Measured
+// 2026-10-08 over 5394 tasks (bytes of the JSON messages, success = state 'done'):
+//
+//   модель                      <20 KB      20–50 KB       >=50 KB
+//   nemotron-3-ultra-free        56 %   →    62 % (661/1072)   11 % (27/245)
+//   mimo-v2.6-flash-free         63 %   →    18 % ( 33/186)    21 % (73/347)
+//
+// So nemotron keeps serving through the 20–50 KB band while mimo has already collapsed there —
+// refusing mimo at 20 KB costs nothing and saves a hop that would fail 4 times out of 5. The
+// global 50 KB stays for everything else, including the band where BOTH models fall apart
+// (11 % / 21 %), which is where the original cliff came from.
+export const ZEN_MODEL_MAX_INPUT_BYTES = {
+  'mimo-v2.6-flash-free': 20_000,
+};
+
 // ---- ring ceiling + autoscaling (owner's numbers, rationale in docs/zen-runner.md) -----------
 // The account allows 20 simultaneous Actions jobs, so the pool can never exceed that — and two
 // of the 20 stay free so an ordinary push/PR CI run is never starved by our own workers.
@@ -527,7 +542,11 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   // and config to `transient`, so this lands exactly where a today's empty-body answer lands, only
   // without the wait.
   const inputBytes = messages ? new TextEncoder().encode(messages).length : 0;
-  const inputLimit = Number(env.ZEN_MAX_INPUT_BYTES) || ZEN_MAX_INPUT_BYTES;
+  // Order matters: an explicit env override wins (an operator forcing a global number),
+  // then this model's own measured ceiling, then the shared default.
+  const inputLimit = Number(env.ZEN_MAX_INPUT_BYTES)
+    || ZEN_MODEL_MAX_INPUT_BYTES[model]
+    || ZEN_MAX_INPUT_BYTES;
   if (inputBytes > inputLimit) {
     return {
       status: 413,
