@@ -9,6 +9,7 @@ import {
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
   ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES, ZEN_MODEL_MAX_INPUT_BYTES,
+  ZEN_RACE_MAX_INPUT_BYTES, ZEN_RACE_MODELS, raceModelsFor,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
 import { classifyError } from '../src/classify.js';
@@ -937,57 +938,128 @@ test('one cron tick grows the ring and cleans up — no GitHub workflow involved
 // <5 KB, 48 % at 20-50 KB, then 9-20 %), and zen answers those with HTTP 200 and an EMPTY body —
 // 1073 calls, 100 % empty text — so the caller still fails over, only after 7-12 s of zen time, a
 // task row and a budget bump. Refusing at the door must be strictly better than that.
-test('a fat input is refused at the door: no task, no quota, no dispatch, no retry', async () => {
+// Деградированная полоса (замер 2026-10-08): одиночный вызов в ней выигрывает в 9–20 %,
+// четыре параллельных — 1 − (1−p)^4 ≈ 50–60 %. Жирный промпт и так не имеет дешёвой
+// альтернативы, поэтому вместо отказа гоним несколько моделей.
+test('жирный вход гонится по нескольким моделям; отказ остаётся только выше жёсткого потолка', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
   const gh = fakeGithub(204);
   const budgetBefore = JSON.stringify([...d1._budget.values()]);
+  await registerWorkers(d1, 3, { RING_TOKEN: 'gh-tok' });
 
   const r = await ringInvoke(env2, {
     model: 'nemotron-3-ultra-free',
     messages: [{ role: 'user', content: 'x'.repeat(ZEN_MAX_INPUT_BYTES + 1_000) }],
+    wait_ms: 1_000,
   }, gh.fetchImpl);
+  assert.notEqual(r.status, 413, 'в деградированной полосе не отказываем');
+  assert.ok(d1._tasks.size >= 2, `поставлено задач: ${d1._tasks.size} — минимум две модели гонки`);
+  assert.ok(d1._tasks.size <= ZEN_RACE_MODELS.length, 'но не больше списка гонки');
+  assert.ok(JSON.stringify([...d1._budget.values()]).length > budgetBefore.length, 'квота списана по каждой модели');
+  assert.equal(gh.calls.length, 0, 'кольцо уже тёплое (3 раннера) — dispatch не нужен');
 
-  assert.equal(r.status, 413, 'refused with 413, not 503/429');
-  assert.ok(r.data.bytes > ZEN_MAX_INPUT_BYTES, 'the reported size is the real one');
-  assert.equal(d1._tasks.size, 0, 'no task row was created');
-  assert.equal(JSON.stringify([...d1._budget.values()]), budgetBefore, 'no provider quota spent');
-  assert.equal(gh.calls.length, 0, 'the ring was not even dispatched — this is decided locally');
-
-  // The message must classify as `context`, not as quota: that class exists so a normal-sized
-  // prompt from the NEXT caller still gets this rung. If someone rewords the message the rung
-  // would start getting skipped for everyone, so pin it.
-  assert.equal(classifyError(r.data.error).class, 'context',
+  const tooBig = await ringInvoke(env2, {
+    model: 'nemotron-3-ultra-free',
+    messages: [{ role: 'user', content: 'x'.repeat(ZEN_RACE_MAX_INPUT_BYTES + 1_000) }],
+    wait_ms: 1_000,
+  }, gh.fetchImpl);
+  assert.equal(tooBig.status, 413, 'выше потолка гонки — отказ, как раньше');
+  assert.ok(tooBig.data.bytes > ZEN_RACE_MAX_INPUT_BYTES, 'и в сообщении честный размер');
+  assert.equal(classifyError(tooBig.data.error).class, 'context',
     'wording keeps the refusal out of the quota/config classes');
 
-  // A normal payload must sail through unchanged — the guard must not be trigger-happy.
-  // wait_ms is clamped to the minimum: without a live worker this call would otherwise sit out
-  // the whole 30 s watchdog before answering.
   const small = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?', wait_ms: 1_000 }, gh.fetchImpl);
-  assert.notEqual(small.status, 413, 'a one-line prompt is not affected');
+  assert.notEqual(small.status, 413, 'обычные запросы не задеты');
 });
+
+// Гонке нужны живые раннеры: cap = BACKLOG_FACTOR × live, и на пустом кольце (live = 0) слот
+// ровно один — гонка схлопнется до одиночного вызова. Три раннера дают cap = 6.
+const registerWorkers = async (d1, n = 3, envBase = {}) => {
+  for (let i = 0; i < n; i++) {
+    await zenRingRegister(new Request('https://l.test/x', {
+      method: 'POST', headers: { authorization: 'Bearer zen-tok' },
+      body: JSON.stringify({ worker_id: `w:${i}`, repo: RING.repo }),
+    }), { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, ...envBase });
+  }
+};
 
 // Один потолок на всех был ошибкой: модели держат разный размер. Замер 2026-10-08 (5394 задачи,
 // байты JSON messages): в полосе 20–50 KB nemotron держит 62 % (661/1072), а mimo — 18 % (33/186).
-// Отказывать mimo на 20 KB стоит ничего и экономит хоп, который проваливается в четырёх случаях
-// из пяти; общий 50 KB остаётся для тех, у кого данных нет и для полосы, где рушатся обе.
-test('the input ceiling is per model: mimo refuses at 20 KB, the same bytes are fine for nemotron', async () => {
+// В полосе ГОНКИ свой потолок больше не отказывает: mimo участвует как одна из моделей, и её
+// вероятный провал перекрывают соседи — вместо «отказ и уходим в никуда» получаем шанс ответа.
+test('в полосе гонки модельный потолок не отказывает: mimo участвует как одна из гонки', async () => {
   const d1 = fakeD1({ repos: [RING] });
   const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
   const gh = fakeGithub(204);
-  const budgetBefore = JSON.stringify([...d1._budget.values()]);
+  await registerWorkers(d1, 3, { RING_TOKEN: 'gh-tok' });
   const MIMO = ZEN_MODEL_MAX_INPUT_BYTES['mimo-v2.6-flash-free'];
   assert.equal(MIMO, 20_000, 'the measured ceiling for mimo');
   const mid = { role: 'user', content: 'x'.repeat(MIMO + 5_000) };   // ~25 KB
 
-  const m = await ringInvoke(env2, { model: 'mimo-v2.6-flash-free', messages: [mid] }, gh.fetchImpl);
-  assert.equal(m.status, 413, 'mimo is refused at its OWN ceiling, before the global 50 KB');
-  assert.equal(m.data.limit, MIMO, 'and the message names that ceiling, not the shared one');
-  assert.equal(d1._tasks.size, 0, 'no task row');
-  assert.equal(JSON.stringify([...d1._budget.values()]), budgetBefore, 'no provider quota spent');
-  assert.equal(gh.calls.length, 0, 'nothing was dispatched');
+  const m = await ringInvoke(env2, { model: 'mimo-v2.6-flash-free', messages: [mid], wait_ms: 1_000 }, gh.fetchImpl);
+  assert.notEqual(m.status, 413, 'свой потолок больше не отказывает — это полоса гонки');
+  const models = [...d1._tasks.values()].map((t) => t.model);
+  assert.ok(models.includes('mimo-v2.6-flash-free'), 'mimo всё равно участвует');
+  assert.ok(models.length >= 2, 'и рядом с ним гонятся соседи');
 
   // тот же кусок для nemotron — он весь диапазон держит, поэтому задача создаётся
   const n = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', messages: [mid], wait_ms: 1_000 }, gh.fetchImpl);
-  assert.notEqual(n.status, 413, '25 KB is inside nemotron\'s band — the guard is not global anymore');
+  assert.notEqual(n.status, 413, '25 KB is inside the race band for every model');
+});
+
+// ── гонка моделей: кто выигрывает ──────────────────────────────────────────────────────────
+// Пустое тело — основной вид проигрыша в деградированной полосе (замер: 1073 вызова, 100 %
+// пустого текста), поэтому «задача выполнена» без текста выиграть не может.
+test('гонка: пустой ответ не побеждает — возвращается первый НЕПУСТОЙ', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+  await registerWorkers(d1, 3, { RING_TOKEN: 'gh-tok' });
+  // nemotron завершается первым, но пустым; big-pickle отвечает позже и текстом
+  setTimeout(() => {
+    for (const [id, row] of d1._tasks) {
+      if (row.model === 'nemotron-3-ultra-free') {
+        d1._tasks.set(id, { ...row, state: 'done', ok: false, kind: 'ok', finish_reason: 'stop' });
+      }
+      if (row.model === 'big-pickle') {
+        d1._tasks.set(id, { ...row, state: 'done', ok: true, text: 'готово', kind: 'ok', finish_reason: 'stop' });
+      }
+    }
+  }, 80);
+  const r = await ringInvoke(env2, {
+    model: 'nemotron-3-ultra-free',
+    messages: [{ role: 'user', content: 'x'.repeat(ZEN_MAX_INPUT_BYTES + 1_000) }],
+    wait_ms: 8_000,
+  }, gh.fetchImpl);
+  assert.equal(r.status, 200, 'гонка дошла до ответа');
+  assert.equal(r.data.model, 'big-pickle', 'побеждает тот, кто написал текст');
+  assert.equal(r.data.text, 'готово');
+  assert.ok(Array.isArray(r.data.raced) && r.data.raced.length >= 2, 'в ответе видно, кого гоняли');
+});
+
+test('гонка: если никто не ответил непустым — отказ с перечнем моделей', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+  await registerWorkers(d1, 3, { RING_TOKEN: 'gh-tok' });
+  setTimeout(() => {
+    for (const [id, row] of d1._tasks) d1._tasks.set(id, { ...row, state: 'done', ok: false, kind: 'ok', finish_reason: 'stop' });
+  }, 80);
+  const r = await ringInvoke(env2, {
+    model: 'nemotron-3-ultra-free',
+    messages: [{ role: 'user', content: 'x'.repeat(ZEN_MAX_INPUT_BYTES + 1_000) }],
+    wait_ms: 8_000,
+  }, gh.fetchImpl);
+  assert.equal(r.status, 502, 'все пустые — это отказ');
+  assert.ok(Array.isArray(r.data.raced) && r.data.raced.length >= 2, 'видно, кого гоняли');
+  assert.ok(r.data.raced.every((m) => ZEN_RACE_MODELS.includes(m)), 'гоняются только модели списка гонки');
+});
+
+test('raceModelsFor: запрошенная первой, остальные из списка, env переопределяет', () => {
+  assert.deepEqual(raceModelsFor({}, 'nemotron-3-ultra-free')[0], 'nemotron-3-ultra-free', 'запрошенная идёт первой');
+  assert.ok(raceModelsFor({}).length <= ZEN_RACE_MODELS.length, 'не больше списка');
+  assert.deepEqual(raceModelsFor({ ZEN_RACE_MODELS: 'big-pickle, nemotron-3.5-lightning-free' }, 'big-pickle'),
+    ['big-pickle', 'nemotron-3.5-lightning-free'], 'env задаёт состав');
+  assert.deepEqual(raceModelsFor({ ZEN_RACE_MAX: '2' }, 'nemotron-3-ultra-free').length, 2, 'ZEN_RACE_MAX режет');
 });

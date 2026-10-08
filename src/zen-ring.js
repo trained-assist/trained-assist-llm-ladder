@@ -46,6 +46,33 @@ export const ZEN_MODEL_MAX_INPUT_BYTES = {
   'mimo-v2.6-flash-free': 20_000,
 };
 
+// Полоса, в которой гоним несколько моделей СРАЗУ, а не отказываем.
+//
+// Замер 2026-10-08 (5394 задачи): в полосе 50 КБ+ одиночный вызов выигрывает в 9–20 % случаев.
+// Четыре параллельных — 1 − (1−p)^4 ≈ 50–60 %, а это нормально для ЖИРНОГО промпта, у которого
+// и так нет дешёвой альтернативы: сегодня такие вызовы получают 413 и уходят по лестнице в
+// никуда. Четыре задачи из бесплатного бюджета — меньшая цена, чем `every rung failed`.
+//
+// Выше жёсткого потолка отказываем как раньше: там даже гонка не спасает (замер: 100–300 КБ —
+// 9 % на модель), а бюджет кольца — 500 задач в сутки на (репозиторий, модель).
+export const ZEN_RACE_MAX_INPUT_BYTES = 1_000_000;
+export const ZEN_RACE_MODELS = Object.freeze([
+  'nemotron-3-ultra-free',
+  'mimo-v2.6-flash-free',
+  'big-pickle',
+  'nemotron-3.5-lightning-free',
+]);
+export const ZEN_RACE_MAX = 4;
+
+// Какие модели гоним в деградированной полосе: запрошенная — первой, остальные — из списка
+// (env ZEN_RACE_MODELS переопределяет, ZEN_RACE_MAX режет). MODEL_RE отфильтровывает мусор.
+export function raceModelsFor(env, requested) {
+  const raw = String(env.ZEN_RACE_MODELS || '').split(/[\s,]+/).filter(Boolean);
+  const list = (raw.length ? raw : ZEN_RACE_MODELS).filter((m) => MODEL_RE.test(m));
+  const max = Math.min(Math.max(Number(env.ZEN_RACE_MAX) || ZEN_RACE_MAX, 2), ZEN_RACE_MAX);
+  return [requested, ...list.filter((m) => m !== requested)].slice(0, max);
+}
+
 // ---- ring ceiling + autoscaling (owner's numbers, rationale in docs/zen-runner.md) -----------
 // The account allows 20 simultaneous Actions jobs, so the pool can never exceed that — and two
 // of the 20 stay free so an ordinary push/PR CI run is never starved by our own workers.
@@ -547,7 +574,11 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   const inputLimit = Number(env.ZEN_MAX_INPUT_BYTES)
     || ZEN_MODEL_MAX_INPUT_BYTES[model]
     || ZEN_MAX_INPUT_BYTES;
-  if (inputBytes > inputLimit) {
+  // Деградированная полоса: вместо отказа гоним несколько моделей сразу (см. ZEN_RACE_*).
+  // Отказ остаётся только там, где и гонка не спасает — выше жёсткого потолка.
+  const raceCap = Number(env.ZEN_RACE_MAX_INPUT_BYTES) || ZEN_RACE_MAX_INPUT_BYTES;
+  const race = inputBytes > inputLimit && inputBytes <= raceCap ? raceModelsFor(env, model) : [];
+  if (!race.length && inputBytes > inputLimit) {
     return {
       status: 413,
       data: {
@@ -584,68 +615,84 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   const repoScope = workers[0]?.repo || coldStart?.dispatched?.[0]?.repo || '*';
   const perMin = Number(env.ZEN_PER_MIN) || LIMITS.perMin;
   const perDay = Number(env.ZEN_PER_DAY) || LIMITS.perDay;
-  const perRepo = budgetVerdict(await readCounts(env, repoScope, model), now, { perMin, perDay });
-  // #133: the provider-wide day cap follows the number of models that moved today, so one model
-  // spending its own quota cannot close the rung for every other model.
+  // #133: общий дневной потолок провайдера — один на все модели, поэтому проверяется один раз.
   const perAll = budgetVerdict(await readCounts(env, '*', '*'), now,
     { perMin, perDay: await sharedDayCap(env, perDay, now) });
-  for (const v of [perRepo, perAll]) {
-    if (!v.ok) return { status: 429, data: { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after } };
+  if (!perAll.ok) {
+    return { status: 429, data: { error: `budget exhausted (${perAll.reason})`, reason: perAll.reason, retry_after: perAll.retry_after } };
+  }
+
+  // Одна модель (обычный путь) или гонка: budgetVerdict считает по (репозиторий, модель), так
+  // что исчерпанный лимит одной модели не должен ронять всю гонку — её просто делают уже.
+  const wanted = race.length ? race : [model];
+  const eligible = [];
+  const refused = [];
+  for (const m of wanted) {
+    const v = budgetVerdict(await readCounts(env, repoScope, m), now, { perMin, perDay });
+    if (v.ok) eligible.push(m); else refused.push({ model: m, reason: v.reason, retry_after: v.retry_after });
+  }
+  if (!eligible.length) {
+    const first = refused[0] || { reason: 'budget', retry_after: 0 };
+    return { status: 429, data: { error: `budget exhausted (${first.reason})`, reason: first.reason, retry_after: first.retry_after, models: refused } };
   }
 
   // #138, the load-bearing half. The daily cap is 500 requests per (repo, model) AND provider-wide
   // — one of the scarcest resources here. Queue depth is what turns that cap into a loss: every task
   // admitted while the pool is saturated is served by a worker and burns quota on an answer whose
   // caller already failed over. So refuse AT THE DOOR, before the task exists: no row, no budget
-  // bump, nothing to serve, nothing wasted. The ladder walks down in ~0 s and the pool stays healthy
-  // for the next call. Refusing is also what makes the pool self-limiting: at 500/day it simply
-  // stops taking work instead of silently burning the remainder.
-  //
-  // Sizing: one in-flight task per worker is throughput, so `live × 2` gives every worker a little
-  // runway without letting a burst build a queue. Configurable — a cold ring (live = 0) must still
-  // admit ONE task or it could never start.
+  // bump, nothing to serve, nothing wasted.
   const live = workers.length;
   const cap = Math.max(BACKLOG_FACTOR * live, 1);
   const queued = await readQueued(env);
-  if (queued >= cap) {
+  // Гонка влезает ЦЕЛИКОМ в свободные слоты, а не роняет вызов: на маленьком кольце
+  // (live = 1 → cap = 2) гонка из четырёх превращается в две или в одиночный вызов —
+  // это лучше отказа, а кольцо тем временем подрастает (scaleRing ниже).
+  const slots = Math.max(0, cap - queued);
+  if (slots === 0) {
     // A full queue under ONE worker is a capacity problem, not a health problem — so grow the ring
-    // while refusing, instead of only waiting for somebody else to do it. scaleRing is idempotent
-    // inside BOOT_MS (25 s), so a burst of refusals dispatches at most one worker per boot window
-    // rather than one per call; once it registers, cap doubles (2 × live) and the next caller gets
-    // in. The scheduled autoscaler was supposed to do this and cannot: its ZEN_RUNNER_URL /
-    // ZEN_RUNNER_TOKEN were absent from the repository, so every run since at least 2026-10-05 has
-    // died with SCALE_CONFIG_MISSING and the ring was never grown on demand either.
-    await scaleRing(env, { now, demand: queued + 1, fetchImpl });
+    // while refusing. scaleRing is idempotent inside BOOT_MS (25 s).
+    await scaleRing(env, { now, demand: queued + eligible.length, fetchImpl });
     return {
       status: 503,
       data: {
-        error: 'pool_backlog', queued, live, cap,
-        // No '429'/'503' digits: a saturated pool is transient back-pressure, not a quota skip.
+        error: 'pool_backlog', queued, live, cap, wanted: eligible.length,
         hint: 'pool is saturated — the task was NOT queued, no quota spent',
       },
     };
   }
+  const racing = eligible.slice(0, slots);
 
-  const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
-  await db(env).prepare(
-    `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
-  ).bind(id, model, prompt.slice(0, 4000), messages, tools, maxTokens, waitMs, 'queued', now).run();
-  await bumpCount(env, repoScope, model, now);
+  const ids = [];
+  for (const m of racing) {
+    const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    await db(env).prepare(
+      `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+    ).bind(id, m, prompt.slice(0, 4000), messages, tools, maxTokens, waitMs, 'queued', now).run();
+    await bumpCount(env, repoScope, m, now);
+    ids.push({ id, model: m });
+  }
   await bumpCount(env, '*', '*', now);
 
   const cold = coldStart ? { scaled: coldStart.reason, dispatched: coldStart.dispatched.map((d) => d.repo), boot_ms: BOOT_MS } : null;
   const deadline = Date.now() + waitMs;
   let step = 0;
   for (;;) {
-    const row = await readTask(env, id);
-    if (row.state === 'done' || row.state === 'failed') {
+    const rows = await Promise.all(ids.map((t) => readTask(env, t.id)));
+    // Побеждает ПЕРВЫЙ НЕПУСТОЙ ответ. Пустое тело — основной вид проигрыша в этой полосе
+    // (замер: 1073 вызова, 100 % пустого текста), поэтому `ok:false` не может выиграть гонку,
+    // даже если формально задача «выполнена».
+    const win = rows.findIndex((row) => row && row.state === 'done' && (row.ok || !!row.tool_calls));
+    if (win >= 0) {
+      const row = rows[win];
+      const { id, model: m } = ids[win];
       return {
-        status: row.state === 'done' ? 200 : 502,
+        status: 200,
         data: {
-          task_id: id, model, ok: !!row.ok, text: row.text || null, kind: row.kind,
+          task_id: id, model: m, ok: true, text: row.text || null, kind: row.kind,
           error: row.error, provider_ms: row.provider_ms, served_ms: row.served_ms,
           worker_id: row.worker_id, wait_ms: waitMs,
+          raced: ids.map((t) => t.model),
           ...(row.tool_calls ? { tool_calls: JSON.parse(row.tool_calls) } : {}),
           ...(row.usage ? { usage: JSON.parse(row.usage) } : {}),
           ...(row.finish_reason ? { finish_reason: row.finish_reason } : {}),
@@ -653,9 +700,28 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
         },
       };
     }
+    const allTerminal = rows.every((row) => row && (row.state === 'done' || row.state === 'failed'));
+    if (allTerminal) {
+      const first = rows.find((row) => row && row.state === 'done' && !row.ok) || rows.find((row) => row) || {};
+      return {
+        status: 502,
+        data: {
+          task_id: ids[0].id, model: first.model || ids[0].model, ok: false, text: null, kind: first.kind,
+          error: first.error || 'empty answer from every raced model',
+          raced: ids.map((t) => t.model),
+          provider_ms: first.provider_ms, served_ms: first.served_ms, wait_ms: waitMs,
+          ...(first.tool_calls ? { tool_calls: JSON.parse(first.tool_calls) } : {}),
+          ...(first.usage ? { usage: JSON.parse(first.usage) } : {}),
+          ...(first.finish_reason ? { finish_reason: first.finish_reason } : {}),
+        },
+      };
+    }
     if (Date.now() >= deadline) {
-      await db(env).prepare('UPDATE zen_pool_tasks SET wait_returned_at = ?1 WHERE id = ?2').bind(nowMs(env), id).run();
-      return { status: 504, data: { error: 'watchdog fired before the answer arrived', task_id: id, wait_ms: waitMs,
+      for (const t of ids) {
+        await db(env).prepare('UPDATE zen_pool_tasks SET wait_returned_at = ?1 WHERE id = ?2').bind(nowMs(env), t.id).run();
+      }
+      return { status: 504, data: { error: 'watchdog fired before the answer arrived', task_id: ids[0].id,
+        task_ids: ids.map((t) => t.id), raced: ids.map((t) => t.model), wait_ms: waitMs,
         ...(cold ? { cold_start: cold } : {}),
         hint: 'the job is still working — GET /zen/pool/result/{task_id} picks the answer up' } };
     }
