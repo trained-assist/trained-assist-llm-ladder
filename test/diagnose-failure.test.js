@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, payloadFacts } from '../scripts/diagnose-failure.mjs';
+import { classify, payloadFacts, authHint } from '../scripts/diagnose-failure.mjs';
 
 // Каждый код отвечает на ровно один вопрос владельца — «чего переполнение» — и несёт своё число.
 
@@ -58,4 +58,12 @@ test('пустые попытки не роняют разбор', () => {
   assert.equal(payloadFacts([]).bytes, 0);
   assert.equal(payloadFacts(undefined).tokens, 0);
   assert.equal(classify({}).code, 'OTHER');
+});
+
+test('протухшая OAuth-сессия wrangler → подсказка про wrangler login, а не сырой code 10000', () => {
+  const hint = authHint('Authentication error [code: 10000]\n\nGetting User settings...');
+  assert.match(hint, /wrangler login/);
+  assert.match(authHint('Invalid access token [code: 9109]'), /wrangler login/);
+  assert.equal(authHint('LIKE or GLOB pattern too complex: SQLITE_ERROR'), null, 'не-авторизационные ошибки не маскируем');
+  assert.equal(authHint('fetch failed'), null, 'сетевой сбой обрабатывается отдельно (ретрай)');
 });

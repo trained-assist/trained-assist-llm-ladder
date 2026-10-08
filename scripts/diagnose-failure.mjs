@@ -26,6 +26,17 @@ const CACHE = path.join(os.homedir(), '.cache', 'llm-ladder', 'trace-wrangler.to
 
 // ─────────────────────────── доступ к D1 ───────────────────────────
 
+// OAuth-сессия wrangler живёт ~1 час и иногда отваливается ДО expiration_time — тогда wrangler
+// печатает `Authentication error [code: 10000]` / `Invalid access token [code: 9109]` и никак не
+// говорит, что делать. Экспортируется, чтобы это лежало в тестах, а не в памяти.
+export function authHint(raw) {
+  const t = String(raw || '');
+  if (/Authentication error|Invalid access token|code: 9109|code: 10000/i.test(t)) {
+    return 'Авторизация Cloudflare истекла. Выполните `npx wrangler login` и повторите `npm run diagnose`.';
+  }
+  return null;
+}
+
 function wrangler(args) {
   try {
     return execFileSync('npx', ['--yes', 'wrangler', ...args], {
@@ -33,6 +44,8 @@ function wrangler(args) {
     });
   } catch (e) {
     const raw = String(e.stdout || e.stderr || e.message || '');
+    const hint = authHint(raw);
+    if (hint) throw new Error(hint);
     // wrangler кладёт настоящую причину в notes[].text (например SQLITE_ERROR), а не в message.
     const notes = [...raw.matchAll(/"text":\s*"([^"]+)"/g)].map((m) => m[1]).filter(Boolean);
     const reason = notes.find((t) => !/^A request to the Cloudflare API/.test(t)) || notes[0];
