@@ -15,6 +15,15 @@ test('estimateTokens: a token count without talking to a provider', () => {
   // the estimate is on the JSON, so history, roles and tool schemas all count
   const withHistory = estimateTokens({ messages: [{ role: 'system', content: 'a' }, { role: 'user', content: 'b'.repeat(400) }] });
   assert.ok(withHistory > 100, 'more messages → more tokens, not fewer');
+
+  // Ключевой случай: кириллица занимает 2 байта на символ, поэтому оценка ПО БАЙТАМ даёт
+  // почти вдвое больше, чем len/4 по символам. Если считать по символам — 523 КБ русского
+  // текста выглядят как «~80K токенов» (в потолке) и уходят в шлюз, который отвечает 429.
+  const cyr = { messages: [{ role: 'user', content: 'я'.repeat(4000) }] };
+  const byChars = Math.ceil(JSON.stringify(cyr.messages).length / 4);
+  const byBytes = estimateTokens(cyr);
+  assert.ok(byBytes > byChars * 1.5, `по байтам должно быть заметно больше: ${byBytes} против ${byChars}`);
+  assert.ok(withHistory > 100, 'more messages → more tokens, not fewer');
 });
 
 test('ceilingFor: only rungs with a measured ceiling refuse', () => {
