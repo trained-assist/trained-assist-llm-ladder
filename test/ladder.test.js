@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS, ringGuardRetry } from '../src/ladder.js';
 import { estimateTokens } from '../src/size-policy.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
@@ -566,6 +566,24 @@ test('a context-class failure is recorded but never health-skips the rung for ot
   assert.ok(r2.attempts.some(a => a.model === GOLADDER[0]),
     'the NEXT caller still gets the head rung — a transient skip filters it out of rungs entirely');
   assert.equal(r2.model, GOLADDER[0], 'and this time it answers');
+});
+
+// ── #45 для кольца: ретрай только если вторая попытка может отличаться ─────────────────────────
+// Замер 2026-10-08 (сутки): 74 отказа `zen-rings: ok (finish=tool_calls, …)` — это ответ, у
+// которого кольцевой воркер НЕ приложил tool_calls (старая версия, фикс от 07.10 не доехал:
+// синк кольца падает, ZEN_RING_PAYLOAD в секретах нет). Повтор дал бы то же самое: дошли до
+// ответа 8 из 74 (и то другой ступенью), суммарно 35 минут стенда за сутки.
+test('ringGuardRetry: отказ по tool_calls не ретраится — структурный, а не флейк', () => {
+  const toolCallOnly = { kind: 'ok', ok: false, finish_reason: 'tool_calls', usage: { completion_tokens: 65 } };
+  assert.equal(ringGuardRetry(toolCallOnly, {}), false, 'повтор даст тот же результат — уходим сразу');
+
+  const flake = { kind: 'ok', ok: false, finish_reason: 'length', usage: { completion_tokens: 3000 } };
+  assert.equal(ringGuardRetry(flake, {}), true, 'обычный пустой ответ остаётся под ретрай (#45)');
+
+  assert.equal(ringGuardRetry(toolCallOnly, { stream: true }), false, 'стрим и так оплатил окно');
+  assert.equal(ringGuardRetry({ kind: 'ok', ok: true, finish_reason: 'tool_calls' }, {}), false,
+    'это не guard-случай вовсе — ответ принят');
+  assert.equal(ringGuardRetry(null, {}), false, 'нет данных — не ретраим вслепую');
 });
 
 // ── Streaming (opencode as a client of the free ladder) ────────────────────────────────────────
