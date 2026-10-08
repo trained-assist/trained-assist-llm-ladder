@@ -75,11 +75,12 @@ const MUSE = 'opencode-go/muse-spark-1.3-contributor';
 // `every rung failed` в 0.5 с, и вызывающий ретраит впустую.
 const BIG = 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free';
 
-test('config: #67 Pareto-first — zen ring opens, Go mimo next, free ×8 in the tail, paid last (#36/#42 economics kept)', () => {
+test('config: #67 — zen ring opens, Muse = первая платная Go, платный сегмент по цене, бесплатный хвост (#36/#42 + owner 2026-10-08)', () => {
   assert.deepEqual(LADDER, [
     'opencode-go/longcat-2.5-preview-free',
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
+    MUSE,
     'opencode-go/mimo-v2.6-flash',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
@@ -89,7 +90,6 @@ test('config: #67 Pareto-first — zen ring opens, Go mimo next, free ×8 in the
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     'zen-rings/big-pickle',
     'zen-rings/nemotron-3.5-lightning-free',
-    MUSE,
   ]);
   // The zen ring opens the service ladder (owner 2026-10-05): a fast free model first, one
   // attempt, then the ladder rides down. The #42 ban on zen in `service` is lifted: its reason
@@ -113,7 +113,10 @@ test('config: #67 Pareto-first — zen ring opens, Go mimo next, free ×8 in the
   assert.equal(LADDER.filter(paid).length, 0, 'ни одного платного ранга OpenRouter — деньги на Go');
   assert.ok(LADDER.filter(m => m.startsWith('openrouter/') && m.endsWith(':free')).length === 6,
     'шесть бесплатных OpenRouter стоят перед платным хвостом (#36)');
-  assert.equal(LADDER.at(-1), MUSE, 'последняя ступень — самая дешёвая платная Go-модель (owner 2026-10-08)');
+  // Владелец 2026-10-08: «после zen сделать Muse первой платной Go» + платный сегмент по
+  // возрастанию цены — если Muse пропадёт, лестница берёт следующую самую дешёвую.
+  assert.equal(LADDER[3], MUSE, 'Muse — первая платная Go, сразу за zen');
+  assert.equal(LADDER[4], 'opencode-go/mimo-v2.6-flash', 'дальше следующая по цене ($0.28)');
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
   assert.ok(firstGoPaid === 3, 'бесплатный Go и пара zen-rings в голове, платный Go следом (#67)');
   // Бесплатный Go теперь в голове (#67), поэтому «все $0 подряд» уже не выполняется: после него
@@ -121,8 +124,8 @@ test('config: #67 Pareto-first — zen ring opens, Go mimo next, free ×8 in the
   // которого тест и писался, сохранён: пока бесплатный тир не кончился, платный хвост не трогают.
   const freeTail = LADDER.filter(m => !m.startsWith('zen-rings/'));
   assert.equal(freeTail[0], 'opencode-go/longcat-2.5-preview-free', 'бесплатный Go — первый вне zen');
-  assert.ok(LADDER.indexOf(MUSE) > LADDER.findIndex(m => m.startsWith('openrouter/') && m.endsWith(':free')),
-    'бесплатный хвост OpenRouter никогда не стоит после платного');
+  assert.ok(LADDER.indexOf(MUSE) < LADDER.findIndex(m => m.startsWith('openrouter/') && m.endsWith(':free')),
+    'платный сегмент стоит перед бесплатным хвостом OpenRouter');
 });
 
 // #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
@@ -671,28 +674,28 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
 });
 
 test('config: doctor = Go MiMo first, then stronger Go models, cheapest Go last (owner 2026-09-28 / 2026-10-08)', () => {
-  const expected = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
-    'opencode-go/deepseek-v4-pro', BIG, MUSE];
+  const expected = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', MUSE, 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
+    'opencode-go/deepseek-v4-pro', BIG];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
 test('config: research is split by role — Go reads first, 1M-free tail, cheapest Go last (owner 2026-09-30 / 2026-10-08)', () => {
-  const reader = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', BIG, MUSE];
-  const thinker = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', BIG, MUSE];
+  const reader = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', MUSE, 'opencode-go/mimo-v2.6-flash', BIG];
+  const thinker = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', MUSE, 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', BIG];
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
   assert.ok(!JSON.stringify(config.ladders.research).includes('openrouter/google/gemini'), 'платный Gemini убран — деньги на Go (owner 2026-10-08)');
 });
 
-test('config: conversation = hh-skill writing — быстрый free-хвост, платный на Go (owner 2026-10-01 / 2026-10-08)', () => {
+test('config: conversation = hh-skill writing — Muse первой платной Go, платный на Go (owner 2026-10-01 / 2026-10-08)', () => {
   const expected = [
     'opencode-go/longcat-2.5-preview-free',
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
-    BIG,
-    'opencode-go/mimo-v2.6-flash',
     MUSE,
+    'opencode-go/mimo-v2.6-flash',
+    BIG,
   ];
   assert.deepEqual(CONVERSATION, expected);
   assert.deepEqual(config.ladders.conversation, { build: expected }, 'conversation is the build-role ladder');
@@ -714,17 +717,17 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     'opencode-go/longcat-2.5-preview-free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
   ];
-  const advanced = ['opencode-go/mimo-v2.6-flash', BIG, ...paid];
+  const advanced = [MUSE, 'opencode-go/mimo-v2.6-flash', BIG, ...paid];
   // The zen ring opens every interactive ladder (owner 2026-10-04): one fast free model, one
   // attempt, then the ladder rides down. `build` carries a second pool rung as its fallback.
   const ZEN = 'zen-rings/nemotron-3-ultra-free';
   const ZEN2 = 'zen-rings/mimo-v2.6-flash-free';
   const zenHead = ['zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free'];
 
-  assert.deepEqual(config.ladders.build.build, [FG, ...zenHead, ...base.slice(1), BIG, MUSE], 'build = бесплатный Go в голове + zen ring ×2 + base free ×3 + платный хвост + Muse последней');
-  assert.deepEqual(config.ladders['build advanced'].build, [FG, ZEN, ZEN2, ...advanced, MUSE], 'build advanced = бесплатный Go + zen ring + mimo + платный хвост + Muse последней');
+  assert.deepEqual(config.ladders.build.build, [FG, ...zenHead, MUSE, ...base.slice(1), BIG], 'build = бесплатный Go + zen ring ×2 + Muse первой платной + base free ×3');
+  assert.deepEqual(config.ladders['build advanced'].build, [FG, ZEN, ZEN2, ...advanced], 'build advanced = бесплатный Go + zen ring + платный сегмент (Muse → mimo) + 1M-free хвост');
   for (const role of ['plan', 'general', 'review']) {
-    assert.deepEqual(config.ladders[role], { build: [FG, ZEN, ZEN2, ...advanced, MUSE] }, `${role} advanced-first — роль=лестница (#71)`);
+    assert.deepEqual(config.ladders[role], { build: [FG, ZEN, ZEN2, ...advanced] }, `${role} advanced-first — роль=лестница (#71)`);
   }
 
   // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
@@ -734,10 +737,10 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
     FG,
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
+    MUSE,
     'opencode-go/mimo-v2.6-flash',
     BIG,
-    MUSE,
-  ], 'explore = zen ring + big-ctx (1M+), платный только на Go, Muse последней');
+  ], 'explore = zen ring + Muse первой платной + mimo + big-ctx (1M+)');
   assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
 
   // vision (распознавание картинок): всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
@@ -760,7 +763,9 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   // Голова с 2026-10-07: бесплатный Go, затем пара zen-rings. zen остаётся фоллбэком — сбой
   // на нём стоит один хоп, а не разговор; платный Go по-прежнему открывает платный сегмент.
   assert.ok(config.ladders.build.build.includes('zen-rings/nemotron-3-ultra-free'), 'ultra:free остаётся в build');
-  assert.equal(config.ladders.service.build[3], 'opencode-go/mimo-v2.6-flash', 'платный Go открывает платный сегмент');
+  // Владелец 2026-10-08: «после zen сделать Muse первой платной Go, самую дешёвую».
+  assert.equal(config.ladders.service.build[3], MUSE, 'самая дешёвая платная Go открывает платный сегмент');
+  assert.equal(config.ladders.service.build[4], 'opencode-go/mimo-v2.6-flash', 'следом — следующая по цене');
   assert.equal(config.ladders.service.build[0], 'opencode-go/longcat-2.5-preview-free', 'бесплатный Go открывает лестницу');
   assert.deepEqual(config.ladders.service.build.slice(1, 3),
     ['zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free'], 'за ним пара zen-rings');
@@ -777,12 +782,19 @@ test('config: во всех не-фри лестницах последняя с
   for (const [name, roles] of Object.entries(config.ladders)) {
     if (SKIP.has(name)) continue;
     for (const [role, rungs] of Object.entries(roles)) {
-      assert.equal(rungs.at(-1), MUSE, `${name}:${role} — последняя ступень`);
+      // Владелец 2026-10-08: «после zen сделать Muse первой платной Go … самую дешёвую».
+      // Форма сегмента: сплошной, сразу за zen, от дешёвых к дорогим — тогда пропажа Muse
+      // (тариф/регион) просто сдвигает указатель на следующую самую дешёвую.
+      const paidIdx = rungs.map((m, i) => [m, i]).filter(([m]) => m.startsWith('opencode-go/') && !m.endsWith('-free'));
+      assert.equal(paidIdx[0][1], 3, `${name}:${role} — платный сегмент начинается сразу после zen`);
+      assert.ok(paidIdx.every(([, i], k) => i === 3 + k), `${name}:${role} — платный сегмент сплошной`);
+      const paidNames = paidIdx.map(([m]) => m);
+      assert.deepEqual(paidNames, [...paidNames].sort((a, b) => prices[a][1] - prices[b][1]),
+        `${name}:${role} — платный сегмент от дешёвых к дорогим`);
+      assert.equal(paidNames[0], MUSE, `${name}:${role} — Muse первая ($0.20/1M, самая дешёвая)`);
       assert.equal(rungs.filter(m => m.startsWith('openrouter/') && !m.endsWith(':free')).length, 0,
         `${name}:${role} — платного OpenRouter нет (402, деньги на Go, owner 2026-10-08)`);
       assert.ok(rungs.includes(BIG), `${name}:${role} — есть бесплатный ранг с окном 1M (иначе жирная сессия → every rung failed)`);
-      const firstPaidOr = rungs.findIndex(m => m.startsWith('openrouter/') && !m.endsWith(':free'));
-      assert.ok(firstPaidOr < 0 || rungs.indexOf(BIG) < firstPaidOr, `${name}:${role} — 1M-ранг стоит ПЕРЕД платным OR-хвостом`);
       const paidGo = rungs.filter(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
       const cheapest = Math.min(...paidGo.map(m => prices[m][1]));
       assert.equal(prices[MUSE][1], cheapest, `${name}:${role} — Muse и правда самая дешёвая платная Go`);
