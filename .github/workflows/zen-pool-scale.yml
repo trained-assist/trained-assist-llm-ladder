@@ -31,7 +31,14 @@ on:
         description: 'pool path only: how many workers the caller claims to need right now (0 = trust the λ/queue verdict)'
         default: ''
   schedule:
-    - cron: '*/2 * * * *'
+    # Было */2 = 720 ранов в сутки — 82 % ВСЕГО запроса репозитория к планировщику GitHub,
+    # который за 24 ч выдал 18 ранов на все шесть расписаний (запрошено ~881). Само
+    # масштабирование уже живёт в cron САМОГО ВОРКЕРА (src/index.js scheduled(), wrangler
+    # triggers каждые 2 мин — коммит 3233ceb «автоскейлер переезжает в крон воркера, крон
+    # GitHub не даёт интервал»), поэтому здесь осталась только наблюдаемость: метрика-таблица
+    # (λ, очередь, live, verdict) в истории Actions. Почасовая частота режет запрос в 30 раз
+    # (720 → 24) и освобождает слоты для ladder-watch, которому нужны свои.
+    - cron: '13 */1 * * *'
 
 concurrency:
   group: zen-pool-scale
