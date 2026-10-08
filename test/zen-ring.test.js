@@ -8,7 +8,7 @@ import {
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
-  ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES,
+  ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES, ZEN_MODEL_MAX_INPUT_BYTES,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
 import { classifyError } from '../src/classify.js';
@@ -965,4 +965,29 @@ test('a fat input is refused at the door: no task, no quota, no dispatch, no ret
   // the whole 30 s watchdog before answering.
   const small = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', prompt: '2+4?', wait_ms: 1_000 }, gh.fetchImpl);
   assert.notEqual(small.status, 413, 'a one-line prompt is not affected');
+});
+
+// Один потолок на всех был ошибкой: модели держат разный размер. Замер 2026-10-08 (5394 задачи,
+// байты JSON messages): в полосе 20–50 KB nemotron держит 62 % (661/1072), а mimo — 18 % (33/186).
+// Отказывать mimo на 20 KB стоит ничего и экономит хоп, который проваливается в четырёх случаях
+// из пяти; общий 50 KB остаётся для тех, у кого данных нет и для полосы, где рушатся обе.
+test('the input ceiling is per model: mimo refuses at 20 KB, the same bytes are fine for nemotron', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  const gh = fakeGithub(204);
+  const budgetBefore = JSON.stringify([...d1._budget.values()]);
+  const MIMO = ZEN_MODEL_MAX_INPUT_BYTES['mimo-v2.6-flash-free'];
+  assert.equal(MIMO, 20_000, 'the measured ceiling for mimo');
+  const mid = { role: 'user', content: 'x'.repeat(MIMO + 5_000) };   // ~25 KB
+
+  const m = await ringInvoke(env2, { model: 'mimo-v2.6-flash-free', messages: [mid] }, gh.fetchImpl);
+  assert.equal(m.status, 413, 'mimo is refused at its OWN ceiling, before the global 50 KB');
+  assert.equal(m.data.limit, MIMO, 'and the message names that ceiling, not the shared one');
+  assert.equal(d1._tasks.size, 0, 'no task row');
+  assert.equal(JSON.stringify([...d1._budget.values()]), budgetBefore, 'no provider quota spent');
+  assert.equal(gh.calls.length, 0, 'nothing was dispatched');
+
+  // тот же кусок для nemotron — он весь диапазон держит, поэтому задача создаётся
+  const n = await ringInvoke(env2, { model: 'nemotron-3-ultra-free', messages: [mid], wait_ms: 1_000 }, gh.fetchImpl);
+  assert.notEqual(n.status, 413, '25 KB is inside nemotron\'s band — the guard is not global anymore');
 });
