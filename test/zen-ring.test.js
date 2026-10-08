@@ -9,7 +9,7 @@ import {
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
   ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES, ZEN_MODEL_MAX_INPUT_BYTES,
-  ZEN_RACE_MAX_INPUT_BYTES, ZEN_RACE_MODELS, raceModelsFor,
+  ZEN_RACE_MAX_INPUT_BYTES, ZEN_RACE_MODELS, ZEN_RACE_MAX, raceModelsFor, zenContextOf, ZEN_MODEL_CONTEXTS,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
 import { classifyError } from '../src/classify.js';
@@ -1056,10 +1056,35 @@ test('гонка: если никто не ответил непустым — �
   assert.ok(r.data.raced.every((m) => ZEN_RACE_MODELS.includes(m)), 'гоняются только модели списка гонки');
 });
 
-test('raceModelsFor: запрошенная первой, остальные из списка, env переопределяет', () => {
-  assert.deepEqual(raceModelsFor({}, 'nemotron-3-ultra-free')[0], 'nemotron-3-ultra-free', 'запрошенная идёт первой');
-  assert.ok(raceModelsFor({}).length <= ZEN_RACE_MODELS.length, 'не больше списка');
+test('raceModelsFor: запрошенная первой, env переопределяет состав и размер', () => {
+  assert.equal(raceModelsFor({}, 'nemotron-3-ultra-free')[0], 'nemotron-3-ultra-free', 'запрошенная идёт первой');
+  assert.equal(ZEN_RACE_MODELS.length, 6, 'в гонке шесть моделей');
+  assert.equal(ZEN_RACE_MAX, 6, 'и до шести задач ставим');
+  assert.ok(raceModelsFor({}).length <= ZEN_RACE_MAX, 'не больше максимума');
   assert.deepEqual(raceModelsFor({ ZEN_RACE_MODELS: 'big-pickle, nemotron-3.5-lightning-free' }, 'big-pickle'),
     ['big-pickle', 'nemotron-3.5-lightning-free'], 'env задаёт состав');
-  assert.deepEqual(raceModelsFor({ ZEN_RACE_MAX: '2' }, 'nemotron-3-ultra-free').length, 2, 'ZEN_RACE_MAX режет');
+  assert.equal(raceModelsFor({ ZEN_RACE_MAX: '2' }, 'nemotron-3-ultra-free').length, 2, 'ZEN_RACE_MAX режет');
+});
+
+// zen не публикует контексты (ни /zen/v1/models, ни docs/zen, ни инвентарь — context = NULL),
+// поэтому карта ZEN_MODEL_CONTEXTS — нижние границы, замеренные в проде: модели отвечали на
+// входах ~1 МБ (≈250K токенов). Смысл фильтра — не жечь задачу бюджета на модель, чьё окно
+// заведомо меньше входа.
+test('фильтр по окну: модель с известным меньшим контекстом вылетает, неизвестная — остаётся', () => {
+  assert.equal(zenContextOf({}, 'nemotron-3-ultra-free'), ZEN_MODEL_CONTEXTS['nemotron-3-ultra-free'],
+    'подтверждённая нижняя граница читается из карты');
+  assert.equal(zenContextOf({}, 'longcat-2.5-preview-free'), null, 'окно неизвестно — null');
+  assert.equal(zenContextOf({ ZEN_MODEL_CONTEXTS: '{"exo-free": 131072}' }, 'exo-free'), 131_072, 'env переопределяет');
+  assert.equal(zenContextOf({ ZEN_MODEL_CONTEXTS: '{сломанный json}' }, 'exo-free'), null, 'битый env не роняет вызов');
+
+  // 1 МБ ≈ 250K токенов: все четыре «старичка» как раз на границе, новички без окна — не трогаем
+  const wide = raceModelsFor({}, 'nemotron-3-ultra-free', 250_000);
+  assert.ok(wide.includes('nemotron-3-ultra-free'), '250K токенов — ровно на границе, остаётся');
+  assert.ok(wide.includes('longcat-2.5-preview-free'), 'неизвестное окно не выкидывает модель');
+
+  // а теперь у其中一个 модели окно меньше входа
+  const withSmall = { ZEN_MODEL_CONTEXTS: JSON.stringify({ ...ZEN_MODEL_CONTEXTS, 'big-pickle': 32_000 }) };
+  const raced = raceModelsFor(withSmall, 'nemotron-3-ultra-free', 100_000);
+  assert.ok(!raced.includes('big-pickle'), 'модель с окном 32K не идёт в гонку на 100K токенов');
+  assert.ok(raced.includes('nemotron-3-ultra-free'), 'остальные участвуют');
 });

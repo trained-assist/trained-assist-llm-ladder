@@ -61,16 +61,62 @@ export const ZEN_RACE_MODELS = Object.freeze([
   'mimo-v2.6-flash-free',
   'big-pickle',
   'nemotron-3.5-lightning-free',
+  // Два новичка без своих замеров в жирной полосе — их и добавляем ради разнообразия: отказы
+  // скоррелированы по ВХОДУ, но модели всё-таки расходятся (батч 628 619 байт: lightning упал,
+  // три ответили). Копим данные по ним через `raced` в ответе кольца.
+  'longcat-2.5-preview-free',
+  'ling-3.1-flash-free',
 ]);
-export const ZEN_RACE_MAX = 4;
+export const ZEN_RACE_MAX = 6;
+
+// Окна контекстов моделей кольца — В ТОКЕНАХ, и только те, что подтверждены ЗАМЕРОМ в проде.
+//
+// zen не публикует контексты: ни каталог /zen/v1/models (там только id/created/owned_by), ни
+// docs/zen (таблица Model | Model ID | Endpoint | SDK), ни инвентарь (context = NULL у всех
+// opencode-zen/*). Поэтому карта ниже — это не справочник, а НИЖНИЕ ГРАНИЦЫ: модели отвечали
+// на входах ~1 МБ (≈250K токенов по bytes/4) в батчах гонки, значит окно не меньше этого.
+//
+// Зачем фильтр вообще нужен: в гонку попадает модель, окно которой не вмещает вход, — она
+// гарантированно отдаст пусто и просто сожжёт одну из 500 суточных задач. Заполнить карту
+// можно и через env: ZEN_MODEL_CONTEXTS='{"exo-free":131072}'.
+export const ZEN_MODEL_CONTEXTS = Object.freeze({
+  'nemotron-3-ultra-free': 250_000,
+  'mimo-v2.6-flash-free': 250_000,
+  'big-pickle': 250_000,
+  'nemotron-3.5-lightning-free': 250_000,
+  // longcat-2.5-preview-free и ling-3.1-flash-free в карте НЕТ: окна неизвестны, поэтому их
+  // не отбрасываем — неизвестность не должна выкидывать модель из гонки.
+
+});
+
+// Окно модели в токенах или null (неизвестно / не подтверждено замером).
+export function zenContextOf(env, model) {
+  const raw = String(env.ZEN_MODEL_CONTEXTS || '').trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      const v = Number(parsed?.[model]);
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch { /* битый env не должен ронять вызов — молча берём карту по умолчанию */ }
+  }
+  const v = Number(ZEN_MODEL_CONTEXTS[model]);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
 
 // Какие модели гоним в деградированной полосе: запрошенная — первой, остальные — из списка
 // (env ZEN_RACE_MODELS переопределяет, ZEN_RACE_MAX режет). MODEL_RE отфильтровывает мусор.
-export function raceModelsFor(env, requested) {
+export function raceModelsFor(env, requested, inputTokens = null) {
   const raw = String(env.ZEN_RACE_MODELS || '').split(/[\s,]+/).filter(Boolean);
   const list = (raw.length ? raw : ZEN_RACE_MODELS).filter((m) => MODEL_RE.test(m));
   const max = Math.min(Math.max(Number(env.ZEN_RACE_MAX) || ZEN_RACE_MAX, 2), ZEN_RACE_MAX);
-  return [requested, ...list.filter((m) => m !== requested)].slice(0, max);
+  // Модель с подтверждённым окном НИЖЕ входа в гонку не идёт: она гарантированно отдаст пусто
+  // и сожжёт задачу бюджета. Неизвестное окно (нет в карте) — не приговор, такую оставляем.
+  const fits = (m) => {
+    if (inputTokens == null) return true;
+    const ctx = zenContextOf(env, m);
+    return ctx === null || inputTokens <= ctx;
+  };
+  return [requested, ...list.filter((m) => m !== requested)].filter(fits).slice(0, max);
 }
 
 // ---- ring ceiling + autoscaling (owner's numbers, rationale in docs/zen-runner.md) -----------
@@ -577,7 +623,8 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   // Деградированная полоса: вместо отказа гоним несколько моделей сразу (см. ZEN_RACE_*).
   // Отказ остаётся только там, где и гонка не спасает — выше жёсткого потолка.
   const raceCap = Number(env.ZEN_RACE_MAX_INPUT_BYTES) || ZEN_RACE_MAX_INPUT_BYTES;
-  const race = inputBytes > inputLimit && inputBytes <= raceCap ? raceModelsFor(env, model) : [];
+  const race = inputBytes > inputLimit && inputBytes <= raceCap
+    ? raceModelsFor(env, model, Math.ceil(inputBytes / 4)) : [];
   if (!race.length && inputBytes > inputLimit) {
     return {
       status: 413,
