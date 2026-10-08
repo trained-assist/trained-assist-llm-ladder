@@ -134,6 +134,14 @@ comma-separated list of additional bearer tokens. Existing `LADDER_TOKEN` and
 Store each issued value in the consumer's secret store; never expose this list through
 an API response or logs.
 
+To revoke individual credentials without replacing the write-only `LADDER_TOKENS`
+secret, set `LADDER_REVOKED_TOKEN_HASHES` to a comma-separated list of lowercase
+SHA-256 hashes of the raw bearer tokens. The Worker rejects a matching token before
+checking the accepted-token lists. Generate a digest without printing the token with
+`printf '%s' "$TOKEN" | shasum -a 256`; keep the hash list in Cloudflare secret storage.
+The isolated auth probe setup and its scope are documented in
+[`docs/auth-revocation-sandbox.md`](docs/auth-revocation-sandbox.md).
+
 | Method | Path | |
 |---|---|---|
 | GET | `/health` | liveness + ladder names |

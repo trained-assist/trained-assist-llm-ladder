@@ -169,9 +169,19 @@ function bearerToken(request) {
   return m ? m[1].trim() : null;
 }
 
-function authorized(request, env) {
+async function authorized(request, env) {
   const token = bearerToken(request);
   if (!token) return false;
+  const revoked = typeof env.LADDER_REVOKED_TOKEN_HASHES === 'string'
+    ? env.LADDER_REVOKED_TOKEN_HASHES.split(',').map((hash) => hash.trim().toLowerCase())
+      .filter((hash) => /^[0-9a-f]{64}$/.test(hash))
+    : [];
+  if (revoked.length > 0) {
+    const tokenHash = await sha256hex(token);
+    let isRevoked = false;
+    for (const hash of revoked) isRevoked = timingSafeEqual(tokenHash, hash) || isRevoked;
+    if (isRevoked) return false;
+  }
   const additional = typeof env.LADDER_TOKENS === 'string' ? env.LADDER_TOKENS.split(',').map((token) => token.trim()) : [];
   const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS, ...additional]
     .filter((candidate) => typeof candidate === 'string' && candidate.length > 0);
@@ -328,7 +338,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
   const mResult = /^\/zen\/pool\/result\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
   if (request.method === 'GET' && mResult) return ring.zenRingResultById(request, env, mResult[1]);
 
-  if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
+  if (!(await authorized(request, env))) return oaError(401, 'unauthorized', 'auth_error');
 
   if (request.method === 'GET' && url.pathname === '/v1/models') {
     const data = [];

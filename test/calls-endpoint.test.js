@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { handle } from '../src/handler.js';
 
 const ENV = { LADDER_TOKEN: 't' };
@@ -68,6 +69,27 @@ test('auth: accepts multiple additional client tokens without invalidating legac
     headers: { authorization: 'Bearer unknown-token' },
   }), tokenEnv, {});
   assert.equal(rejected.status, 401);
+});
+
+test('auth: revokes one token by SHA-256 without affecting other clients', async () => {
+  const revokedToken = 'client-two-token';
+  const revokedHash = createHash('sha256').update(revokedToken).digest('hex');
+  const tokenEnv = {
+    LADDER_TOKEN: 'existing-token',
+    LADDER_TOKEN_PREVIOUS: 'overlap-token',
+    LADDER_TOKENS: 'client-two-token, client-three-token',
+    LADDER_REVOKED_TOKEN_HASHES: `${revokedHash},invalid-entry,`,
+  };
+  for (const token of ['existing-token', 'overlap-token', 'client-three-token']) {
+    const response = await handle(new Request('https://l.test/v1/models', {
+      headers: { authorization: `Bearer ${token}` },
+    }), tokenEnv, {});
+    assert.equal(response.status, 200, `${token} should remain usable`);
+  }
+  const revoked = await handle(new Request('https://l.test/v1/models', {
+    headers: { authorization: `Bearer ${revokedToken}` },
+  }), tokenEnv, {});
+  assert.equal(revoked.status, 401);
 });
 
 test('GET /v1/calls: needs at least one filter (an unfiltered read is what /v1/analytics is for)', async () => {
