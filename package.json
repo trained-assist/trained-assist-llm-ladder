@@ -5,6 +5,7 @@
   "type": "module",
   "description": "OpenAI-compatible model ladder (OpenCode Go → OpenRouter last) for trained-assist service LLM calls — Cloudflare Worker",
   "scripts": {
+    "embed-rungs": "node scripts/embed-big-window-rungs.mjs",
     "diagnose": "node scripts/diagnose-failure.mjs",
     "test": "node --test test/*.test.js",
     "test:sandbox": "bash scripts/sandbox/sticky-rung.sh",

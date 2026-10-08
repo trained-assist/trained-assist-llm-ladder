@@ -631,6 +631,56 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
     return json(200, await st.snapshot());
   }
 
+  // POST /v1/free-models/probe — один НАСТОЯЩИЙ вызов произвольной модели, чтобы измерить её
+  // окно ДО встройки в лестницу (scripts/embed-big-window-rungs.mjs).
+  //
+  // Почему не через /v1/chat/completions + ladder_rung: пин принимает только ранг, который уже
+  // есть в ЗАДЕПЛОЕННОЙ лестнице — правка локального config серверу не видна, и кандидат, ещё
+  // не стоящий ни в одной лестнице, пинуется как `rung not in ladder`. Здесь модель на время
+  // вызова получает собственную одноступенчатую лестницу: потолок ранга, размерный гейт, гард
+  // и запись health работают как обычно, а публичный список лестниц не меняется (ключ
+  // `__probe` живёт только в этом вызове и в /health не попадает — тот читает config.ladders).
+  //
+  // Тело: { model, bytes?, timeout_ms? }. Ответ всегда 200 (иначе400 на кривой model): у
+  // скрипта цикл бинарного поиска, исключение на каждый отказ ему не нужно — важен { ok }.
+  if (request.method === 'POST' && url.pathname === '/v1/free-models/probe') {
+    let body;
+    try { body = await request.json(); } catch { body = {}; }
+    const model = String(body.model || '').trim();
+    // Разрешён и `:free`-суффикс — он часть model_id инвентаря (`openrouter/x/y:free`).
+    if (!/^[a-z0-9][a-z0-9._/:-]*$/i.test(model)) return oaError(400, 'model is required', 'invalid_request_error');
+    const bytes = Math.min(Math.max(Number(body.bytes) || 1_000_000, 1024), 2_000_000);
+    const timeoutMs = Math.min(Math.max(Number(body.timeout_ms) || 90_000, 5_000), 120_000);
+    const unit = 'Parser reads the config, checks the module registry and reports missing entries in order. ';
+    const messages = [
+      { role: 'system', content: 'Ты — ассистент по разбору кода. Отвечай одним коротким словом.' },
+      { role: 'user', content: unit.repeat(Math.max(1, Math.floor(bytes / unit.length))) },
+      { role: 'user', content: 'Ответь одним словом: готово' },
+    ];
+    const probeConfig = { ...config, ladders: { ...config.ladders, __probe: { build: [model] } } };
+    const started = Date.now();
+    const r = await run(
+      // `ladder_rung` в теле НЕ кладём: тело уходит провайдеру как есть (upstreamRequest
+      // разворачивает body), а закрепление идёт через pinRung в опциях ниже.
+      { model: '__probe:build', messages, max_tokens: 40 },
+      {
+        env, config: probeConfig, store: store || makeStore(env), fetchImpl,
+        timeoutMs, totalTimeoutMs: timeoutMs + 30_000, pinRung: model, appSlug: 'free-models-probe',
+      },
+    );
+    const content = String(r.data?.choices?.[0]?.message?.content ?? '').trim();
+    return json(200, {
+      model, bytes, ok: !!(r.ok && content), ms: Date.now() - started,
+      served: r.model || null,
+      // Причина — из ПЕРВОЙ попытки: `every rung failed` ничего не говорит скрипту, а в
+      // одноступенчатой probe-лестнице там всегда конкретика (`empty answer (out=0, …)`).
+      note: r.ok
+        ? (content ? '' : 'пустой ответ')
+        : String(r.attempts?.find((a) => a.error)?.error || r.error || '').slice(0, 300),
+      attempts: (r.attempts || []).map((a) => ({ model: a.model, outcome: a.outcome, error: a.error || null })),
+    });
+  }
+
   if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }

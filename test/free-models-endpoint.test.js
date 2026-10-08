@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { handle } from '../src/handler.js';
+import { memoryStore } from '../src/state.js';
 
 const ENV = { LADDER_TOKEN: 't' };
 
@@ -133,4 +134,46 @@ test('POST /v1/free-models/collect: probe/probe_limit/probe_concurrency are clam
   const b = await r.json();
   assert.equal(b.probed, 0, 'nothing to probe when no provider answers');
   assert.equal(b.written, 0, 'no rows collected → no upsert');
+});
+
+// ── POST /v1/free-models/probe: измерить модель ДО встройки в лестницу ───────────────────────
+// Пин через /v1/chat/completions принимает только уже задеплоенный ранг, поэтому кандидата,
+// которого ещё ни в одной лестнице нет, проверить так нельзя — для этого и живёт этот вызов:
+// модель получает собственную одноступенчатую лестницу на время одного запроса.
+const PROBE_ENV = { LADDER_TOKEN: 't', OPENROUTER_API_KEY: 'or_k', OPENCODE_GO_API_KEYS: 'oc_a' };
+const probeReq = (body) => new Request('https://l.test/v1/free-models/probe', {
+  method: 'POST', headers: { authorization: 'Bearer t', 'content-type': 'application/json' }, body: JSON.stringify(body),
+});
+
+test('probe: вызывает модель, которой нет ни в одной лестнице, и возвращает { ok }', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    const b = JSON.parse(init.body);
+    seen.push({ url, model: b.model, hasLadderRung: 'ladder_rung' in b, bytes: JSON.stringify(b).length });
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'готово' } }], usage: { prompt_tokens: 3 } }), text: async () => '' };
+  };
+  const res = await handle(probeReq({ model: 'openrouter/thinkingmachines/inkling:free', bytes: 4096 }), PROBE_ENV, { store: memoryStore(2), fetchImpl });
+  assert.equal(res.status, 200, 'отказ модели — это ответ, а не исключение скрипта');
+  const j = await res.json();
+  assert.equal(j.ok, true);
+  assert.equal(j.model, 'openrouter/thinkingmachines/inkling:free');
+  assert.equal(seen[0].model, 'thinkingmachines/inkling:free', 'префикс провайдера снят, как в обычном вызове');
+  assert.equal(seen[0].hasLadderRung, false, 'служебных полей провайдеру не шлём');
+  assert.ok(j.bytes >= 4096, 'запрошенный размер payload\'а дошёл');
+});
+
+test('probe: пустой ответ модели → ok:false с причиной, а не HTTP-ошибка', async () => {
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '' } }], usage: { prompt_tokens: 3 } }), text: async () => '' });
+  const res = await handle(probeReq({ model: 'openrouter/x/y:free', bytes: 2048 }), PROBE_ENV, { store: memoryStore(2), fetchImpl });
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.ok, false, 'пустой ответ — не успех');
+  assert.match(j.note, /empty answer/, 'причина конкретная (из первой попытки), а не «every rung failed»');
+});
+
+test('probe: кривой model → 400, без токена → 401', async () => {
+  const bad = await handle(probeReq({ model: '../../etc/passwd' }), PROBE_ENV, { store: memoryStore(2), fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  assert.equal(bad.status, 400, 'имя модели валидируется, а не попадает в конфиг');
+  const noAuth = await handle(new Request('https://l.test/v1/free-models/probe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'openrouter/x/y:free' }) }), PROBE_ENV, { store: memoryStore(2) });
+  assert.equal(noAuth.status, 401, 'эндпоинт стоит за LADDER_TOKEN-гейтом');
 });
