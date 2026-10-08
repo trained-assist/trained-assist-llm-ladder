@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { estimateTokens, fits, hedgePlan } from './size-policy.js';
+import { estimateTokens, fits, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
@@ -671,7 +671,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // of queue), so the short budget must not leak onto the rung we fall back TO.
     const opts = {
       timeoutMs: isFreeGo ? Math.max(1_000, Math.round(rungBudget * plan.timeoutFactor)) : rungBudget,
-      ttfbMs: Math.min(ttfbMs, left),
+      // Окно первого токена растёт с промптом (ttfbFactor): жирный запрос имеет префилл, и
+      // фиксированные 15 с резали его до первого токена — см. замер и инцидент в size-policy.js.
+      ttfbMs: Math.min(ttfbMs * ttfbFactor(inputTokens), left),
       wantJson, fetchImpl, conversation, appSlug, appTitle,
     };
     let key = keyIndex;

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS } from '../src/ladder.js';
+import { estimateTokens } from '../src/size-policy.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
@@ -569,10 +570,20 @@ test('a context-class failure is recorded but never health-skips the rung for ot
 
 // ── Streaming (opencode as a client of the free ladder) ────────────────────────────────────────
 const enc = new TextEncoder();
-function sseBody(events, { delayFirstMs = 0, endWithoutOutput = false } = {}) {
+function sseBody(events, { delayFirstMs = 0, endWithoutOutput = false, signal } = {}) {
   return new ReadableStream({
     async start(c) {
-      if (delayFirstMs) await new Promise(r => setTimeout(r, delayFirstMs));
+      // Честная эмуляция реального fetch: пока тело не начало отдаваться, abort рвёт поток, и
+      // reader.read() бросает — ровно так в проде выглядит «no first token in time». Без этого
+      // сетевой заглушке всё равно, и окно первого токена в тестах невозможно проверить.
+      if (delayFirstMs) {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, delayFirstMs);
+          if (!signal) return;
+          const onAbort = () => { clearTimeout(t); reject(signal.reason || new Error('aborted')); };
+          if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
+        });
+      }
       for (const e of events) c.enqueue(enc.encode(`data: ${typeof e === 'string' ? e : JSON.stringify(e)}\n\n`));
       c.close();
     },
@@ -607,6 +618,27 @@ test('free-headed ladder rotates Go keys round-robin across calls (#81)', async 
   for (let i = 0; i < 4; i++) await run({ model: 'free', messages: [{ role: 'user', content: 'hi' }] }, { env, config: cfg, store, fetchImpl });
   assert.deepEqual(calls, ['Bearer oc_a', 'Bearer oc_b', 'Bearer oc_a', 'Bearer oc_b'],
     'consecutive free calls land on different pool keys');
+});
+
+// Замер 2026-10-08: 21 из 28 `no first token in time` — на payload ≥ 100 КБ (медиана 978 830 байт).
+// Обе ступени с большим окном (sante:free 262K, nemotron-3-ultra-550b-a55b:free 1M) уходили в
+// health-skip именно на этом, и лестница отвечала `every rung failed`, хотя промпт влезал.
+test('TTFB: жирный запрос дожидается первого токена, маленький убивается по умолчанию', async () => {
+  const slow = ({ signal }) => ({ delayFirstMs: 150, signal, events: [delta({ role: 'assistant' }), delta({ content: 'hi' }), '[DONE]'] });
+  const beh = { [short(GOFREE[0])]: slow, [short(GOFREE[1])]: slow };
+  // Свежий store на каждый прогон: после первого обрыва голова health-skip'ается, и второй
+  // запуск начался бы уже со второй ступени — тогда тест мерял бы не окно, а этот пропуск.
+  const opts = () => ({ env, config: GOCFG, store: memoryStore(2), ttfbMs: 100, fetchImpl: streamFetch(beh, []) });
+
+  // маленький промпт: окно 100 мс → обрыв до первого токена → уход на следующую ступень
+  const small = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'hi' }] }, opts());
+  assert.notEqual(small.model, GOFREE[0], 'маленький промпт убивается в 100 мс — это его окно');
+
+  // жирный: 240K символов ≈ 240K байт ≈ 60K токенов → фактор 2 → окно 200 мс > 150 мс
+  const fat = await run({ model: 'free', stream: true, messages: [{ role: 'user', content: 'x'.repeat(240_000) }] }, opts());
+  assert.equal(fat.model, GOFREE[0], 'жирный запрос дождался первого токена — окно поднялось');
+  assert.ok(estimateTokens({ messages: [{ role: 'user', content: 'x'.repeat(240_000) }] }) > 32_000,
+    'контроль: промпт действительно попадает в полосу с надбавкой');
 });
 
 test('free ladder: stream answered by the first rung with output, bytes replayed intact', async () => {
