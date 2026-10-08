@@ -26,7 +26,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { estimateTokens, fits } from './size-policy.js';
+import { estimateTokens, fits, hedgePlan } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
@@ -392,6 +392,39 @@ function attempt(env, model, body, keyIndex, opts) {
   return body.stream ? attemptStream(env, model, body, keyIndex, opts) : attemptJson(env, model, body, keyIndex, opts);
 }
 
+// The owner's race (2026-10-07): «два запуска одной модели на разных аккаунтах го» — the SAME
+// model fired on DIFFERENT keys at once, first answer wins. Free Go has four keys, no allowance
+// to protect and no per-token cost, so the race buys tail latency and immunity to one throttled
+// or slow key for the price of wall clock alone.
+//
+// The primary key (the one the round-robin picked) is the one whose failure the caller sees, so
+// key rotation and the spare-key probe below behave exactly as they do for a single attempt —
+// a race that silently returned some other key's error would make #45/#69 reason about the wrong
+// account. Every raced key is recorded in `tried` so the probe cannot land on one already burnt.
+async function raceGoKeys(env, model, body, primaryKey, count, opts, poolSize, tried) {
+  const n = Math.max(2, Math.min(count, poolSize));
+  const keys = [...new Set(Array.from({ length: n }, (_, i) => (primaryKey + i) % poolSize))];
+  for (const k of keys) tried.add(k);
+  if (keys.length < 2) return attempt(env, model, body, primaryKey, opts);
+  return new Promise((resolve) => {
+    let pending = keys.length;
+    let primaryResult = null;
+    let done = false;
+    const settle = (r) => { if (!done) { done = true; resolve(r); } };
+    const lose = (r, isPrimary) => {
+      if (isPrimary && !primaryResult) primaryResult = r;
+      if (--pending === 0) settle(primaryResult || r);
+    };
+    for (const k of keys) {
+      const isPrimary = k === primaryKey;
+      attempt(env, model, body, k, opts).then(
+        (r) => (r.ok ? settle(r) : lose(r, isPrimary)),
+        (e) => lose({ ok: false, error: String(e?.message || e) }, isPrimary),
+      );
+    }
+  });
+}
+
 // The pool's answer is one blob from a long-lived GitHub Actions job, so a streaming call gets a
 // synthesised SSE stream — the ladder's TTFB path only needs the first output event, and the
 // client sees a normal stream.
@@ -603,10 +636,26 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       attempts.push({ model, outcome: 'skipped', error: `input ~${inputTokens}t above the rung ceiling` });
       continue;
     }
-    const opts = { timeoutMs: Math.min(timeoutMs, left), ttfbMs: Math.min(ttfbMs, left), wantJson, fetchImpl, conversation, appSlug, appTitle };
+    const isFreeGo = isGo && model.endsWith('-free');
+    const plan = hedgePlan(inputTokens);
+    const rungBudget = Math.min(timeoutMs, left);
+    // A SMALL context gets a SMALL budget — but only on the fast rung. Cutting zen to 0.4× would
+    // destroy exactly what it is there for: a <2K prompt needs ~20 s there (9.4 s of zen + ~10 s
+    // of queue), so the short budget must not leak onto the rung we fall back TO.
+    const opts = {
+      timeoutMs: isFreeGo ? Math.max(1_000, Math.round(rungBudget * plan.timeoutFactor)) : rungBudget,
+      ttfbMs: Math.min(ttfbMs, left),
+      wantJson, fetchImpl, conversation, appSlug, appTitle,
+    };
     let key = keyIndex;
     const tried = new Set([key]);
-    let r = await attempt(env, model, body, key, opts);
+    // Гоним только бесплатный Go: у него четыре ключа, нет надбавки и нет дневной квоты, то есть
+    // параллельный зов стоит только времени. Пин и стрим исключены — бенчмарк меряет один ранг,
+    // а стрим закрепляет ранг на первом токене и отмена потерь тут отдельная история.
+    const race = isFreeGo && plan.count > 1 && !pinRung && !body.stream && pool.length > 1;
+    let r = race
+      ? await raceGoKeys(env, model, body, key, plan.count, opts, pool.length, tried)
+      : await attempt(env, model, body, key, opts);
     if (r.skip) continue;
     // #45 (owner «если ошибка то ретрай и далее потом по лесенке»): a guard-failed answer ALREADY
     // arrived — retrying the same rung costs a fraction of one ladder hop, while today's straight
