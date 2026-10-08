@@ -18,7 +18,9 @@ on:
   schedule:
     # Every 10 min, on the 7s — GitHub's cron stampede sits on the round numbers, and the other
     # workflows here already live at :13/:23/:37.
-    - cron: '7,17,27,37,47,57 * * * *'
+    # Каждые 5 минут, а не 10: бесплатный лимит OpenRouter может сгореть быстрее интервала
+    # (шторм), поэтому опроса раз в 10 минут мало — см. хедер scripts/ladder-watch.mjs.
+    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
 
 permissions:
   contents: read
