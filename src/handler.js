@@ -2,7 +2,7 @@
 // `node --test` (the sandbox imports it), while src/index.js remains the Worker entry: it wraps this
 // handler and exports the LadderState Durable Object for the platform binding.
 
-import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
+import { run, readPool, fetchGoUsage, fetchOrUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
 import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
@@ -350,6 +350,13 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
   // percent, issue #91). The raw key never appears in the response or the logs.
   if (request.method === 'GET' && url.pathname === '/v1/go-usage') {
     return json(200, { keys: await fetchGoUsage(env, { fetchImpl }) });
+  }
+
+  // GET /v1/or-usage — зеркало /v1/go-usage для OpenRouter: лимит ключа + баланс аккаунта.
+  // Платный хвост живёт на балансе (402 с 04.10), бесплатные `:free` — на дневном разрешении;
+  // раньше ни то, ни другое было не видно. Сырые поля провайдера, ключ в ответ не попадает.
+  if (request.method === 'GET' && url.pathname === '/v1/or-usage') {
+    return json(200, await fetchOrUsage(env, { fetchImpl }));
   }
 
   // GET /v1/free-models — the free-model inventory (issue #111): every free model the ladder's

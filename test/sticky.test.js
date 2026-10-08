@@ -218,6 +218,45 @@ test('S8: GET /v1/state exposes pin stats alongside health and keys', async () =
   assert.ok(body.health !== undefined && body.keys !== undefined, 'existing state fields untouched');
 });
 
+// 2026-10-08: платный хвост мёртв на 402 (2833 отказа с 04.10), а `:free`-ранги едут на
+// отдельном дневном разрешении — за сутки лестница отдала через них 348 ответов при потолке
+// около 1000 (#86). Ни то, ни другое не было видно без консоли OpenRouter.
+test('GET /v1/or-usage: лимит ключа и баланс аккаунта, ключ не попадает в ответ', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, auth: init.headers.Authorization });
+    // как у реального fetch: читаем текст, а JSON разбираем сами (как это делает fetchOrUsage)
+    if (url.endsWith('/auth/key')) {
+      const body = JSON.stringify({ data: { usage: 12.5, limit: 50, is_free_tier: false, status: 'active' } });
+      return { ok: true, status: 200, text: async () => body, json: async () => JSON.parse(body) };
+    }
+    const body = JSON.stringify({ data: { total_credits: 0, total_usage: 3.75 } });
+    return { ok: true, status: 200, text: async () => body, json: async () => JSON.parse(body) };
+  };
+  const ENV2 = { LADDER_TOKEN: 't', OPENROUTER_API_KEY: 'sk-or-SECRET' };
+  const r = await handle(new Request('https://l.test/v1/or-usage', { headers: { authorization: 'Bearer t' } }), ENV2, { fetchImpl });
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.equal(seen.length, 2, 'оба запроса: ключ и баланс');
+  assert.ok(seen.every((s) => s.auth === 'Bearer sk-or-SECRET'), 'ключ уходит только в заголовке провайдеру');
+  assert.equal(body.key.data.limit, 50, 'лимит ключа дошёл');
+  assert.equal(body.credits.data.total_credits, 0, 'баланс дошёл — на него смотрит платный хвост');
+  assert.ok(!JSON.stringify(body).includes('sk-or-SECRET'), 'секрет никогда не сериализуется');
+});
+
+test('GET /v1/or-usage: без ключа и с ошибкой провайдера — ответ, а не исключение', async () => {
+  const noKey = await handle(new Request('https://l.test/v1/or-usage', { headers: { authorization: 'Bearer t' } }), { LADDER_TOKEN: 't' }, { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  assert.equal(noKey.status, 200, 'настроенного ключа нет — это состояние, а не сбой');
+  assert.match((await noKey.json()).error, /OPENROUTER_API_KEY/);
+
+  const failing = await handle(new Request('https://l.test/v1/or-usage', { headers: { authorization: 'Bearer t' } }), { LADDER_TOKEN: 't', OPENROUTER_API_KEY: 'k' }, {
+    fetchImpl: async () => ({ ok: false, status: 503, text: async () => 'upstream down', json: async () => ({}) }),
+  });
+  const b = await failing.json();
+  assert.equal(failing.status, 200);
+  assert.match(b.key.error, /HTTP 503/, 'сломанный провайдер виден как поле, а не как падение');
+});
+
 test('S8: GET /v1/go-usage polls every pool key; the raw key never reaches the response (#91)', async () => {
   const seen = [];
   const fetchImpl = async (url, init) => {
