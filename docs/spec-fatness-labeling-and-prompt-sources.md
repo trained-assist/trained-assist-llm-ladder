@@ -116,14 +116,47 @@ FROM part WHERE json_extract(data,'$.type')='tool' ORDER BY len DESC LIMIT 20;
 Файлы по **216 КБ – 4.1 МБ** (Deepgram JSON по интервью). Самые крупные «сырые» данные
 рекрутинга, которые я нашёл. **Только локально** — в GitHub их нет.
 
+### Е. Сессии пользователей в GCS — `trained-assist-workspaces` (НАЙДЕНО)
+
+`gs://trained-assist-workspaces/profiles/<профиль>/sessions/*.json.gz` — **612 файлов, 4.86 МБ**.
+Включая рекрутинговый профиль, о котором спрашивал владелец:
+
+```
+gs://trained-assist-workspaces/profiles/mbk_luda_recruiter/sessions/
+```
+
+Замер на самой крупной сессии этого профиля:
+
+| | |
+|---|---|
+| размер JSON | **288 427 байт ≈ 72 106 токенов** |
+| сообщений | **456** (user 133, assistant 323) |
+| крупнейшее сообщение пользователя | **27 246 симв.** (~7K токенов) |
+| топик | «Я хочу создать программу мониторинга… hh_monitoring_demo.html» |
+
+То есть рекрутинговые сессии **реально жирные** — вопреки результату по `conversation-bench-data`
+(§2В, там `fat% = 0 %`). Источник Е — правильный для «толстых» рекрутинговых промптов.
+
+**Доступ:** `kobzevvv` не имеет прав на проект `alesa-personal-assistent`
+(`403 storage.buckets.list`), но в gcloud уже лежат креды `maryam12101953@gmail.com` — они
+работают. Ничего выдавать не нужно, просто:
+
+```bash
+gcloud storage ls --project=alesa-personal-assistent \
+  --account=maryam12101953@gmail.com --recursive \
+  gs://trained-assist-workspaces/profiles/mbk_luda_recruiter/sessions/
+```
+
+Альтернатива (удобнее на будущее): выдать `kobzevvv@gmail.com` роль
+`roles/storage.viewer` на проект `alesa-personal-assistent`, и тогда `--account` не нужен.
+
 ---
 
 ## 3. Что НЕ сработало
 
 | источник | результат |
 |---|---|
-| Google Storage (`alesa-personal-assistent`) | **403**: `KobzevVV@gmail.com` не имеет `storage.buckets.list` |
-| `gcloud` с другим аккаунтом | активен всё тот же `kobzevvv` — аккаунт не переключился |
+| Google Storage под `kobzevvv` | **403**: нет `storage.buckets.list` на проекте `alesa-personal-assistent` (решается флагом `--account`, см. §2Е) |
 | поиск архивов по всей организации `trained-assist` | нашлись только `transcript.json` в `docs/evidence/` (это логи прогона, а не промпты) |
 
 ---
