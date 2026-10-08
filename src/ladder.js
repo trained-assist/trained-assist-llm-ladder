@@ -314,6 +314,21 @@ function guardDiag(data, req) {
   return parts.length ? ` (${parts.join(', ')})` : '';
 }
 
+// #45 (повтор для кольца): ретрай имеет смысл, только если вторая попытка МОЖЕТ отличаться от
+// первой. Ответ с `finish=tool_calls` и без ни текста, ни самого tool_calls — структурный отказ:
+// модель захотела вызвать инструмент, а кольцевой воркер (старая версия, без фикса от 07.10)
+// записал задачу неудачной, не приложив tool_calls. Повтор по тому же запросу даёт тот же
+// результат — замер за сутки: 74 таких отказа, дошёл до ответа 8 (и то другой ступенью),
+// суммарно 35 минут стенда. Лестница уходит на следующую ступень сразу.
+//
+// Возвращается в отдельной функции, чтобы правило жило рядом с guardDiag и проверялось само.
+export function ringGuardRetry(data, body) {
+  if (body?.stream) return false;                       // стрим уже оплатил всё окно
+  if (!(data?.kind === 'ok' && !data?.ok)) return false; // это вообще не guard-случай
+  const finish = data?.choices?.[0]?.finish_reason ?? data?.finish_reason;
+  return finish !== 'tool_calls';
+}
+
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
 async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
   let stripRf = false;
@@ -513,7 +528,7 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
     const emptyOk = r.data?.kind === 'ok' && !r.data?.ok;
     return {
       ok: false,
-      ...(emptyOk && !body.stream ? { guard: true } : {}),
+      ...(ringGuardRetry(r.data, body) ? { guard: true } : {}),
       error: `zen-rings: ${base}${diag}`,
     };
   }
