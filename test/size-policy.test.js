@@ -37,8 +37,8 @@ test('fits: 98K passes and 123K does not — the measured Go boundary', () => {
 // raced twice, a large one three times. The bands are declared here so the wiring in run() and
 // the second step (the race itself) read from one place.
 test('hedgePlan: bands by token count — 1 / 2 / 3 / 1', () => {
-  assert.deepEqual(hedgePlan(0), { count: 1, timeoutFactor: 0.4 }, 'a tiny prompt gets a short budget');
-  assert.deepEqual(hedgePlan(1_999), { count: 1, timeoutFactor: 0.4 });
+  assert.deepEqual(hedgePlan(0), { count: 1, timeoutFactor: 0.6 }, 'a tiny prompt gets a short budget');
+  assert.deepEqual(hedgePlan(1_999), { count: 1, timeoutFactor: 0.6 });
   assert.deepEqual(hedgePlan(2_000), { count: 2, timeoutFactor: 1 }, 'bands are exclusive at the top');
   assert.deepEqual(hedgePlan(31_999), { count: 2, timeoutFactor: 1 });
   assert.deepEqual(hedgePlan(32_000), { count: 3, timeoutFactor: 1 });
