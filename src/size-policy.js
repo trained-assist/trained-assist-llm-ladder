@@ -26,7 +26,12 @@ export const NO_CEILING = null;
 // mid-size request is raced twice; a large one three times. Tokens, because that is what the
 // provider counts and what every cap above is expressed in.
 export const BANDS = Object.freeze([
-  { max: 2_000, count: 1, timeoutFactor: 0.4 },   //  <2K   — один ранг, короткий бюджет
+  // <2K — один ранг, короткий бюджет. 0.4 (= 8 с при дефолтных 20) оказался впритык: замер
+  // 2026-10-08 на естественном промпте дал longcat 7.0 / 8.6 с, и одна попытка из трёх
+  // обрывалась ровно на потолке. 0.6 (= 12 с) остаётся на 40 % короче дефолта, но уже выше
+  // наблюдаемой латентности — «убить быстро» имеет смысл только если модель успевает ответить
+  // здоровой.
+  { max: 2_000, count: 1, timeoutFactor: 0.6 },
   { max: 32_000, count: 2, timeoutFactor: 1 },    //  2–32K — гоним две
   { max: 128_000, count: 3, timeoutFactor: 1 },   // 32–128K — гоним три
   { max: Infinity, count: 1, timeoutFactor: 1 },  //  >128K — один (потолки выше уже отсекли лишнее)
