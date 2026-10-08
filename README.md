@@ -120,6 +120,10 @@ long wait that ends in an empty body: `docs/why-zen-timeouts-are-large-and-how-c
 
 ## API
 
+**Новому клиенту начать отсюда:** [docs/api-guide-for-consumers.md](docs/api-guide-for-consumers.md) —
+как вызвать, какую лестницу выбрать, зачем `x-ladder-app`, сколько ждать и что делать с
+каждой ошибкой. Этот раздел ниже — полная справка для тех, кто работает с кодом.
+
 All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
 During a controlled key rotation, the Worker may temporarily accept one
 `LADDER_TOKEN_PREVIOUS` credential. Remove that binding after clients have moved
