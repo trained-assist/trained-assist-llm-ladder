@@ -1,6 +1,19 @@
 #!/usr/bin/env node
 // Ladder watch — is the ladder answering, and is zen answering through it.
 //
+// Four signals: three probes + one quota read, because "the ladder works", "zen works" and
+// "there is still free quota left on OpenRouter" are three different claims:
+//   4. GET  /v1/or-usage                       бесплатный лимит OpenRouter: остаток + ТЕМП
+//      (`:free`-ранги едут на дневном счётчике, платный хвост — на кредите аккаунта).
+//
+// Три способа это поймать, потому что «раз в 10 минут посмотреть остаток» не спасает от
+// шторма (замер 2026-10-08: 355/1000 за сутки, шторм может сжечь остаток быстрее интервала):
+//   по ОСТАТКУ  — remaining < порога        (медленное выгорание, ≤ интервал опроса);
+//   по ТЕМПУ     — дельта used между опросами → ETA < часа  (шторм виден ДО исчерпания);
+//   по ФАКТУ     — в топе ошибок /v1/analytics лежит «usage limit» — это уже случилось.
+// У каждого свой ключ в watch-state.json, поэтому сообщение приходит на переходе, а не каждые
+// 10 минут.
+//
 // Three probes, because "the ladder works" and "zen works" are different claims:
 //   1. GET  /health                          the worker is up and knows its ladders
 //   2. POST /v1/chat/completions (unpinned)  the real caller path — whatever rung answers
@@ -17,6 +30,8 @@
 //
 // Exit: 0 all green, 1 a probe failed, 2 could not probe at all.
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -104,6 +119,67 @@ function writeState(state) {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n'); } catch { /* a read-only workspace must not fail the check */ }
 }
 
+// Остаток бесплатного лимита OpenRouter: отдельный счётчик от кредита аккаунта — `:free`-ранги
+// едут на нём, и на нём же упираются обе большие ступени (512K и 1M). Отказ приходит как
+// «usage limit» и health-skips ранг на сутки, поэтому узнать об этом лучше из сообщения, чем
+// из обхода, где каждая ступень отваливается по очереди.
+// Чистая функция: сколько минут остаётся при текущем темпе. prev — прошлое снятие счётчика
+// (state.or_free = { used, ts }); сброс за сутки (used вырос назад) темп не считаем.
+export function etaMinutes(prev, used, remaining, now = Date.now()) {
+  if (!prev || typeof prev.used !== 'number' || !prev.ts) return null;
+  if (used < prev.used) return null;                       // наступил новый день
+  const dtMin = (now - prev.ts) / 60000;
+  if (dtMin < 1) return null;                              // интервал слишком мал для темпа
+  const rate = (used - prev.used) / dtMin;                 // запросов в минуту
+  if (!(rate > 0)) return null;                            // ничего не жгли — темпа нет
+  return remaining / rate;
+}
+
+// Чистая функция: какое сообщение об остатке шлём сейчас. `prevKey` — прошлое состояние в
+// watch-state.json, `errHit` — «usage limit» из топа ошибок за час (лимит уже ВЗЯТ).
+// Возвращает null, когда говорить не о чем (зелёное после зелёного).
+export function quotaNotice({ quota, errHit, prevKey, etaMin }) {
+  if (errHit) {
+    return { key: 'or_free_dead', text: `🔴 OR free-лимит КОНЧИЛСЯ: ${errHit.error} (×${errHit.calls} за час)` };
+  }
+  if (quota?.skipped || !quota) return null;
+  if (etaMin !== null && etaMin !== undefined && etaMin < OR_FREE_ETA_MIN) {
+    return { key: 'or_free_burn', text: `🟡 OR free-лимит сгорает: ${quota.detail}
+при текущем темпе хватит примерно на ${Math.max(1, Math.round(etaMin))} мин` };
+  }
+  if (!quota.ok) {
+    return { key: 'or_free_low', text: [`🟡 OR free-лимит под конец: ${quota.detail}`,
+      `порог ${OR_FREE_MIN}: дальше бесплатные ступени OpenRouter начнут уходить в сутки-пропуск «usage limit»`].join('\n') };
+  }
+  if (prevKey && prevKey !== 'or_free_ok') {
+    return { key: 'or_free_ok', text: `🟢 OR free-лимит в норме: ${quota.detail}` };
+  }
+  return { key: 'or_free_ok', text: null };               // зелёное после зелёного — молчим
+}
+
+async function orQuota(prev) {
+  if (!TOKEN) return { skipped: 'LADDER_TOKEN not set' };
+  try {
+    const r = await fetch(`${BASE}/v1/or-usage`, { headers: auth, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (!r.ok) return { skipped: `or-usage HTTP ${r.status}` };
+    const j = await r.json();
+    const q = j?.key?.data?.free_model_daily_requests;
+    if (!q) return { skipped: 'в ответе нет free_model_daily_requests' };
+    const used = Number(q.used) || 0;
+    const limit = Number(q.limit) || 0;
+    const remaining = Number(q.remaining ?? 0);
+    const etaMin = etaMinutes(prev, used, remaining);
+    const detail = `${used}/${limit} за сутки, осталось ${remaining}`;
+    const credits = j?.credits?.data;
+    return {
+      ok: remaining >= OR_FREE_MIN, used, limit, remaining, etaMin,
+      detail: credits ? `${detail}; кредит аккаунта ${credits.total_credits} (${(credits.total_credits - credits.total_usage).toFixed(2)} свободно)` : detail,
+    };
+  } catch (e) {
+    return { skipped: String(e?.message || e).slice(0, 120) };
+  }
+}
+
 async function sendTelegram(text) {
   if (!TG_TOKEN || !TG_CHAT) return { sent: false, why: 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set' };
   const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -123,6 +199,15 @@ const stamp = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
 // Ошибки сами по себе не роняют сервис (лестница переходит на следующий ранг), поэтому их
 // доля — отдельное условие оповещения, со своим дедупом в watch-state.json: иначе каждые
 // 10 минут приходил бы один и тот же отчёт.
+// Порог остатка бесплатного лимита OpenRouter: замер 2026-10-08 — 355/1000 в сутки, так что
+// 100 оставшихся это примерно «сегодня не хватит». Ниже порога шлём одно сообщение до тех пор,
+// пока счётчик не сбросится (переход в обе стороны, как у доли ошибок).
+const OR_FREE_MIN = Number(arg('or-free-min', 100));
+// ETA, ниже которого темп считаем опасным: сгореть 644 оставшихся за час — это шторм, а не день.
+const OR_FREE_ETA_MIN = Number(arg('or-free-eta', 60));
+// Отказ самого провайдера о том, что дневной лимит взят — виден в топе ошибок аналитики.
+const QUOTA_ERR_RE = /usage limit|free usage|daily limit|FreeUsageLimit|exceeded.*free/i;
+
 const ERROR_RATE_ALERT = Number(arg('error-rate', 0.5));   // доля отказов, при которой шлём
 const ERROR_MIN_CALLS = Number(arg('error-min-calls', 20)); // на слишком малой выборке не шумим
 
@@ -228,7 +313,25 @@ async function main() {
     }
   }
 
-  const both = [notice, errNotice].filter(Boolean).join('\n\n');
+  // Квота: своё состояние и свой дедуп — она не про «сервис жив», поэтому в `probes` (и в код
+  // выхода) не попадает, но попадает в то же сообщение. Три триггера (остаток / темп / факт)
+  // считаются в quotaNotice; сообщение уходит только на ПЕРЕХОДЕ ключа, «зелёное» — только
+  // после реального провала.
+  const quota = await orQuota(state.or_free);
+  const errHit = (errs && !errs.skipped ? errs.top || [] : []).find((e) => QUOTA_ERR_RE.test(e.error));
+  const prevQKey = state.or_free_status;
+  const qNotice = quotaNotice({ quota, errHit, prevKey: prevQKey, etaMin: quota && quota.etaMin });
+  const quotaText = qNotice && qNotice.key !== prevQKey && qNotice.text ? qNotice.text : '';
+  if (qNotice) state.or_free_status = qNotice.key;
+  if (quota && !quota.skipped) {
+    console.log(`${qNotice && qNotice.key !== 'or_free_ok' ? 'WARN' : 'ok  '} or-free  ${quota.detail}`
+      + (quota.etaMin != null ? ` (темп: ~${Math.max(1, Math.round(quota.etaMin))} мин)` : ''));
+    state.or_free = { used: quota.used, ts: now };
+  } else if (quota && quota.skipped) {
+    console.log(`SKIP or-free  ${quota.skipped}`);
+  }
+
+  const both = [notice, errNotice, quotaText].filter(Boolean).join('\n\n');
   let notified = { sent: false, why: 'no transition' };
   if (both && NOTIFY) notified = await sendTelegram(both);
   else if (both) notified = { sent: false, why: '--notify not passed' };
@@ -242,7 +345,11 @@ async function main() {
   process.exitCode = down.length === probes.length ? 2 : down.length ? 1 : 0;
 }
 
-main().catch((e) => {
-  console.error(`watch failed: ${String(e?.message || e)}`);
-  process.exitCode = 2;
-});
+// main() только при прямом запуске: import в тестах не должен дёргать сеть — иначе тесты
+// расчёта темпа и переходов квоты не написать вовсе.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(`watch failed: ${String(e?.message || e)}`);
+    process.exitCode = 2;
+  });
+}
