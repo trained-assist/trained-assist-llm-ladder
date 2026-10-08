@@ -228,6 +228,27 @@ function failureClass(errorText) {
 // Streaming: a rung is chosen BEFORE the first token — if it doesn't produce one within this
 // window (or errors), the next rung is tried; after the first token there is no failover.
 export const TTFB_TIMEOUT_MS = 15000;
+
+// Сколько лестница готова ждать КОЛЬЦО, если вызывающий не попросил больше. Пол, а не замена:
+// `Math.max(timeoutMs, RING_WAIT_MS)` в attemptRing. Выведено из замера на здоровом окне
+// (2026-10-07 09:00 →, 1599 успешных задач): сервис zen p50 = 33 с, p90 = 63 с, при том что
+// бюджет был 20 с + 15 с grace = 35 с, то есть САМА МОДЕЛЬ не влезала в свой бюджет.
+//
+//   бюджет 35 с от постановки → доставлено 41.4 %  (было)
+//   бюджет 60 с               → доставлено 74.8 %
+//   бюджет 90 с               → доставлено 92.4 %
+//
+// 45 с + grace 15 с = 60 с — это 74.8 % при максимально допустимом для интерактива ожидании.
+// Дальше выгода падает (60→90 с даёт +18 п.п., а ожидание полторы минуты), а «опенкод зависает»
+// было главной жалобой.
+export const RING_WAIT_MS = 45_000;
+
+// Правило — отдельно и явно, чтобы его можно было проверить без 45-секундного ожидания:
+// пол только поднимает, никогда не опускает. Вызывающий, попросивший больше, больше и получит;
+// попросивший меньше всё равно не получит меньше того, что модели нужно, чтобы ответить.
+export function ringWaitMs(timeoutMs) {
+  return Math.max(Number(timeoutMs) || 0, RING_WAIT_MS);
+}
 const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|stream_options/i;
 
 export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null } = {}) {
@@ -460,10 +481,16 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
     messages: body.messages,
     tools: body.tools,
     max_tokens: body.max_tokens,
-    // The caller's per-rung budget IS the pool watchdog (clamped to the pool's [1s, 90s]). A cold
-    // pool boots a runner (~10-13 s) and then answers (~3 s), so an interactive caller should send
-    // ladder_timeout_ms ≈ 20000; the default 20000 already covers it.
-    wait_ms: timeoutMs || undefined,
+    // The caller's per-rung budget IS the pool watchdog (clamped to the pool's [1s, 90s]) — но для
+    // ЗЕНА этого бюджета не хватало. Замер на здоровом окне (с 2026-10-07 09:00, 1599 задач):
+    // очередь p50 = 0 с, сервис zen p50 = 33 с, p90 = 63 с, а старые 20 с + 15 с grace доставляли
+    // лишь 41 % ответов — бюджет был меньше самой модели. Окно в 45 с (+15 с grace = 60 с)
+    // доставляет 74.8 % (замер: total ≤60 с → 1196/1599).
+    //
+    // Пол только ПОДНИМАЕТ: вызывающий, попросивший больше (`ladder_timeout_ms`), больше и получит.
+    // Холодный или мёртвый кольцо сюда не попадает — эти ветки возвращаются до постановки задачи,
+    // поэтому 45 с не превращают отказ в ожидание.
+    wait_ms: ringWaitMs(timeoutMs),
   };
   let r = await ringCall(env, payload, fetchImpl);
   // ONE retry for a transient fault (a cold ring that just booted, a provider 5xx). A budget

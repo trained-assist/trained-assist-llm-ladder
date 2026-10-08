@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
 
@@ -503,6 +503,20 @@ test('state: per-model exponential backoff restarts for every model; key rotatio
   assert.equal(r.rotated, false);
   assert.equal(r.retryAt, 1000);
   assert.equal(snapshot(st, 2, 2000).keys.active, 1, 'healed keys: active stays usable');
+});
+
+// ── пол бюджета кольца: зен не влезал в собственный бюджет ────────────────────────────────────
+// Замер на здоровом окне (2026-10-07 09:00 →, 1599 успешных задач): очередь p50 = 0 с,
+// сервис zen p50 = 33 с, p90 = 63 с — а бюджет был 20 с + 15 с grace = 35 с, то есть сама
+// модель не влезала в своё окно, и доставлялось 41.4 %.
+test('ring watchdog floors at RING_WAIT_MS — the floor only ever raises', () => {
+  assert.equal(RING_WAIT_MS, 45_000, '45 с + 15 с grace = 60 с → 74.8 % доставки');
+  assert.ok(RING_WAIT_MS < 90_000, 'пол остаётся ниже предела пула MAX_WAIT_MS (90 с)');
+  assert.equal(ringWaitMs(20_000), 45_000, 'дефолт поднят: 20 с не покрывали p50 33 с');
+  assert.equal(ringWaitMs(undefined), 45_000, 'без бюджета — тоже пол');
+  assert.equal(ringWaitMs(0), 45_000, 'ноль — не «мгновенно», а пол');
+  assert.equal(ringWaitMs(75_000), 75_000, 'попросил больше — получил больше');
+  assert.ok(ringWaitMs(46_000) > RING_WAIT_MS, 'пол никогда не урезает явный бюджет вызывающего');
 });
 
 // ── context-class is a property of the request, never a shared exhaustion ─────────────────────
