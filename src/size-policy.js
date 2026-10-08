@@ -46,6 +46,26 @@ export function estimateTokens(body) {
   try { return Math.ceil(JSON.stringify(m).length / 4); } catch { return 0; }
 }
 
+// Operational sandbox quota estimate (v1). This is deliberately distinct from estimateTokens,
+// which selects latency/context bands and retains its existing behavior. Count UTF-8 bytes in the
+// exact serialized message array, convert at 3 bytes/token (conservative for mixed English/Russian
+// prose), then add a 30% safety margin. This is a quota estimate, not provider billing telemetry.
+export const BUDGET_ESTIMATOR_VERSION = 'utf8-3bytes-plus-30pct-v1';
+export const BUDGET_INPUT_MAX_BYTES = 256 * 1024;
+export const BUDGET_INPUT_MARGIN = 1.3;
+
+export function estimateBudgetInput(body) {
+  const messages = body?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return { ok: false, reason: 'messages_required' };
+  let serialized;
+  try { serialized = JSON.stringify(messages); } catch { return { ok: false, reason: 'invalid_messages' }; }
+  if (typeof serialized !== 'string') return { ok: false, reason: 'invalid_messages' };
+  const inputBytes = new TextEncoder().encode(serialized).byteLength;
+  if (inputBytes > BUDGET_INPUT_MAX_BYTES) return { ok: false, reason: 'input_too_large', inputBytes, maxBytes: BUDGET_INPUT_MAX_BYTES };
+  const estimatedTokens = Math.ceil((inputBytes / 3) * BUDGET_INPUT_MARGIN);
+  return { ok: true, version: BUDGET_ESTIMATOR_VERSION, inputBytes, estimatedTokens };
+}
+
 // Ceiling for this rung, or null when nothing is known.
 export function ceilingFor(model) {
   for (const [prefix, cap] of Object.entries(INPUT_CEILING_TOKENS)) {
