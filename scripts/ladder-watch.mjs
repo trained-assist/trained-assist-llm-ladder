@@ -118,12 +118,57 @@ async function sendTelegram(text) {
 
 const stamp = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
 
+// «Сколько ошибок и как часто» — берём готовую агрегацию с сервера, а не считаем сами:
+// GET /v1/analytics?hours=N уже умеет группировать отказы по строке и по лестнице.
+// Ошибки сами по себе не роняют сервис (лестница переходит на следующий ранг), поэтому их
+// доля — отдельное условие оповещения, со своим дедупом в watch-state.json: иначе каждые
+// 10 минут приходил бы один и тот же отчёт.
+const ERROR_RATE_ALERT = Number(arg('error-rate', 0.5));   // доля отказов, при которой шлём
+const ERROR_MIN_CALLS = Number(arg('error-min-calls', 20)); // на слишком малой выборке не шумим
+
+async function errorReport(hours = 1) {
+  if (!TOKEN) return { skipped: 'LADDER_TOKEN not set' };
+  try {
+    const r = await fetch(`${BASE}/v1/analytics?hours=${hours}`, {
+      headers: auth, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (!r.ok) return { skipped: `analytics HTTP ${r.status}` };
+    const j = await r.json();
+    const t = j.totals || {};
+    const calls = Number(t.calls) || 0;
+    const failed = Number(t.failed) || 0;
+    return {
+      hours, calls, failed,
+      rate: calls ? failed / calls : 0,
+      top: (j.errors || []).slice(0, 5).map((e) => ({ calls: e.calls, error: String(e.error || '').slice(0, 110) })),
+      byLadder: (j.ladders || []).filter((l) => l.failed > 0)
+        .sort((a, b) => b.failed - a.failed).slice(0, 4)
+        .map((l) => ({ ladder: l.ladder, calls: l.calls, failed: l.failed })),
+    };
+  } catch (e) {
+    return { skipped: String(e?.message || e).slice(0, 120) };
+  }
+}
+
+function formatErrorReport(er) {
+  if (!er || er.skipped) return [`отчёт по ошибкам недоступен: ${er?.skipped || 'нет данных'}`];
+  const pct = (er.rate * 100).toFixed(1);
+  const out = [`за ${er.hours} ч: вызовов ${er.calls}, отказов ${er.failed} (${pct} %)`];
+  for (const e of er.top) out.push(`  ×${String(e.calls).padStart(4)}  ${e.error}`);
+  if (er.byLadder.length) {
+    out.push('  по лестницам: ' + er.byLadder.map((l) => `${l.ladder} ${l.failed}/${l.calls}`).join(', '));
+  }
+  return out;
+}
+
 async function main() {
   const probes = [
     await probe('health', health),
     await probe('ladder', () => chat({ pinned: false }), 2),
     await probe('zen', () => chat({ pinned: true }), 2),
   ];
+  const errs = await errorReport(1);
+  console.log(formatErrorReport(errs).join('\n'));
   const down = probes.filter((p) => !p.ok);
   const status = down.length ? 'down' : 'ok';
 
@@ -160,15 +205,39 @@ async function main() {
     delete state.down_since;
   }
 
+  // Отдельное состояние для доли ошибок: сервис может отвечать (все три пробы зелёные),
+  // но ломать каждый второй вызов. Дедуп свой, иначе каждые 10 минут приходил бы один
+  // и тот же отчёт.
+  let errNotice = '';
+  if (errs && !errs.skipped && errs.calls >= ERROR_MIN_CALLS) {
+    const hot = errs.rate >= ERROR_RATE_ALERT;
+    const key = hot ? 'err_high' : 'err_ok';
+    if (key !== state.err_status) {
+      if (hot) {
+        errNotice = [
+          '🟠 llm-ladder: высокая доля ошибок',
+          `за ${errs.hours} ч: ${errs.failed} из ${errs.calls} (${(errs.rate * 100).toFixed(1)} %), порог ${(ERROR_RATE_ALERT * 100).toFixed(0)} %`,
+          '',
+          ...errs.top.slice(0, 3).map((e) => `  ×${String(e.calls).padStart(4)}  ${e.error}`),
+          ...(errs.byLadder.length ? ['', 'по лестницам: ' + errs.byLadder.map((l) => `${l.ladder} ${l.failed}/${l.calls}`).join(', ')] : []),
+        ].join('\n');
+      } else if (state.err_status === 'err_high') {
+        errNotice = `🟢 доля ошибок в норме: ${errs.failed} из ${errs.calls} (${(errs.rate * 100).toFixed(1)} %) за ${errs.hours} ч`;
+      }
+      state.err_status = key;
+    }
+  }
+
+  const both = [notice, errNotice].filter(Boolean).join('\n\n');
   let notified = { sent: false, why: 'no transition' };
-  if (notice && NOTIFY) notified = await sendTelegram(notice);
-  else if (notice) notified = { sent: false, why: '--notify not passed' };
+  if (both && NOTIFY) notified = await sendTelegram(both);
+  else if (both) notified = { sent: false, why: '--notify not passed' };
 
   state.last_notified = status;
   state.checked_at = now;
   writeState(state);
 
-  if (notice) console.log(`\ntransition ${state.last_notified}: ${notice.split('\n')[0]}`);
+  if (both) console.log(`\nуведомление: ${both.split('\n')[0]}`);
   console.log(`telegram: ${notified.sent ? 'sent' : `skipped (${notified.why})`}`);
   process.exitCode = down.length === probes.length ? 2 : down.length ? 1 : 0;
 }
