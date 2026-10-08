@@ -15,6 +15,10 @@ reservations were created; the task row ended at `max_tokens=1000`, `reserved_to
 duplicate reservation did not increase the counter. A subsequent unknown result retained a full
 100-token charge; a measured 40-token result charged 40 and released the unused 60. The observed
 state was `reserved_tokens=800`, `spent_tokens=140`, with eight reservations still outstanding.
+For a separate parallel remote probe, eight Wrangler commands competed for a 400-token task with
+four workers. Seven commands reached D1; four reservations filled the task to exactly 400 and the
+remaining completed batches could not exceed it. One Wrangler command failed at fetch before a
+result was observable, so it is not counted as a D1 denial. All smoke rows were deleted.
 
 Local verification on the implementation branch:
 
