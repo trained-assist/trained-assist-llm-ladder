@@ -167,6 +167,41 @@ export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
   return Promise.all(pool.map(one));
 }
 
+// OpenRouter: сколько ключу разрешено и сколько осталось на аккаунте — зеркало /v1/go-usage.
+//
+// Зачем: платный хвост умирает на `402 insufficient credits` (с 2026-10-04, 2833 отказа в
+// трассе), а бесплатные `:free`-модели едут на ОТДЕЛЬНОМ дневном разрешении — и до сих пор
+// ни то, ни другое не было видно без консоли OpenRouter. Замер 2026-10-08: за сутки лестница
+// отдала 348 ответов через `:free`-ранги, дневной потолок по замеру из #86 — около 1000.
+//
+// Два запроса, потому что они отвечают на разные вопросы:
+//   GET /api/v1/auth/key  — лимит/расход ИМЕННО этого ключа (limit, usage, is_free_tier);
+//   GET /api/v1/credits   — баланс аккаунта (total_credits, total_usage) — на него смотрит
+//                           платный хвост, ключ может быть вообще без своего лимита.
+// Сырые объекты возвращаются как есть: поля OpenRouter — это ответ API, а не наш контракт.
+// Ключ в ответ не попадает никогда (как и в /v1/go-usage).
+export async function fetchOrUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+  const key = env.OPENROUTER_API_KEY;
+  if (!key) return { key: null, credits: null, error: 'OPENROUTER_API_KEY not configured' };
+  const base = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+  const one = async (pathname) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(`${base}${pathname}`, { headers: { Authorization: `Bearer ${key}` }, signal: ctrl.signal });
+      const text = await res.text();
+      if (!res.ok) return { error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+      try { return JSON.parse(text); } catch { return { error: `non-JSON: ${text.slice(0, 120)}` }; }
+    } catch (e) {
+      return { error: e && e.name === 'AbortError' ? 'timeout' : String((e && e.message) || e) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const [authKey, credits] = await Promise.all([one('/auth/key'), one('/credits')]);
+  return { key: authKey, credits };
+}
+
 // "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.
 // Aliases resolve on READ only (never written back), so stored state keeps working after a rename.
 export function rungsFor(config, name) {
