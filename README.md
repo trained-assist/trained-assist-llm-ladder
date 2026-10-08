@@ -258,6 +258,55 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 
 ---
 
+## Документы
+
+Один документ — одна тема. Порядок: сначала «как пользоваться», потом «почему так», потом
+«что делаем дальше».
+
+**Клиентам и API**
+
+| документ | о чём |
+|---|---|
+| [docs/api-guide-for-consumers.md](docs/api-guide-for-consumers.md) | с чего начать: как вызвать, какую лестницу выбрать, что делать с каждой ошибкой |
+| [docs/free-tier-limits.md](docs/free-tier-limits.md) | бесплатные потолки: зен, Go, OpenRouter `:free` |
+| [docs/go-key-management.md](docs/go-key-management.md) | ключи Go: пул, парковка, ротация, `/v1/go-usage` |
+
+**Размеры, жирность, сжатие**
+
+| документ | о чём |
+|---|---|
+| [docs/spec-chunking-fat-prompts-for-free-tiers.md](docs/spec-chunking-fat-prompts-for-free-tiers.md) | единицы лимитов (байты vs токены), примеры запросов A–J, правила чанкирования |
+| [docs/spec-fatness-labeling-and-prompt-sources.md](docs/spec-fatness-labeling-and-prompt-sources.md) | как метить жирные промпты и откуда их брать |
+| [docs/analysis-structure-of-real-fat-prompts.md](docs/analysis-structure-of-real-fat-prompts.md) | из чего реально состоит мегабайтный промпт |
+| [docs/spec-compression-threshold-for-context-chunks-mcp.md](docs/spec-compression-threshold-for-context-chunks-mcp.md) | порог сжатия: 350 КБ базовый, 100 КБ перед платной + план бенча |
+| [docs/spec-context-proxy-call-graph.md](docs/spec-context-proxy-call-graph.md) | граф вызовов прокси: COMPRESS / LLM-REF / липкий пин / ветка нарушения контракта |
+| [docs/spec-context-proxy-module-layout.md](docs/spec-context-proxy-module-layout.md) | распиливание `proxy.js` на три модуля |
+| [docs/lazy-context-retrieval-spec.md](docs/lazy-context-retrieval-spec.md) | сжатый контекст + отложенная загрузка по указателям |
+
+**Почему лестница устроена так, а не иначе**
+
+| документ | о чём |
+|---|---|
+| [docs/why-zen-timeouts-are-large-and-how-context-sets-them.md](docs/why-zen-timeouts-are-large-and-how-context-sets-them.md) | почему зену нужен большой бюджет ожидания и как размер задаёт потолки |
+| [docs/requirements-caller-wait-budget-vs-prompt-length.md](docs/requirements-caller-wait-budget-vs-prompt-length.md) | R1–R3: бюджет ожидания вызывающего и длина промпта |
+| [docs/requirements-hedge-by-success-probability.md](docs/requirements-hedge-by-success-probability.md) | гонка зена по вероятности успеха |
+
+**Кольцо zen (GitHub Actions)**
+
+| документ | о чём |
+|---|---|
+| [docs/zen-runner.md](docs/zen-runner.md) | роуты диспетчера, автоскейлер, бюджет |
+| [docs/github-actions-zen-client-spec.md](docs/github-actions-zen-client-spec.md) | ТЗ клиента zen free из GitHub Actions |
+
+**Аналитика и разборы инцидентов**
+
+| документ | о чём |
+|---|---|
+| [docs/benchmark-classifier-ladder-costs-2026-10-03.md](docs/benchmark-classifier-ladder-costs-2026-10-03.md) | лестница × роль → трата → бенчмарк |
+| [docs/requirements-log.md](docs/requirements-log.md) | архив требований (статусы) |
+
+Сценарии использования — в `docs/user-scenarios/` (`ladder/`, `zen/`).
+
 ## Rules for changing the ladder
 
 - Editing `config/ladders.json` means editing the **order of models**, not the router code.
