@@ -8,7 +8,7 @@ import {
   lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
-  ringCooldown, ringInvoke, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES, ZEN_MODEL_MAX_INPUT_BYTES,
+  ringCooldown, ringInvoke, ringWaitForTask, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES, ZEN_MODEL_MAX_INPUT_BYTES,
   ZEN_RACE_MAX_INPUT_BYTES, ZEN_RACE_MODELS, ZEN_RACE_MAX, raceModelsFor, zenContextOf, ZEN_MODEL_CONTEXTS,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
@@ -125,8 +125,8 @@ function fakeD1(seed = {}) {
       return { success: true, meta: { changes: t ? 1 : 0 } };
     }
     if (/INSERT INTO zen_pool_tasks/.test(sql)) {
-      const [id, model, prompt, messages, tools, maxTokens, waitMs, state, enqueued] = p;
-      tasks.set(id, { id, model, prompt, messages, tools, max_tokens: maxTokens, wait_ms: waitMs, state, enqueued_at: enqueued });
+      const [id, model, prompt, messages, tools, maxTokens, waitMs, state, enqueued, options] = p;
+      tasks.set(id, { id, model, prompt, messages, tools, options, max_tokens: maxTokens, wait_ms: waitMs, state, enqueued_at: enqueued });
       return { success: true, meta: { changes: 1 } };
     }
     if (/UPDATE zen_pool_tasks SET wait_returned_at/.test(sql)) {
@@ -1087,4 +1087,97 @@ test('фильтр по окну: модель с известным меньш�
   const raced = raceModelsFor(withSmall, 'nemotron-3-ultra-free', 100_000);
   assert.ok(!raced.includes('big-pickle'), 'модель с окном 32K не идёт в гонку на 100K токенов');
   assert.ok(raced.includes('nemotron-3-ultra-free'), 'остальные участвуют');
+});
+
+
+test('exact Zen continuation disables the fat-input race and preserves queued controls', async () => {
+  const d1 = fakeD1();
+  const registered = await post('/zen/pool/register', { worker_id: 'ctx-exact:1' }, d1);
+  const lease = (await registered.json()).lease_id;
+  const format = { type: 'json_object' }, choice = { type: 'function', function: { name: 'read_context' } };
+  const pending = ringInvoke({ ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW }, {
+    model: 'big-pickle', exact_model: true, messages: [{ role: 'user', content: 'x'.repeat(100000) }],
+    tools: [{ type: 'function', function: { name: 'read_context', parameters: { type: 'object' } } }],
+    response_format: format, tool_choice: choice, wait_ms: 1000,
+  });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(d1._tasks.size, 1);
+  const task = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
+  assert.equal(task.model, 'big-pickle');
+  assert.deepEqual(task.options, { response_format: format, tool_choice: choice });
+  const text = JSON.stringify({ answer: 'z'.repeat(12000) });
+  const calls = [{ id: 'large-call', type: 'function', function: { name: 'write', arguments: JSON.stringify({ content: 'code'.repeat(4000) }) } }];
+  await post('/zen/pool/result', { task_id: task.id, ok: true, text, tool_calls: calls }, d1);
+  const result = await pending;
+  assert.equal(result.status, 200); assert.equal(result.data.text, text);
+  assert.deepEqual(result.data.tool_calls, calls);
+});
+
+test('compressed Ladder continues on the actual Zen race winner outside the configured ladder', async () => {
+  const d1 = fakeD1();
+  const registered = await post('/zen/pool/register', { worker_id: 'ctx-race:1' }, d1);
+  const lease = (await registered.json()).lease_id;
+  const registered2 = await post('/zen/pool/register', { worker_id: 'ctx-race:2' }, d1);
+  const lease2 = (await registered2.json()).lease_id;
+  const cfg = { ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free'] } } };
+  const input = { model: 'service', messages: [{ role: 'system', content: 'rules '.repeat(10000) },
+    { role: 'assistant', content: 'original '.repeat(60000) }, { role: 'user', content: 'Check the old result.' }] };
+  const pending = run(input, { env: { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW }, config: cfg, store: memoryStore() });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(d1._tasks.size, 4);
+  const task1 = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
+  const winnerTask = (await (await get(`/zen/pool/pull?lease=${lease2}&hold_ms=5000`, d1)).json()).task;
+  assert.notEqual(winnerTask.model, 'nemotron-3-ultra-free');
+  const ref = winnerTask.messages.find(m => typeof m.content === 'string' && /context ref=ctx:/.test(m.content)).content.match(/ref=([^;]+);/)[1];
+  await post('/zen/pool/result', { task_id: winnerTask.id, ok: true, text: JSON.stringify({ need_refs: [{ ref, limit: 50 }] }) }, d1);
+  // The initial race's other queued jobs remain intact. The new continuation is ONE task.
+  for (let tries = 0; tries < 30 && d1._tasks.size < 5; tries++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(d1._tasks.size, 5);
+  const continuation = [...d1._tasks.values()].at(-1);
+  assert.equal(continuation.model, winnerTask.model);
+  assert.equal(continuation.state, 'queued');
+  // Claim exactly the new task; older losers may still be serving, as in the live ring.
+  for (const t of d1._tasks.values()) if (t.id !== continuation.id && t.state === 'queued') t.state = 'expired';
+  const pulled = (await (await get(`/zen/pool/pull?lease=${lease2}&hold_ms=5000`, d1)).json()).task;
+  assert.equal(pulled.id, continuation.id);
+  const pages = JSON.parse(pulled.messages.at(-1).content.split('\n')[1]);
+  assert.equal(pages[0].text, input.messages[1].content.slice(0, 50));
+  await post('/zen/pool/result', { task_id: pulled.id, ok: true, text: '{"answer":"same Zen winner"}' }, d1);
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(result.model, `zen-rings/${winnerTask.model}`);
+  assert.equal(result.content, 'same Zen winner'); assert.equal(result.compression.refRounds, 1);
+  assert.equal(d1._tasks.size, 5);
+});
+
+
+test('late raced answer picks an actual winner even after the first task failed', async () => {
+  const d1 = fakeD1();
+  d1._tasks.set('first', { id: 'first', model: 'nemotron-3-ultra-free', state: 'failed', ok: 0, kind: 'error', error: 'lost' });
+  d1._tasks.set('second', { id: 'second', model: 'big-pickle', state: 'claimed' });
+  const pending = ringWaitForTask({ ZEN_DB: d1 }, ['first', 'second'], { deadlineMs: 1000 });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  Object.assign(d1._tasks.get('second'), { state: 'done', ok: 1, text: 'actual late winner', kind: 'ok' });
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(result.data.model, 'big-pickle');
+  assert.equal(result.data.text, 'actual late winner');
+});
+
+test('empty completed Zen output gets one contract repair, without an extra provider guard retry', async () => {
+  const d1 = fakeD1();
+  const lease = (await (await post('/zen/pool/register', { worker_id: 'ctx-empty:1' }, d1)).json()).lease_id;
+  const cfg = { ladders: { service: { build: ['zen-rings/big-pickle'] } } };
+  const pending = run({ model: 'service', messages: [{ role: 'assistant', content: 'x'.repeat(400000) }, { role: 'user', content: 'Check it' }] },
+    { env: { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW }, config: cfg, store: memoryStore() });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const first = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
+  await post('/zen/pool/result', { task_id: first.id, ok: false, kind: 'ok', text: '', finish_reason: 'length' }, d1);
+  for (let tries = 0; tries < 30 && d1._tasks.size < 2; tries++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(d1._tasks.size, 2);
+  const repair = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
+  assert.equal(repair.messages.length, 2);
+  assert.match(JSON.parse(repair.messages[1].content).error, /valid JSON/);
+  await post('/zen/pool/result', { task_id: repair.id, ok: true, text: '{"answer":"repaired"}' }, d1);
+  const result = await pending;
+  assert.equal(result.content, 'repaired'); assert.equal(result.compression.contractRetry, true);
+  assert.equal(d1._tasks.size, 2);
 });

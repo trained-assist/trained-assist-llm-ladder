@@ -308,7 +308,7 @@ async function writeResult(env, task, body, now) {
      WHERE id = ?12`
   ).bind(
     body.ok ? 'done' : 'failed', body.ok ? 1 : 0,
-    body.ok ? String(body.text || '').slice(0, 8000) : null,
+    body.ok ? String(body.text || '') : null,
     body.ok ? 'ok' : String(body.kind || 'error').slice(0, 40),
     body.ok ? null : String(body.error || '').slice(0, 500),
     Number(body.provider_ms) || null, Number(body.served_ms) || null, now,
@@ -316,7 +316,7 @@ async function writeResult(env, task, body, now) {
     // evidence of WHY an answer was empty, and today 45 % of tasks fail exactly that way while
     // being written down as four NULLs. `text` stays conditional — for a kind='ok' failure it is
     // empty by definition, so there is nothing to store (#166 keeps the payload small).
-    body.tool_calls ? JSON.stringify(body.tool_calls).slice(0, 8000) : null,
+    body.tool_calls ? JSON.stringify(body.tool_calls) : null,
     body.usage ? JSON.stringify(body.usage).slice(0, 2000) : null,
     body.finish_reason ? String(body.finish_reason).slice(0, 40) : null,
     task.id,
@@ -588,14 +588,14 @@ export async function zenRingStop(request, env) {
 // env — no token, no second hop). Returns { status, data } exactly as the route would.
 // Ставит задачи на модели гонки и списывает квоту по каждой. Один вызов — одна строка в
 // zen_pool_tasks и один bump по (репозиторий, модель) плюс один общий bump провайдера.
-async function enqueueTasks(env, { racing, repoScope, prompt, messages, tools, maxTokens, waitMs, now }) {
+async function enqueueTasks(env, { racing, repoScope, prompt, messages, tools, options, maxTokens, waitMs, now }) {
   const ids = [];
   for (const m of racing) {
     const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
     await db(env).prepare(
-      `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
-    ).bind(id, m, prompt.slice(0, 4000), messages, tools, maxTokens, waitMs, 'queued', now).run();
+      `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at, options)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+    ).bind(id, m, prompt.slice(0, 4000), messages, tools, maxTokens, waitMs, 'queued', now, options).run();
     await bumpCount(env, repoScope, m, now);
     ids.push({ id, model: m });
   }
@@ -669,11 +669,14 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   let messages = null;
   let tools = null;
   if (Array.isArray(body.messages) && body.messages.length) {
-    messages = JSON.stringify(body.messages).slice(0, 2_000_000);
+    messages = JSON.stringify(body.messages);
   }
   if (Array.isArray(body.tools) && body.tools.length) {
-    tools = JSON.stringify(body.tools).slice(0, 500_000);
+    tools = JSON.stringify(body.tools);
   }
+  if ((messages?.length || 0) > 2_000_000 || (tools?.length || 0) > 500_000) return { status: 413, data: { error: 'input is too long for the ring payload' } };
+  const options = body.response_format !== undefined || body.tool_choice !== undefined
+    ? JSON.stringify({ response_format: body.response_format, tool_choice: body.tool_choice }) : null;
   const prompt = String(body.prompt ?? '');
   if (!messages && !prompt.trim()) return { status: 400, data: { error: 'prompt is required' } };
 
@@ -687,7 +690,7 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   // deserves this rung. Note `failureClass()` in src/ladder.js collapses everything except quota
   // and config to `transient`, so this lands exactly where a today's empty-body answer lands, only
   // without the wait.
-  const inputBytes = messages ? new TextEncoder().encode(messages).length : 0;
+  const inputBytes = new TextEncoder().encode((messages || '') + (tools || '') + (options || '')).length;
   // Order matters: an explicit env override wins (an operator forcing a global number),
   // then this model's own measured ceiling, then the shared default.
   const inputLimit = Number(env.ZEN_MAX_INPUT_BYTES)
@@ -696,9 +699,11 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   // Деградированная полоса: вместо отказа гоним несколько моделей сразу (см. ZEN_RACE_*).
   // Отказ остаётся только там, где и гонка не спасает — выше жёсткого потолка.
   const raceCap = Number(env.ZEN_RACE_MAX_INPUT_BYTES) || ZEN_RACE_MAX_INPUT_BYTES;
-  const race = inputBytes > inputLimit && inputBytes <= raceCap
+  const exact = body.exact_model === true;
+  const exactFits = exact && inputBytes <= raceCap && (zenContextOf(env, model) === null || Math.ceil(inputBytes / 4) <= zenContextOf(env, model));
+  const race = !exact && inputBytes > inputLimit && inputBytes <= raceCap
     ? raceModelsFor(env, model, Math.ceil(inputBytes / 4)) : [];
-  if (!race.length && inputBytes > inputLimit) {
+  if (!race.length && inputBytes > inputLimit && !exactFits) {
     return {
       status: 413,
       data: {
@@ -782,7 +787,7 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   }
   const racing = eligible.slice(0, slots);
 
-  const ids = await enqueueTasks(env, { racing, repoScope, prompt, messages, tools, maxTokens, waitMs, now });
+  const ids = await enqueueTasks(env, { racing, repoScope, prompt, messages, tools, options, maxTokens, waitMs, now });
   const cold = coldStart ? { scaled: coldStart.reason, dispatched: coldStart.dispatched.map((d) => d.repo), boot_ms: BOOT_MS } : null;
   return awaitRacedAnswer(env, ids, { waitMs, cold });
 }
@@ -824,9 +829,13 @@ export async function ringWaitForTask(env, taskId, { deadlineMs = 60_000 } = {})
   const deadline = Date.now() + deadlineMs;
   let step = 0;
   for (;;) {
-    const row = await readTask(env, String(taskId || ''));
-    if (!row) return { ok: false, data: { error: 'unknown task' } };
-    if (row.state === 'done' || row.state === 'failed') {
+    const ids = Array.isArray(taskId) ? taskId : [taskId];
+    const rows = await Promise.all(ids.map(id => readTask(env, String(id || ''))));
+    if (rows.every(row => !row)) return { ok: false, data: { error: 'unknown task' } };
+    const winner = rows.find(row => row && row.state === 'done' && (row.ok || row.tool_calls));
+    const terminal = rows.every(row => !row || row.state === 'done' || row.state === 'failed' || row.state === 'expired');
+    const row = winner || rows.find(row => row);
+    if (winner || terminal) {
       return {
         ok: row.state === 'done',
         data: {
@@ -940,5 +949,6 @@ function taskRow(t) {
     enqueued_at: t.enqueued_at,
     ...(t.messages ? { messages: JSON.parse(t.messages) } : {}),
     ...(t.tools ? { tools: JSON.parse(t.tools) } : {}),
+    ...(t.options ? { options: JSON.parse(t.options) } : {}),
   };
 }
