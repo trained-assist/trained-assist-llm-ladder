@@ -293,7 +293,7 @@ async function poolTrigger(request, env, fetchImpl) {
   return json(202, { queued: true, location: loc, ...(reserved ? { reserved: true } : {}) });
 }
 
-export async function handle(request, env, { store, fetchImpl = fetch, events } = {}) {
+export async function handle(request, env, { store, fetchImpl = fetch, events, waitUntil } = {}) {
   const url = new URL(request.url);
   if (request.method === 'GET' && url.pathname === '/health') {
     return json(200, { ok: true, ladders: Object.keys(config.ladders), build: env.BUILD_SHA || null });
@@ -726,7 +726,11 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
     trace.app = sanitizeAppSlugOrNull(appRaw);
     // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
 console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
-     await logCall(env, trace, chat.model, r, started, { events });
+    // Diagnostic persistence is best effort. Keep it alive after the response,
+    // without delaying a completed model call behind a slow D1 write.
+    const traceWrite = logCall(env, trace, chat.model, r, started, { events });
+    if (waitUntil) waitUntil(traceWrite);
+    else await traceWrite;
     const compressionHeaders = r.compression ? { 'x-ladder-compression': `unit=bytes;in=${r.compression.originalSize};out=${r.compression.outputSize};target=${r.compression.targetMet};trigger=${r.compression.trigger};steps=${r.compression.steps || 0}` } : {};
     if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin, ...compressionHeaders });
     if (r.stream) {

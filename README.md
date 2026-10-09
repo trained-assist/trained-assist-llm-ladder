@@ -152,6 +152,12 @@ Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (s
 
 OpenRouter attribution: send `x-ladder-app: <slug>` and `x-ladder-app-title` — the worker adds `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-App-Visibility` on `openrouter/*` rungs only.
 
+Completed chat calls persist their diagnostic trace through the Worker execution
+context's `waitUntil`. A slow trace database does not hold the model response.
+Trace persistence remains best effort and may finish after the response; absence
+of a row immediately after a call does not prove the model was never called.
+Execution and budget settlement retain their existing durability requirements.
+
 `x-ladder-app` is also **stored** on the trace row (migration `0005_app.sql`) and is the
 discriminator for the `apps` cut in `/v1/analytics`: it is the only thing that tells apart the
 ~20 service sub-tasks, since all of them post `model: "service"`. Send the concrete tool/task

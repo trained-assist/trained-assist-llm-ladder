@@ -42,9 +42,9 @@ export { LadderState } from './state-do.js';
 export { handle, makeStore } from './handler.js';
 
 export default {
-  fetch(request, env) {
+  fetch(request, env, ctx) {
     const events = resolveErrorPublisher(env);
-    return handle(request, env, { events });
+    return handle(request, env, { events, waitUntil: ctx?.waitUntil?.bind(ctx) });
   },
   // Every 2 min (wrangler.toml [triggers]): grow the ring if the queue is waiting, bury dead
   // tasks, re-check quarantined models. Bounded by ZEN_SWEEP_MAX and by the same 50/500 budget as
