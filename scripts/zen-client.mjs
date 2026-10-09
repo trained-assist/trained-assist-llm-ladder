@@ -381,7 +381,7 @@ export function createZenClient({
       return { byModel };
     },
 
-    async chat({ model, messages, tools = [], maxTokens = 1500, timeoutMs: callTimeoutMs = timeoutMs } = {}) {
+    async chat({ model, messages, tools = [], maxTokens = 1500, timeoutMs: callTimeoutMs = timeoutMs, responseFormat, toolChoice } = {}) {
       if (!model) return { ok: false, kind: 'error', retryable: false, error: 'model is required — the limit is per model, so the client cannot guess one' };
       const s = slot(model);
       const t0 = clock();
@@ -439,6 +439,8 @@ export function createZenClient({
       // size) down — the schema is what the model matches on, the prose is not needed.
       body.tools = [...merged.values()].map(slimTool);
       if (!tools.length) body.tool_choice = 'none';
+      if (responseFormat !== undefined) body.response_format = responseFormat;
+      if (toolChoice !== undefined) body.tool_choice = toolChoice;
 
       s.calls++;
       const started = clock();

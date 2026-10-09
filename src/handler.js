@@ -708,7 +708,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
-      conversation, appSlug, appTitle,
+      conversation, appSlug, appTitle, inputBytes: new TextEncoder().encode(JSON.stringify(body)).length,
     });
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
@@ -727,15 +727,17 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
     // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
 console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
      await logCall(env, trace, chat.model, r, started, { events });
-    if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
+    const compressionHeaders = r.compression ? { 'x-ladder-compression': `unit=bytes;in=${r.compression.originalSize};out=${r.compression.outputSize};target=${r.compression.targetMet};trigger=${r.compression.trigger};steps=${r.compression.steps || 0}` } : {};
+    if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin, ...compressionHeaders });
     if (r.stream) {
       return new Response(r.stream, { status: 200, headers: {
         'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache',
         'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin,
+        ...compressionHeaders,
       } });
     }
     const out = { ...r.data, model: r.model };
-    return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin });
+    return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin, ...compressionHeaders });
   }
 
   return oaError(404, 'not found', 'invalid_request_error');

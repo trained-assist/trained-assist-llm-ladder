@@ -46,6 +46,15 @@ function fakeClient(overrides = {}) {
 
 const ping = [{ role: 'user', content: 'ping' }];
 
+test('queued response_format and tool_choice reach the Zen provider unchanged', async () => {
+  const { client, calls } = fakeClient();
+  const format = { type: 'json_object' }, choice = { type: 'function', function: { name: 'read_context' } };
+  await client.chat({ model: 'mimo-v2.6-flash-free', messages: ping, responseFormat: format, toolChoice: choice,
+    tools: [{ type: 'function', function: { name: 'read_context', parameters: { type: 'object' } } }] });
+  const body = JSON.parse(calls[0].init.body);
+  assert.deepEqual(body.response_format, format); assert.deepEqual(body.tool_choice, choice);
+});
+
 test('cap table keeps the floor for an unstable model, never the maximum', () => {
   assert.equal(CONTEXT['big-pickle'], 262139, 'big-pickle balances over 262139 and >=1M backends — promise the floor');
   assert.equal(CONTEXT['mimo-v2.6-flash-free'], 1048576);

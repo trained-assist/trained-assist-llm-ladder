@@ -28,6 +28,7 @@ export function nextFreeGoKeyIndex(poolSize) {
 import { classifyError } from './classify.js';
 import { estimateTokens, fits, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
+import { createCompressionSession } from './context-compression.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -365,7 +366,7 @@ export function ringGuardRetry(data, body) {
 }
 
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
-async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
+async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null, rawAnswer = false }) {
   let stripRf = false;
   for (;;) {
     const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle });
@@ -379,14 +380,18 @@ async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fe
       return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
     }
     const data = await res.json().catch(() => null);
+    const provider = model.slice(0, model.indexOf('/'));
+    const actualModel = typeof data?.model === 'string' && data.model
+      ? (data.model.startsWith(`${provider}/`) ? data.model : `${provider}/${data.model}`) : model;
     const message = data?.choices?.[0]?.message || {};
     const content = String(message.content || '').trim();
     const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+    if (rawAnswer && data?.choices?.[0]?.message) return { ok: true, data, content, winner: { model: actualModel, keyIndex } };
     // #45 (owner): a COMPLETED answer that fails the guard is flagged, not fatal — run() gives
     // the rung ONE same-rung retry before moving down (guardTried there bounds it).
     if (!content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(data, req)}` };
     if (wantJson && !hasTools && parseJson(content) === undefined) return { ok: false, guard: true, error: `invalid JSON${guardDiag(data, req)}` };
-    return { ok: true, data, content };
+    return { ok: true, data, content, winner: { model: actualModel, keyIndex } };
   }
 }
 
@@ -489,7 +494,7 @@ async function raceGoKeys(env, model, body, primaryKey, count, opts, poolSize, t
     for (const k of keys) {
       const isPrimary = k === primaryKey;
       attempt(env, model, body, k, opts).then(
-        (r) => (r.ok ? settle(r) : lose(r, isPrimary)),
+        (r) => (r.ok ? settle({ ...r, winner: { model: r.winner?.model || model, keyIndex: k } }) : lose(r, isPrimary)),
         (e) => lose({ ok: false, error: String(e?.message || e) }, isPrimary),
       );
     }
@@ -506,13 +511,13 @@ async function raceGoKeys(env, model, body, primaryKey, count, opts, poolSize, t
 async function ringCall(env, payload, fetchImpl, graceMs = 15_000) {
   let r = await ringInvoke(env, payload, fetchImpl);
   if (r.status === 504 && r.data?.task_id) {
-    const w = await ringWaitForTask(env, r.data.task_id, { deadlineMs: graceMs });
+    const w = await ringWaitForTask(env, r.data.task_ids || r.data.task_id, { deadlineMs: graceMs });
     if (w.ok) return { status: 200, data: w.data };
   }
   return r;
 }
 
-async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
+async function attemptRing(env, model, body, { fetchImpl, timeoutMs, exactModel = false, rawAnswer = false }) {
   const rung = model.replace(/^zen-rings\//, '');
   // Right after a cold start the runner is still settling — skip the ring for a cooldown window
   // so a call doesn't land on a half-warmed worker.
@@ -530,7 +535,10 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
     model: rung,
     messages: body.messages,
     tools: body.tools,
-    max_tokens: body.max_tokens,
+    max_tokens: rawAnswer ? Math.max(Number(body.max_tokens) || 0, minTokensFor(`opencode-zen/${rung}`)) : body.max_tokens,
+    response_format: body.response_format,
+    tool_choice: body.tool_choice,
+    ...(exactModel ? { exact_model: true } : {}),
     // The caller's per-rung budget IS the pool watchdog (clamped to the pool's [1s, 90s]) — но для
     // ЗЕНА этого бюджета не хватало. Замер на здоровом окне (с 2026-10-07 09:00, 1599 задач):
     // очередь p50 = 0 с, сервис zen p50 = 33 с, p90 = 63 с, а старые 20 с + 15 с grace доставляли
@@ -548,8 +556,9 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
   // 413 (input too long for the free tier) is decided locally before anything is queued: the same
   // payload cannot fit on a second attempt either, so there is nothing to retry — unlike a transient
   // fault or a cold ring, where a second look genuinely can succeed.
-  if (r.status !== 200 && r.status !== 429 && r.status !== 413) r = await ringCall(env, payload, fetchImpl);
-  if (r.status !== 200 || !r.data?.ok) {
+  if (!exactModel && !(rawAnswer && r.data?.kind === 'ok') && r.status !== 200 && r.status !== 429 && r.status !== 413) r = await ringCall(env, payload, fetchImpl);
+  const completedInvalid = rawAnswer && r.data?.kind === 'ok' && typeof r.data?.model === 'string';
+  if (!completedInvalid && (r.status !== 200 || !r.data?.ok)) {
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
     const base = r.data?.error || r.data?.kind || 'no answer';
@@ -569,7 +578,8 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
   }
   const content = String(r.data.text || '').trim();
   const hasTools = Array.isArray(r.data.tool_calls) && r.data.tool_calls.length > 0;
-  if (!content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(r.data, { body })}` };
+  if (!rawAnswer && !content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(r.data, { body })}` };
+  const actualModel = `zen-rings/${r.data.model || rung}`;
   const message = { role: 'assistant', content };
   if (hasTools) message.tool_calls = r.data.tool_calls;
   const finish = r.data.finish_reason || (hasTools ? 'tool_calls' : 'stop');
@@ -577,11 +587,11 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
     id: `zen-rings-${r.data.task_id || crypto.randomUUID()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
-    model: rung,
+    model: actualModel,
     choices: [{ index: 0, message, finish_reason: finish }],
     ...(r.data.usage ? { usage: r.data.usage } : {}),
   };
-  if (!body.stream) return { ok: true, data: completion, content };
+  if (!body.stream) return { ok: true, data: completion, content, winner: { model: actualModel, keyIndex: 0 } };
   const enc = new TextEncoder();
   const head = { ...completion, choices: [{ index: 0, delta: message, finish_reason: null }] };
   const tail = { choices: [{ index: 0, delta: {}, finish_reason: finish }] };
@@ -609,7 +619,7 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
  *                   {ok:false, status, error, attempts, pin?}>}
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null } = {}) {
+async function runLadder(body, { context, env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null } = {}) {
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -691,21 +701,25 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const guardTried = new Set();
   let goParked = false;
 
-  const wantJson = body.response_format && body.response_format.type === 'json_object';
+  let wantJson = body.response_format && body.response_format.type === 'json_object';
   const deadline = totalTimeoutMs ? now + totalTimeoutMs : Infinity;
   // Size gate (owner 2026-10-07): a rung whose window is smaller than this request cannot answer,
   // and its refusal is expensive — measured the same day, opencode-go takes ~98K tokens and at
   // ~123K answers `429 Endpoint is unavailable` while rotating through every key: 48 s of wall
   // clock, three keys burned, still no answer. Refusing BEFORE the attempt is pure win; the
   // attempt record stays so /v1/calls shows why the rung was not tried.
-  const inputTokens = estimateTokens(body);
+  let inputTokens = estimateTokens(body);
   const attempts = [];
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
     // #69: a full-key park (weekly limit on every key) skips only the PAID Go rungs — a free
      // Go rung keeps serving, it does not consume the allowance and must not die in the incident.
      if (isGo && goParked && !model.endsWith('-free')) continue;
-     const left = deadline - Date.now();
+    try { body = context.prepare('paid', model); }
+    catch (error) { return { ok: false, status: 400, error: `Context compression failed: ${error.message}`, attempts }; }
+    inputTokens = estimateTokens(body);
+    wantJson = !context.active && body.response_format?.type === 'json_object';
+    const left = Math.min(deadline, context.deadline) - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
     // Skipped, not failed: the request is wrong for THIS rung, exactly like a context overflow —
     // recording a failure would health-skip a perfectly good model for every other caller.
@@ -724,7 +738,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       // Окно первого токена растёт с промптом (ttfbFactor): жирный запрос имеет префилл, и
       // фиксированные 15 с резали его до первого токена — см. замер и инцидент в size-policy.js.
       ttfbMs: Math.min(ttfbMs * ttfbFactor(inputTokens), left),
-      wantJson, fetchImpl, conversation, appSlug, appTitle,
+      wantJson, fetchImpl, conversation, appSlug, appTitle, rawAnswer: context.active,
     };
     let key = keyIndex;
     const tried = new Set([key]);
@@ -795,8 +809,16 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       } else {
         await store.recordSuccess(model);
       }
-       attempts.push({ model, outcome: 'ok', key });
-       return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState };
+       const winner = r.winner || { model, keyIndex: key };
+       attempts.push({ model: context.active ? winner.model : model, outcome: 'ok', key: context.active ? winner.keyIndex : key });
+       const result = { ok: true, model: context.active ? winner.model : model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState, winner };
+       return context.finish(result, async (nextBody, receipt, remaining) => {
+         if (!fits(receipt.model, estimateTokens(nextBody))) return { ok: false, error: 'expanded context exceeds the winner ceiling' };
+         const next = await attempt(env, receipt.model, nextBody, receipt.keyIndex, {
+           ...opts, timeoutMs: Math.min(timeoutMs, remaining), wantJson: false, rawAnswer: true, exactModel: true,
+         });
+         return next;
+       });
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     if (!goParked) {
@@ -814,4 +836,23 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     }
   }
   return { ok: false, status: 502, error: 'every rung failed', attempts, pin: conversation ? pinState : null };
+}
+
+// One immutable archive per independent API run, alive through retrieval and repair only.
+export async function run(body, options = {}) {
+  const context = createCompressionSession(body, {
+    enabled: options.env?.CONTEXT_COMPRESSION_ENABLED !== 'false',
+    ...(options.contextCompression || {}),
+    ...(options.inputBytes !== undefined ? { inputBytes: options.inputBytes } : {}),
+    totalTimeoutMs: options.totalTimeoutMs,
+  });
+  try {
+    let prepared;
+    try { prepared = context.prepare('entry'); }
+    catch (error) { return { ok: false, status: 400, error: `Context compression failed: ${error.message}`, attempts: [] }; }
+    const result = await runLadder(prepared, { ...options, context });
+    // Receipts are internal; API callers must not see provider-key indexes.
+    const { winner: _winner, ...publicResult } = result;
+    return { ...publicResult, ...(result.compression || context.stats ? { compression: result.compression || context.stats } : {}) };
+  } finally { context.close(); }
 }

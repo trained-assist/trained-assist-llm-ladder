@@ -122,6 +122,8 @@ async function serve(task) {
     messages,
     ...(Array.isArray(task.tools) && task.tools.length ? { tools: task.tools } : {}),
     maxTokens: task.max_tokens || 300,
+    ...(task.options?.response_format !== undefined ? { responseFormat: task.options.response_format } : {}),
+    ...(task.options?.tool_choice !== undefined ? { toolChoice: task.options.tool_choice } : {}),
   });
   const text = res.ok ? String(res.message?.content ?? '').trim() : '';
   // A tool-call answer with no text IS an answer — the rest of the stack already treats it that

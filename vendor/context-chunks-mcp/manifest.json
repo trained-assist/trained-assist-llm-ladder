@@ -1,0 +1,20 @@
+{
+  "repository": "trained-assist/context-chunks-mcp",
+  "ref": "29c7664742f890afdfdad9ae61709984a06c1096",
+  "files": {
+    "src/core.js": "1206b94c5fa948452f25fe62bcf317893537ab9fe1deea1b4888e9b38daf8cd0",
+    "src/context-snapshot.js": "7cce8afeafc2ca8833919a5be7304104724c06adabf053899a5d2293ac81dced",
+    "src/history-context.js": "175da6195cd15d9c1b0be9d57ad7570c83c30a4f27fa23754c15c01354b1ebd1",
+    "src/local-embedder.js": "be49e42db6e000ca4ac64f4859363c33d297f03c6fc11fe8c53d16b1bbd627df",
+    "src/history-semantic-rank.js": "74b7aaab058b9dec566531ab3a260e57ecae487d05d9124da3c0fb0122731ad8",
+    "src/compress-request.js": "f3520b9230461950c7e99cf6e205f2315b2a00a0ab12b4b3d331a8ffcdd8d1a0",
+    "src/types/code-core.js": "ac2c9919db6eb0dfa430447a6a203e9c4b6a7e35deee94f6757070773d911a58",
+    "src/types/javascript.js": "3a74d4ec4abdbb26db3eff164076d940e6b536db5849de1f20672ab5c3cf7673",
+    "src/types/python.js": "d1e3dc95f8200aa5f29833a71a938f443dae762582370f695f8bae46024ae212",
+    "src/types/go.js": "81c43d45ad12c5a0e4b306dbe8d3c0d9377e27d7a934f6c398ac34d735ab1cc6",
+    "src/types/csv.js": "bf1fc3a21381dbaa14a13647558c5568bbd3d1be1ff1c0e95e993493a2374529",
+    "src/types/json.js": "4e0f102a5a9a725b23a3fb0dbf45d0427179d4d04410406260cd99485dd5260c",
+    "src/types/logs.js": "8ca2a792066fe511801598a69669326a694e5032c1905952f3635619fdc80433",
+    "src/types/web.js": "444b494b97e39ebc3ec83e97ebbff2a760319822611d045d086e0af30a912b7f"
+  }
+}
