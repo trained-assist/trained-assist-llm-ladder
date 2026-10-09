@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, ceilingFor, fits, hedgePlan, ttfbFactor, INPUT_CEILING_TOKENS } from '../src/size-policy.js';
+import { estimateTokens, estimateBudgetInput, BUDGET_ESTIMATOR_VERSION, BUDGET_INPUT_MAX_BYTES, ceilingFor, fits, hedgePlan, ttfbFactor, INPUT_CEILING_TOKENS } from '../src/size-policy.js';
 
 // The ceilings are measurements, not guesses — see src/size-policy.js for where each number came
 // from. A wrong ceiling either wastes a hop (too low) or burns 48 s and three keys (too high),
@@ -24,6 +24,30 @@ test('estimateTokens: a token count without talking to a provider', () => {
   const byBytes = estimateTokens(cyr);
   assert.ok(byBytes > byChars * 1.5, `по байтам должно быть заметно больше: ${byBytes} против ${byChars}`);
   assert.ok(withHistory > 100, 'more messages → more tokens, not fewer');
+});
+
+test('budget estimate is versioned UTF-8 text quota with a 30% margin', () => {
+  const en = estimateBudgetInput({ messages: [{ role: 'user', content: 'hello '.repeat(100) }] });
+  const ru = estimateBudgetInput({ messages: [{ role: 'user', content: 'привет '.repeat(100) }] });
+  assert.equal(en.ok, true);
+  assert.equal(ru.ok, true);
+  assert.equal(en.version, BUDGET_ESTIMATOR_VERSION);
+  assert.ok(ru.inputBytes > en.inputBytes);
+  assert.equal(ru.estimatedTokens, Math.ceil((ru.inputBytes / 3) * 1.3));
+});
+
+test('budget estimate accepts assistant tool-call history with null content', () => {
+  const result = estimateBudgetInput({ messages: [
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call-1', content: 'done' },
+  ] });
+  assert.equal(result.ok, true);
+});
+
+test('budget estimate rejects oversized input before provider dispatch', () => {
+  const result = estimateBudgetInput({ messages: [{ role: 'user', content: 'x'.repeat(BUDGET_INPUT_MAX_BYTES) }] });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'input_too_large');
 });
 
 test('ceilingFor: only rungs with a measured ceiling refuse', () => {

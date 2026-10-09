@@ -9,6 +9,7 @@ import * as zen from './zen-runner.js';
 import * as ring from './zen-ring.js';
 import config from '../config/ladders.json' with { type: 'json' };
 import prices from '../config/prices.json' with { type: 'json' };
+import { createBudgetTask, verifyBudgetCapability } from './hard-budget.js';
 
 // GET /v1/analytics: both bind ?1 = since (ms). Aggregates per requested ladder name;
 // the depth histogram is attempts-per-call from the attempts JSON (json_valid guards
@@ -692,6 +693,30 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
     if (!body || !Array.isArray(body.messages) || !body.messages.length) return oaError(400, 'messages required', 'invalid_request_error');
+    const budgetToken = request.headers.get('x-ladder-budget-capability');
+    const budgetRequired = env.HARD_BUDGET_REQUIRED === 'true';
+    if (budgetRequired && !budgetToken) return oaError(401, 'budget capability required', 'auth_error');
+    let budget = null;
+    if (budgetToken) {
+      const db = env.HARD_BUDGET_DB;
+      const policyId = env.HARD_BUDGET_POLICY_ID;
+      const outputTokens = Number(env.HARD_BUDGET_MAX_OUTPUT_TOKENS);
+      if (!db || !policyId || !Number.isSafeInteger(outputTokens) || outputTokens <= 0 || !env.HARD_BUDGET_HMAC_SECRET) {
+        return oaError(503, 'budget authority unavailable', 'unavailable');
+      }
+      let claims;
+      try {
+        claims = await verifyBudgetCapability(budgetToken, env.HARD_BUDGET_HMAC_SECRET, { policyId });
+        const configuredCeiling = Number(env.HARD_BUDGET_MAX_TASK_TOKENS);
+        if (Number.isSafeInteger(configuredCeiling) && configuredCeiling > 0 && claims.maxTokens > configuredCeiling) {
+          return oaError(403, 'budget capability exceeds host policy', 'auth_error');
+        }
+        await createBudgetTask(db, claims);
+      } catch {
+        return oaError(403, 'invalid budget capability', 'auth_error');
+      }
+      budget = { db, claims, outputTokens };
+    }
     const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     const conversation = await conversationKey(request, body, env);
@@ -708,7 +733,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events } 
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
-      conversation, appSlug, appTitle,
+      conversation, appSlug, appTitle, ...(budget ? { budget } : {}),
     });
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);

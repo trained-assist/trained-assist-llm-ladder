@@ -1,0 +1,32 @@
+name = "trained-assist-llm-ladder-hard-budget-sandbox"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+BUILD_SHA = "sandbox-local"
+HARD_BUDGET_REQUIRED = "true"
+HARD_BUDGET_POLICY_ID = "sandbox-v1"
+HARD_BUDGET_MAX_OUTPUT_TOKENS = "256"
+HARD_BUDGET_MAX_TASK_TOKENS = "8192"
+OPENROUTER_BASE_URL = "https://trained-assist-llm-ladder-budget-provider-mock.skillset-apply.workers.dev/v1"
+
+[observability]
+enabled = true
+
+[[durable_objects.bindings]]
+name = "LADDER_STATE"
+class_name = "LadderState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LadderState"]
+
+[[d1_databases]]
+binding = "HARD_BUDGET_DB"
+database_name = "trained-assist-llm-ladder-hard-budget-sandbox"
+database_id = "a717bc1d-fd70-400f-bace-9223de176ebe"
+
+[[services]]
+binding = "BUDGET_PROVIDER_MOCK"
+service = "trained-assist-llm-ladder-budget-provider-mock"

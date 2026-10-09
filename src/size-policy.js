@@ -59,6 +59,36 @@ export function estimateTokens(body) {
   } catch { return 0; }
 }
 
+// Operational sandbox quota estimate (v1), separate from the legacy routing estimate above.
+// This is a deterministic text-only estimate, not billing telemetry.
+export const BUDGET_ESTIMATOR_VERSION = 'utf8-3bytes-plus-30pct-v1';
+export const BUDGET_INPUT_MAX_BYTES = 256 * 1024;
+export const BUDGET_INPUT_MARGIN = 1.3;
+
+export function estimateBudgetInput(body) {
+  const messages = body?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return { ok: false, reason: 'messages_required' };
+  if (messages.some((message) => !message || typeof message !== 'object' || Array.isArray(message)
+    || (message.content !== undefined && typeof message.content !== 'string'
+      && !(message.content === null && message.role === 'assistant' && Array.isArray(message.tool_calls))))) {
+    return { ok: false, reason: 'unsupported_non_text_input' };
+  }
+  // Count all caller-controlled prompt material (messages, tools, response schemas and other
+  // provider inputs), while excluding only output controls. This keeps large tool schemas inside
+  // the byte and quota ceilings too.
+  const input = { ...body };
+  delete input.max_tokens;
+  delete input.max_completion_tokens;
+  delete input.stream;
+  delete input.stream_options;
+  let serialized;
+  try { serialized = JSON.stringify(input); } catch { return { ok: false, reason: 'invalid_messages' }; }
+  if (typeof serialized !== 'string') return { ok: false, reason: 'invalid_messages' };
+  const inputBytes = new TextEncoder().encode(serialized).byteLength;
+  if (inputBytes > BUDGET_INPUT_MAX_BYTES) return { ok: false, reason: 'input_too_large', inputBytes, maxBytes: BUDGET_INPUT_MAX_BYTES };
+  return { ok: true, version: BUDGET_ESTIMATOR_VERSION, inputBytes, estimatedTokens: Math.ceil((inputBytes / 3) * BUDGET_INPUT_MARGIN) };
+}
+
 // Ceiling for this rung, or null when nothing is known.
 export function ceilingFor(model) {
   for (const [prefix, cap] of Object.entries(INPUT_CEILING_TOKENS)) {

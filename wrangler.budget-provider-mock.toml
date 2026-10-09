@@ -1,0 +1,7 @@
+name = "trained-assist-llm-ladder-budget-provider-mock"
+main = "test/sandbox/provider-mock.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[observability]
+enabled = true
