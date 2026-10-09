@@ -125,6 +125,26 @@ long wait that ends in an empty body: `docs/why-zen-timeouts-are-large-and-how-c
 каждой ошибкой. Этот раздел ниже — полная справка для тех, кто работает с кодом.
 
 All endpoints except `/health` need `Authorization: Bearer <LADDER_TOKEN>`.
+
+### Local Ladder credential
+
+The bearer token is issued/configured on the server. A freshly generated client string is not automatically valid. Normal setup reuses an issued token; routine API calls never need to generate or rotate it.
+
+```sh
+npm run -s token                 # show the credential source, without its value
+npm run -s token -- --check      # GET /v1/models; no model call or provider spend
+npm run -s token -- --print      # print the token explicitly for local use
+npm run -s token -- --save       # verify and save it for OpenCode (mode 0600)
+```
+
+Repository scripts share the same discovery order: `LADDER_TOKEN`, `LLM_LADDER_TOKEN`, `~/agent-tokens/llm-ladder/token`, legacy `~/.llm-ladder-token`, then repository-local `.local/ladder/token`. Empty files are skipped. The final location supports an encrypted, owner-authorized credential recovery; `.local/` is ignored by Git. `--save` copies a found credential into the canonical OpenCode location only after the API accepts it.
+
+For a shell command that requires an environment variable:
+
+```sh
+export LADDER_TOKEN="$(npm run -s token -- --print)"
+```
+
 During a controlled key rotation, the Worker may temporarily accept one
 `LADDER_TOKEN_PREVIOUS` credential. Remove that binding after clients have moved
 to the new `LADDER_TOKEN`; do not leave a retired credential active indefinitely.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // Live gate — the checks an agent (or a human) runs against the RUNNING worker: prod by default,
 // a local `npm run dev` via LADDER_BASE=http://localhost:8787.
 //
@@ -20,14 +21,10 @@ const BASE = (process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store
 const LADDER = process.env.LADDER || 'service'; // canonical ladder name
 const ROLE = process.env.LADDER_ROLE || 'build';
 
-function readToken() {
-  if (process.env.LADDER_TOKEN && process.env.LADDER_TOKEN.trim()) return process.env.LADDER_TOKEN.trim();
-  try { return fs.readFileSync(path.join(os.homedir(), '.llm-ladder-token'), 'utf8').trim(); }
-  catch { return null; }
-}
+const readToken = readLadderToken;
 const token = readToken();
 if (!token) {
-  console.error('GATE SKIP: no token — export LADDER_TOKEN or create ~/.llm-ladder-token (chmod 600).');
+  console.error('GATE SKIP: no token — run node scripts/ladder-token.mjs to inspect credential sources.');
   process.exit(2);
 }
 

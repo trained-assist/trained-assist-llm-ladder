@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // fat-session-bench — жирные реальные сессии → разметка по толщине → прогон через лестницу → отчёт.
 //
 // Зачем: на жирных промптах из изолированного бенча (корпус писем, `fat% = 0 %`) ничего не
@@ -44,8 +45,7 @@ const LADDER = arg('ladder', 'service');
 // --rung пинует ранг: единственный способ измерить «а что было бы, если бы бесплатного Go не было»
 // на проде — конфиг мы не меняем, а пин заставляет лестницу пойти именно туда.
 const RUNG = arg('rung', null);
-const TOKEN = (process.env.LADDER_TOKEN
-  || (() => { try { return fs.readFileSync(path.join(os.homedir(), '.llm-ladder-token'), 'utf8').trim(); } catch { return ''; } })()).trim();
+const TOKEN = readLadderToken() || '';
 
 const PREFIX = `${BUCKET}/${PROFILE}/sessions/`;
 const gcloud = (...args) => execFileSync('gcloud', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
