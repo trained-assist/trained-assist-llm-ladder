@@ -160,9 +160,11 @@ export function createCompressionSession(original, {
       } catch (e) {
         if (repaired) return fail(`Context contract still invalid: ${e.message}`, e.code === 'empty_answer');
         repaired = true;
-        // Older call-graph spec: Lfix only reformats the last output, without resending C/refs.
-        current = { ...body, tools: original.tools || [],
-          messages: [{ role: 'system', content: CONTRACT }, { role: 'user', content: JSON.stringify({ error: e.message, previous_output: message || null, instruction: 'Rewrite only the previous output to satisfy the contract. Return the final answer.' }) }] };
+        // Keep the compressed conversation and any retrieved pages in the repair call. A
+        // format-only prompt loses the user's task, so the model can only ask for context again.
+        current = { ...current, tools: original.tools || [], messages: [...current.messages,
+          { role: 'user', content: JSON.stringify({ error: e.message, previous_output: message || null,
+            instruction: 'Your previous response violated the required JSON envelope. Use the full conversation above to complete the original user task. Return either {"answer":...} or {"need_refs":[...]}; do not ask for context that is already present.' }) }] };
       }
       const left = deadline - Date.now();
       if (left < 500) return fail('Time budget spent before context continuation');

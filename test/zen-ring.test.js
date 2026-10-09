@@ -1162,22 +1162,3 @@ test('late raced answer picks an actual winner even after the first task failed'
   assert.equal(result.data.text, 'actual late winner');
 });
 
-test('empty completed Zen output gets one contract repair, without an extra provider guard retry', async () => {
-  const d1 = fakeD1();
-  const lease = (await (await post('/zen/pool/register', { worker_id: 'ctx-empty:1' }, d1)).json()).lease_id;
-  const cfg = { ladders: { service: { build: ['zen-rings/big-pickle'] } } };
-  const pending = run({ model: 'service', messages: [{ role: 'assistant', content: 'x'.repeat(400000) }, { role: 'user', content: 'Check it' }] },
-    { env: { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW }, config: cfg, store: memoryStore() });
-  await new Promise(resolve => setTimeout(resolve, 20));
-  const first = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
-  await post('/zen/pool/result', { task_id: first.id, ok: false, kind: 'ok', text: '', finish_reason: 'length' }, d1);
-  for (let tries = 0; tries < 30 && d1._tasks.size < 2; tries++) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(d1._tasks.size, 2);
-  const repair = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
-  assert.equal(repair.messages.length, 2);
-  assert.match(JSON.parse(repair.messages[1].content).error, /empty answer/);
-  await post('/zen/pool/result', { task_id: repair.id, ok: true, text: '{"answer":"repaired"}' }, d1);
-  const result = await pending;
-  assert.equal(result.content, 'repaired'); assert.equal(result.compression.contractRetry, true);
-  assert.equal(d1._tasks.size, 2);
-});

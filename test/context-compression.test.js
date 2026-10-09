@@ -239,13 +239,17 @@ test('unknown ref is explicit and independent runs cannot read previous refs', a
   assert.equal((await run(sized(400000), options(second))).content, 'second');
 });
 
-test('contract failure after retrieval gets exactly one small Lfix on the same winner', async () => {
+test('contract repair after retrieval keeps the full conversation on the same winner', async () => {
   const mock = mockFetch(({ body }, n) => {
     if (n === 1) return { content: JSON.stringify({ need_refs: [firstRef(body)] }) };
     if (n === 2) return { content: 'not JSON' };
     const repair = JSON.parse(body.messages.at(-1).content);
     assert.match(repair.error, /valid JSON/); assert.equal(repair.previous_output.content, 'not JSON');
-    assert.equal(body.messages.length, 2); assert.ok(requestBytes(body) < 5000);
+    assert.ok(body.messages.length > 2);
+    assert.ok(body.messages.some(m => m.role === 'user' && m.content.includes('Check the earlier result.')));
+    assert.ok(body.messages.some(m => typeof m.content === 'string' && m.content.includes('context ref=')));
+    assert.deepEqual(body.tools, []);
+    assert.ok(requestBytes(body) > 5000);
     return { content: '{"answer":"fixed"}' };
   });
   const result = await run(sized(400000), options(mock));
