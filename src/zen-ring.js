@@ -587,6 +587,80 @@ export async function zenRingStop(request, env) {
 // 503 (no warm worker) | 409 (quarantine) | 429 (budget).
 // The pool's core, free of the HTTP shape so the ladder can call it in-process (same worker, same
 // env — no token, no second hop). Returns { status, data } exactly as the route would.
+// Ставит задачи на модели гонки и списывает квоту по каждой. Один вызов — одна строка в
+// zen_pool_tasks и один bump по (репозиторий, модель) плюс один общий bump провайдера.
+async function enqueueTasks(env, { racing, repoScope, prompt, messages, tools, maxTokens, waitMs, now }) {
+  const ids = [];
+  for (const m of racing) {
+    const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    await db(env).prepare(
+      `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+    ).bind(id, m, prompt.slice(0, 4000), messages, tools, maxTokens, waitMs, 'queued', now).run();
+    await bumpCount(env, repoScope, m, now);
+    ids.push({ id, model: m });
+  }
+  await bumpCount(env, '*', '*', now);
+  return ids;
+}
+
+// Ждёт гонку до первого НЕПУСТОГО ответа, до провала всех задач или до вотчдога.
+//
+// Побеждает первый непустой: пустое тело — основной вид проигрыша в деградированной полосе
+// (замер: 1073 вызова, 100 % пустого текста), поэтому `ok:false` не может выиграть, даже если
+// задача формально «выполнена». Если проиграли все — возвращаем причину первой из них, чтобы
+// лестница классифицировала отказ, а не получила пустоту.
+async function awaitRacedAnswer(env, ids, { waitMs, cold = null }) {
+  const raced = ids.map((t) => t.model);
+  const deadline = Date.now() + waitMs;
+  let step = 0;
+  for (;;) {
+    const rows = await Promise.all(ids.map((t) => readTask(env, t.id)));
+    const win = rows.findIndex((row) => row && row.state === 'done' && (row.ok || !!row.tool_calls));
+    if (win >= 0) {
+      const row = rows[win];
+      const { id, model } = ids[win];
+      return {
+        status: 200,
+        data: {
+          task_id: id, model, ok: true, text: row.text || null, kind: row.kind,
+          error: row.error, provider_ms: row.provider_ms, served_ms: row.served_ms,
+          worker_id: row.worker_id, wait_ms: waitMs, raced,
+          ...(row.tool_calls ? { tool_calls: JSON.parse(row.tool_calls) } : {}),
+          ...(row.usage ? { usage: JSON.parse(row.usage) } : {}),
+          ...(row.finish_reason ? { finish_reason: row.finish_reason } : {}),
+          ...(cold ? { cold_start: cold } : {}),
+        },
+      };
+    }
+    const allTerminal = rows.every((row) => row && (row.state === 'done' || row.state === 'failed'));
+    if (allTerminal) {
+      const first = rows.find((row) => row && row.state === 'done' && !row.ok) || rows.find((row) => row) || {};
+      return {
+        status: 502,
+        data: {
+          task_id: ids[0].id, model: first.model || ids[0].model, ok: false, text: null, kind: first.kind,
+          error: first.error || 'empty answer from every raced model',
+          raced, provider_ms: first.provider_ms, served_ms: first.served_ms, wait_ms: waitMs,
+          ...(first.tool_calls ? { tool_calls: JSON.parse(first.tool_calls) } : {}),
+          ...(first.usage ? { usage: JSON.parse(first.usage) } : {}),
+          ...(first.finish_reason ? { finish_reason: first.finish_reason } : {}),
+        },
+      };
+    }
+    if (Date.now() >= deadline) {
+      for (const t of ids) {
+        await db(env).prepare('UPDATE zen_pool_tasks SET wait_returned_at = ?1 WHERE id = ?2').bind(nowMs(env), t.id).run();
+      }
+      return { status: 504, data: { error: 'watchdog fired before the answer arrived', task_id: ids[0].id,
+        task_ids: ids.map((t) => t.id), raced, wait_ms: waitMs,
+        ...(cold ? { cold_start: cold } : {}),
+        hint: 'the job is still working — GET /zen/pool/result/{task_id} picks the answer up' } };
+    }
+    await sleep(backoffMs(step++));
+  }
+}
+
 export async function ringInvoke(env, body, fetchImpl = fetch) {
   if (!env.ZEN_DB) return { status: 503, data: { error: 'zen database not configured' } };
   const model = String(body.model || '');
@@ -709,71 +783,9 @@ export async function ringInvoke(env, body, fetchImpl = fetch) {
   }
   const racing = eligible.slice(0, slots);
 
-  const ids = [];
-  for (const m of racing) {
-    const id = `${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
-    await db(env).prepare(
-      `INSERT INTO zen_pool_tasks (id, model, prompt, messages, tools, max_tokens, wait_ms, state, enqueued_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
-    ).bind(id, m, prompt.slice(0, 4000), messages, tools, maxTokens, waitMs, 'queued', now).run();
-    await bumpCount(env, repoScope, m, now);
-    ids.push({ id, model: m });
-  }
-  await bumpCount(env, '*', '*', now);
-
+  const ids = await enqueueTasks(env, { racing, repoScope, prompt, messages, tools, maxTokens, waitMs, now });
   const cold = coldStart ? { scaled: coldStart.reason, dispatched: coldStart.dispatched.map((d) => d.repo), boot_ms: BOOT_MS } : null;
-  const deadline = Date.now() + waitMs;
-  let step = 0;
-  for (;;) {
-    const rows = await Promise.all(ids.map((t) => readTask(env, t.id)));
-    // Побеждает ПЕРВЫЙ НЕПУСТОЙ ответ. Пустое тело — основной вид проигрыша в этой полосе
-    // (замер: 1073 вызова, 100 % пустого текста), поэтому `ok:false` не может выиграть гонку,
-    // даже если формально задача «выполнена».
-    const win = rows.findIndex((row) => row && row.state === 'done' && (row.ok || !!row.tool_calls));
-    if (win >= 0) {
-      const row = rows[win];
-      const { id, model: m } = ids[win];
-      return {
-        status: 200,
-        data: {
-          task_id: id, model: m, ok: true, text: row.text || null, kind: row.kind,
-          error: row.error, provider_ms: row.provider_ms, served_ms: row.served_ms,
-          worker_id: row.worker_id, wait_ms: waitMs,
-          raced: ids.map((t) => t.model),
-          ...(row.tool_calls ? { tool_calls: JSON.parse(row.tool_calls) } : {}),
-          ...(row.usage ? { usage: JSON.parse(row.usage) } : {}),
-          ...(row.finish_reason ? { finish_reason: row.finish_reason } : {}),
-          ...(cold ? { cold_start: cold } : {}),
-        },
-      };
-    }
-    const allTerminal = rows.every((row) => row && (row.state === 'done' || row.state === 'failed'));
-    if (allTerminal) {
-      const first = rows.find((row) => row && row.state === 'done' && !row.ok) || rows.find((row) => row) || {};
-      return {
-        status: 502,
-        data: {
-          task_id: ids[0].id, model: first.model || ids[0].model, ok: false, text: null, kind: first.kind,
-          error: first.error || 'empty answer from every raced model',
-          raced: ids.map((t) => t.model),
-          provider_ms: first.provider_ms, served_ms: first.served_ms, wait_ms: waitMs,
-          ...(first.tool_calls ? { tool_calls: JSON.parse(first.tool_calls) } : {}),
-          ...(first.usage ? { usage: JSON.parse(first.usage) } : {}),
-          ...(first.finish_reason ? { finish_reason: first.finish_reason } : {}),
-        },
-      };
-    }
-    if (Date.now() >= deadline) {
-      for (const t of ids) {
-        await db(env).prepare('UPDATE zen_pool_tasks SET wait_returned_at = ?1 WHERE id = ?2').bind(nowMs(env), t.id).run();
-      }
-      return { status: 504, data: { error: 'watchdog fired before the answer arrived', task_id: ids[0].id,
-        task_ids: ids.map((t) => t.id), raced: ids.map((t) => t.model), wait_ms: waitMs,
-        ...(cold ? { cold_start: cold } : {}),
-        hint: 'the job is still working — GET /zen/pool/result/{task_id} picks the answer up' } };
-    }
-    await sleep(backoffMs(step++));
-  }
+  return awaitRacedAnswer(env, ids, { waitMs, cold });
 }
 
 // How long to leave the pool alone after a cold start. A freshly booted runner is still
