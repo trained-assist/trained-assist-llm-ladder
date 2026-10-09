@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // Free-model inventory collector (issue #111) — the cron entry point.
 //
 // The heavy lifting lives in the WORKER (src/free-models.js via POST /v1/free-models/collect):
@@ -48,15 +49,11 @@ for (const [k, v] of Object.entries({ probe_limit: cfg.probeLimit, probe_concurr
   if (!Number.isFinite(v)) { console.error(`--${k} must be a number`); process.exit(2); }
 }
 
-function token() {
-  if (process.env.LLM_LADDER_TOKEN) return process.env.LLM_LADDER_TOKEN.trim();
-  const file = path.join(os.homedir(), '.llm-ladder-token');
-  try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; }
-}
+const token = readLadderToken;
 
 const TOKEN = token();
 if (!TOKEN) {
-  console.error('no token: set LLM_LADDER_TOKEN or ~/.llm-ladder-token (chmod 600)');
+  console.error('no token: run node scripts/ladder-token.mjs to inspect credential sources');
   process.exit(2);
 }
 

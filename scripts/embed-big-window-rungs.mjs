@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // embed-big-window-rungs — статический скрипт: найти бесплатные модели с большим контекстом и
 // встроить их в лестницы, где такого окна не хватает.
 //
@@ -108,11 +109,7 @@ const readArg = (name, def) => {
 };
 const has = (name) => process.argv.includes(`--${name}`);
 
-function token() {
-  if (process.env.LLM_LADDER_TOKEN) return process.env.LLM_LADDER_TOKEN.trim();
-  const p = path.join(os.homedir(), '.llm-ladder-token');
-  try { return fs.readFileSync(p, 'utf8').trim(); } catch { return null; }
-}
+const token = readLadderToken;
 
 async function api(base, pathname, init = {}, tok = null) {
   const res = await fetch(base + pathname, {
@@ -187,7 +184,7 @@ async function main() {
   const only = readArg('only', null); // 'service:build' — проверять одну лестницу, а не все
 
   const tok = token();
-  if (!tok) { console.error('нет токена: LLM_LADDER_TOKEN или ~/.llm-ladder-token'); process.exit(2); }
+  if (!tok) { console.error('нет токена: node scripts/ladder-token.mjs покажет источники'); process.exit(2); }
 
   const inv = await api(base, '/v1/free-models', {}, tok);
   const rows = inv?.models || inv?.rows || (Array.isArray(inv) ? inv : []);
