@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // Remaining Go allowance per pool key, from the worker's GET /v1/go-usage (issue #91).
 // The worker polls https://opencode.ai/zen/go/v1/usage per key and returns only index + percent
 // (keys never leave the worker). Token from $LADDER_TOKEN or ~/.llm-ladder-token (chmod 600).
@@ -10,10 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const base = (process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store').replace(/\/$/, '');
-let token = process.env.LADDER_TOKEN;
-if (!token) {
-  try { token = readFileSync(join(homedir(), '.llm-ladder-token'), 'utf8').trim(); } catch { /* fall through */ }
-}
+const token = readLadderToken();
 if (!token) { console.error('no token: set $LADDER_TOKEN or ~/.llm-ladder-token'); process.exit(2); }
 
 const res = await fetch(`${base}/v1/go-usage`, { headers: { Authorization: `Bearer ${token}` } });

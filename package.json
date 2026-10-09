@@ -15,7 +15,8 @@
     "setup-opencode": "node scripts/setup-opencode-ladder.mjs",
     "zen": "node scripts/zen-pool-client.mjs",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "token": "node scripts/ladder-token.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.86.0"

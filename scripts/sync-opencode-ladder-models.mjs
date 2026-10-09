@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // Sync the `provider.ladder.models` block in the local opencode config from the ladder's own
 // /v1/models — so the model list never has to be maintained by hand again.
 //
@@ -25,16 +26,7 @@ const BASE = (process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store
 const PROVIDER = process.env.LADDER_PROVIDER || 'ladder';
 const DRY = process.argv.includes('--dry-run');
 
-function readToken() {
-  const candidates = [
-    process.env.LADDER_TOKEN,
-    process.env.LLM_LADDER_TOKEN,
-    readIf(path.join(home, '.llm-ladder-token')),
-    readIf(path.join(home, 'agent-tokens/llm-ladder/token')),
-  ];
-  return candidates.map((v) => (v || '').trim()).find(Boolean) || null;
-}
-function readIf(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } }
+const readToken = readLadderToken;
 
 function die(msg) { console.error(`SYNC FAIL: ${msg}`); process.exit(1); }
 

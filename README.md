@@ -253,8 +253,14 @@ npx wrangler dev      # local worker (cp .dev.vars.example .dev.vars first)
 Local iteration: `cp .dev.vars.example .dev.vars` (gitignored), `npm run dev`, point clients at
 `http://localhost:8787` (or `LADDER_BASE=http://localhost:8787 npm run gate`).
 
-Live gate token from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the repo) —
-read it only inside the script, never echo it into a prompt or a file in the repo.
+Runtime ladder clients use `scripts/ladder-credentials.mjs`. It checks, in order,
+`$LADDER_TOKEN`, `$LLM_LADDER_TOKEN`, `~/agent-tokens/llm-ladder/token`,
+`~/.llm-ladder-token`, and this checkout's `.local/ladder/token`. The `.local/` directory is
+gitignored. The standalone OpenCode setup script checks the same local sources so it can also be
+downloaded and run without cloning the repository. To inspect or verify the selected credential, use `npm run token` or
+`npm run token -- --check`; `npm run token -- --save` verifies it and copies it to the OpenCode
+credential path with mode `0600`. `--print` explicitly prints the credential and should only be
+used when needed. Never echo it into a prompt or commit it.
 
 ---
 

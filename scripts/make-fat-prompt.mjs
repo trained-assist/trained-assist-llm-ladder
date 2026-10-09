@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // make-fat-prompt — собрать реалистичный ЖИРНЫЙ промпт из настоящих данных сессии.
 //
 // Зачем: тесты и бенчмарки обычно используют 'x'.repeat(N) — но реальный жирный промпт это
@@ -36,8 +37,7 @@ const SEND = has('send');
 const BASE = String(arg('base', process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store')).replace(/\/+$/, '');
 const LADDER = arg('ladder', 'service');
 const RUNG = arg('rung', null);
-const TOKEN = (process.env.LADDER_TOKEN
-  || (() => { try { return fs.readFileSync(path.join(os.homedir(), '.llm-ladder-token'), 'utf8').trim(); } catch { return ''; } })()).trim();
+const TOKEN = readLadderToken() || '';
 
 // Та же оценка, что у лестницы (src/size-policy.js): 4 символа на токен.
 const estTokens = (s) => Math.ceil(String(s).length / 4);

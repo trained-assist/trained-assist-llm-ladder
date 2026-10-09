@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // Speed digest for the ladder — a compact, readable answer to "what answered, how fast, and is
 // anything slow". Reads the SAME data production already records (`GET /v1/analytics`, one row per
 // served call in D1), so it costs no extra LLM calls: unlike `ladder-bench` it measures real
@@ -31,15 +32,7 @@ const SLOW_MS = Number(process.env.DIGEST_SLOW_MS || 15_000);
 // A rung slower than this is called out as a problem, not a warning.
 const BAD_MS = Number(process.env.DIGEST_BAD_MS || 45_000);
 
-function readToken() {
-  for (const c of [process.env.LLM_LADDER_TOKEN, process.env.LADDER_TOKEN]) {
-    if (c && c.trim()) return c.trim();
-  }
-  for (const p of [path.join(os.homedir(), '.llm-ladder-token'), path.join(os.homedir(), 'agent-tokens/llm-ladder/token')]) {
-    try { const v = fs.readFileSync(p, 'utf8').trim(); if (v) return v; } catch { /* next */ }
-  }
-  return null;
-}
+const readToken = readLadderToken;
 
 const token = readToken();
 if (!token) {

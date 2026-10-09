@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const has = (k) => argv.some((a) => a === `--${k}` || a.startsWith(`--${k}=`));
@@ -31,6 +32,7 @@ const val = (k, d) => {
 };
 
 const HOME = os.homedir();
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG = path.join(HOME, '.config/opencode/opencode.json');
 const TOKEN_FILE = path.join(HOME, 'agent-tokens/llm-ladder/token');
 const BASE = (val('base', process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store')).replace(/\/+$/, '');
@@ -57,8 +59,10 @@ function promptHidden(question) {
 
 let token = (argv.find((a) => a.startsWith('--token=')) || '').slice('--token='.length)
   || (process.env.LADDER_TOKEN || '').trim()
+  || (process.env.LLM_LADDER_TOKEN || '').trim()
   || tokenFromDisk(TOKEN_FILE)
-  || tokenFromDisk(path.join(HOME, '.llm-ladder-token'));
+  || tokenFromDisk(path.join(HOME, '.llm-ladder-token'))
+  || tokenFromDisk(path.join(SCRIPT_DIR, '../.local/ladder/token'));
 
 if (!token) {
   if (process.stdin.isTTY && !argv.includes('--no-prompt')) {

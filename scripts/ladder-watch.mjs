@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readLadderToken } from './ladder-credentials.mjs';
 // Ladder watch — is the ladder answering, and is zen answering through it.
 //
 // Four signals: three probes + one quota read, because "the ladder works", "zen works" and
@@ -45,7 +46,7 @@ const NOTIFY = has('notify');
 const ZEN_RUNG = arg('zen-rung', 'zen-rings/nemotron-3-ultra-free');
 const LADDER = arg('ladder', 'service');
 const PROBE_TIMEOUT_MS = Number(arg('timeout', 45_000));
-const TOKEN = (process.env.LADDER_TOKEN || '').trim();
+const TOKEN = readLadderToken() || '';
 const TG_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TG_CHAT = (process.env.TELEGRAM_CHAT_ID || '').trim();
 
