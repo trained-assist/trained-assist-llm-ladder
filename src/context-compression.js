@@ -1,5 +1,6 @@
 import { compressRequest, READ_CONTEXT_TOOL } from '../vendor/context-chunks-mcp/src/core.js';
 import prices from '../config/prices.json' with { type: 'json' };
+import { isEmptyAnswer } from './answer-guard.js';
 
 export const ENTRY_COMPRESSION_BYTES = 350_000;
 export const PAID_COMPRESSION_BYTES = 100_000;
@@ -52,15 +53,18 @@ function decode(message) {
       try { return JSON.parse(c.function.arguments); } catch { throw new Error('read_context arguments must be valid JSON'); }
     }) };
   }
+  if (isEmptyAnswer(message?.content)) throw Object.assign(new Error('empty answer'), { code: 'empty_answer' });
   let value;
   try { value = JSON.parse(message?.content); } catch { throw new Error('Response content must be valid JSON with answer or need_refs'); }
   if (own(value, 'answer') && value.answer !== null && value.answer !== undefined && value.answer !== '') return { kind: 'answer', answer: value.answer };
   if (Array.isArray(value?.need_refs) && value.need_refs.length) return { kind: 'refs', refs: value.need_refs };
+  if (own(value, 'answer') && isEmptyAnswer(value.answer)) throw Object.assign(new Error('empty answer'), { code: 'empty_answer' });
   throw new Error('Response must contain a nonempty answer or a nonempty need_refs array');
 }
 
 function validateAnswer(answer, format) {
   const content = typeof answer === 'string' ? answer : JSON.stringify(answer);
+  if (isEmptyAnswer(content)) throw Object.assign(new Error('empty answer'), { code: 'empty_answer' });
   if (format?.type === 'json_object' || format?.type === 'json_schema') {
     let json;
     try { json = JSON.parse(content); } catch { throw new Error('answer must itself be valid JSON for the caller'); }
@@ -125,7 +129,7 @@ export function createCompressionSession(original, {
     };
     const addUsage = data => mergeUsage(usage, data?.usage);
     addUsage(result.data);
-    const fail = error => ({ ok: false, status: 502, error, attempts, pin: initial.pin, compression: { ...stats, steps: step, refRounds: rounds, contractRetry: repaired } });
+    const fail = (error, guard = false) => ({ ok: false, status: 502, error, ...(guard ? { guard: true } : {}), attempts, pin: initial.pin, compression: { ...stats, steps: step, refRounds: rounds, contractRetry: repaired } });
     for (;;) {
       const message = result.data?.choices?.[0]?.message;
       try {
@@ -154,7 +158,7 @@ export function createCompressionSession(original, {
         current = { ...current, messages: [...current.messages, message, ...replies] };
         rounds++;
       } catch (e) {
-        if (repaired) return fail(`Context contract still invalid: ${e.message}`);
+        if (repaired) return fail(`Context contract still invalid: ${e.message}`, e.code === 'empty_answer');
         repaired = true;
         // Older call-graph spec: Lfix only reformats the last output, without resending C/refs.
         current = { ...body, tools: original.tools || [],

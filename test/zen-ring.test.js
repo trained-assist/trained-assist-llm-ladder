@@ -1175,7 +1175,7 @@ test('empty completed Zen output gets one contract repair, without an extra prov
   assert.equal(d1._tasks.size, 2);
   const repair = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
   assert.equal(repair.messages.length, 2);
-  assert.match(JSON.parse(repair.messages[1].content).error, /valid JSON/);
+  assert.match(JSON.parse(repair.messages[1].content).error, /empty answer/);
   await post('/zen/pool/result', { task_id: repair.id, ok: true, text: '{"answer":"repaired"}' }, d1);
   const result = await pending;
   assert.equal(result.content, 'repaired'); assert.equal(result.compression.contractRetry, true);

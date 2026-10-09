@@ -7,6 +7,7 @@ import { handle } from '../src/handler.js';
 import { memoryStore } from '../src/state.js';
 import { requestBytes, paidRung, createCompressionSession, COMPRESSION_TARGET_RATIO } from '../src/context-compression.js';
 import { compressRequest } from '../vendor/context-chunks-mcp/src/core.js';
+import { isEmptyAnswer } from '../src/answer-guard.js';
 
 const free = 'opencode-go/longcat-2.5-preview-free', paid = 'opencode-go/mimo-v2.6-flash';
 const config = { ladders: { service: { build: [free, paid, 'openrouter/example/fallback:free'] } } };
@@ -50,6 +51,39 @@ test('paid status comes from the canonical price table, including subscription G
   assert.equal(paidRung('zen-rings/big-pickle'), false);
   assert.equal(paidRung('openrouter/google/gemini-2.5-flash'), true);
   assert.equal(paidRung('custom/charged', { 'custom/charged': [1, 0, 0] }), true);
+});
+
+test('empty-answer guard rejects placeholders without rejecting useful short answers', () => {
+  for (const value of ['', ' ', '.', '...', '?', '…']) assert.equal(isEmptyAnswer(value), true, value);
+  for (const value of ['да', 'нет', 'OK', '0', '4', '👍', '{}', '[]']) assert.equal(isEmptyAnswer(value), false, value);
+});
+
+test('ordinary punctuation answer retries once and then descends to the next rung', async () => {
+  const mock = mockFetch(({ body }) => ({ content: body.model === free.split('/')[1] ? '.' : 'done' }));
+  const result = await run(sized(1000), options(mock));
+  assert.ok(result.ok); assert.equal(result.content, 'done'); assert.equal(result.model, paid);
+  assert.deepEqual(mock.calls.map(c => c.body.model), [free, free, paid].map(m => m.split('/')[1]));
+  assert.equal(result.attempts.filter(a => a.outcome === 'guard-retry').length, 1);
+});
+
+test('real-case invalid envelope then dot in repair descends without restarting or recompressing', async () => {
+  const spy = spyCompression();
+  const mock = mockFetch(({ body }, n) => ({ content: body.model !== free.split('/')[1] ? '{"answer":"done"}'
+    : n === 1 ? '{"context":"archived context"}' : '{"answer":"."}' }));
+  const result = await run(sized(400000), options(mock, { contextCompression: spy }));
+  assert.ok(result.ok); assert.equal(result.content, 'done'); assert.equal(result.model, paid);
+  assert.deepEqual(mock.calls.map(c => c.body.model), [free, free, paid].map(m => m.split('/')[1]));
+  assert.equal(result.attempts.filter(a => a.outcome === 'contract-retry').length, 1);
+  assert.equal(spy.applications.length, 1);
+  assert.ok(mock.calls[2].body.messages.some(m => typeof m.content === 'string' && m.content.includes('context ref=')));
+});
+
+test('punctuation from every compressed rung returns an error instead of HTTP success', async () => {
+  const mock = mockFetch(() => ({ content: '{"answer":"."}' }));
+  const result = await run(sized(400000), options(mock));
+  assert.equal(result.ok, false); assert.equal(result.status, 502);
+  assert.equal(result.error, 'every rung failed');
+  assert.equal(mock.calls.length, 6); // one initial call + one repair per rung
 });
 
 test('75% savings is a soft target: protected context below the target still produces an answer', async () => {

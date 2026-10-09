@@ -29,6 +29,7 @@ import { classifyError } from './classify.js';
 import { estimateTokens, fits, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 import { createCompressionSession } from './context-compression.js';
+import { isEmptyAnswer } from './answer-guard.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -389,7 +390,7 @@ async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fe
     if (rawAnswer && data?.choices?.[0]?.message) return { ok: true, data, content, winner: { model: actualModel, keyIndex } };
     // #45 (owner): a COMPLETED answer that fails the guard is flagged, not fatal — run() gives
     // the rung ONE same-rung retry before moving down (guardTried there bounds it).
-    if (!content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(data, req)}` };
+    if (isEmptyAnswer(content) && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(data, req)}` };
     if (wantJson && !hasTools && parseJson(content) === undefined) return { ok: false, guard: true, error: `invalid JSON${guardDiag(data, req)}` };
     return { ok: true, data, content, winner: { model: actualModel, keyIndex } };
   }
@@ -578,7 +579,7 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs, exactModel 
   }
   const content = String(r.data.text || '').trim();
   const hasTools = Array.isArray(r.data.tool_calls) && r.data.tool_calls.length > 0;
-  if (!rawAnswer && !content && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(r.data, { body })}` };
+  if (!rawAnswer && isEmptyAnswer(content) && !hasTools) return { ok: false, guard: true, error: `empty answer${guardDiag(r.data, { body })}` };
   const actualModel = `zen-rings/${r.data.model || rung}`;
   const message = { role: 'assistant', content };
   if (hasTools) message.tool_calls = r.data.tool_calls;
@@ -805,20 +806,27 @@ async function runLadder(body, { context, env, config, store, fetchImpl = fetch,
     if (r.ok) {
       if (conversation && !pinRung) {
         pinState = model === (pinned && pinned.rung) ? 'hit' : (pinned ? 'moved' : 'new');
-        await store.recordSuccess(model, { pin: { pinKey: conversation, rung: model } });
-      } else {
-        await store.recordSuccess(model);
       }
        const winner = r.winner || { model, keyIndex: key };
        attempts.push({ model: context.active ? winner.model : model, outcome: 'ok', key: context.active ? winner.keyIndex : key });
        const result = { ok: true, model: context.active ? winner.model : model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState, winner };
-       return context.finish(result, async (nextBody, receipt, remaining) => {
+       const finished = await context.finish(result, async (nextBody, receipt, remaining) => {
          if (!fits(receipt.model, estimateTokens(nextBody))) return { ok: false, error: 'expanded context exceeds the winner ceiling' };
          const next = await attempt(env, receipt.model, nextBody, receipt.keyIndex, {
            ...opts, timeoutMs: Math.min(timeoutMs, remaining), wantJson: false, rawAnswer: true, exactModel: true,
          });
          return next;
        });
+       if (finished.ok) {
+         await store.recordSuccess(model, conversation && !pinRung ? { pin: { pinKey: conversation, rung: model } } : {});
+         return finished;
+       }
+       // The compressed path already used its single same-winner repair. Empty
+       // answers now follow the ordinary descent policy, without another retry
+       // or a restart from the ladder head. Other contract errors stay terminal.
+       if (!finished.guard) return finished;
+       attempts.splice(0, attempts.length, ...finished.attempts);
+       r = finished;
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     if (!goParked) {
