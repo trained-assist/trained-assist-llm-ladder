@@ -26,7 +26,8 @@ export function nextFreeGoKeyIndex(poolSize) {
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { estimateTokens, fits, hedgePlan, ttfbFactor } from './size-policy.js';
+import { estimateTokens, estimateBudgetInput, fits, hedgePlan, ttfbFactor } from './size-policy.js';
+import { reserveProviderAttempt, reconcileProviderAttempt } from './hard-budget.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
@@ -286,7 +287,7 @@ export function ringWaitMs(timeoutMs) {
 }
 const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|stream_options/i;
 
-export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null } = {}) {
+export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null, budgetOutputTokens = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
   const isZen = model.startsWith('opencode-zen/');
   const pool = readPool(env);
@@ -310,8 +311,11 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
     ...body,
     model: model.replace(/^opencode-go\/|^opencode-zen\/|^openrouter\//, ''),
     stream,
-    max_tokens: Math.max(Number(body.max_tokens) || 0, minTokensFor(model)),
+    max_tokens: budgetOutputTokens === null
+      ? Math.max(Number(body.max_tokens) || 0, minTokensFor(model))
+      : Math.min(Number(body.max_tokens) > 0 ? Number(body.max_tokens) : budgetOutputTokens, budgetOutputTokens),
   };
+  if (budgetOutputTokens !== null) delete upstream.max_completion_tokens;
   delete upstream.stream_options;
   if (stream && !isGo && !isZen) upstream.stream_options = { include_usage: true };
   if (stripRf) { delete upstream.response_format; delete upstream.stream_options; }
@@ -320,15 +324,36 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
     : isZen
       ? (env.OPENCODE_ZEN_BASE_URL || 'https://136-65-7-197.sslip.io/zen')
       : (env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1');
-  return { url: `${base}/chat/completions`, headers, body: upstream };
+  return { url: `${base}/chat/completions`, headers, body: upstream, service: env.BUDGET_PROVIDER_MOCK || null };
 }
 
 async function post(fetchImpl, req, signal) {
   try {
-    return { res: await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(req.body), signal }) };
+    const invoke = req.service ? req.service.fetch.bind(req.service) : fetchImpl;
+    return { res: await invoke(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(req.body), signal }) };
   } catch (e) {
     return { error: `fetch failed: ${e.message}` };
   }
+}
+
+async function reserveAttempt(opts, body, req) {
+  if (!opts.budget) return { ok: true, reservation: null };
+  try {
+    const reservation = await reserveProviderAttempt(opts.budget.db, opts.budget.claims, body, req.body.max_tokens);
+    if (!reservation.reserved) return { ok: false, denied: true, reason: reservation.reason || 'budget_exhausted' };
+    return { ok: true, reservation };
+  } catch (error) {
+    return { ok: false, denied: true, reason: error?.message || 'budget_ledger_unavailable' };
+  }
+}
+
+async function settleAttempt(opts, reservation, usage) {
+  if (!reservation) return;
+  await reconcileProviderAttempt(opts.budget.db, opts.budget.claims, reservation.reservationId, usage);
+}
+
+function outputBudgetDenied(reason) {
+  return { ok: false, budgetDenied: true, error: `budget denied: ${String(reason).slice(0, 120)}` };
 }
 
 // #34: guard failures say WHY the answer is empty — finish_reason + usage (did reasoning eat the
@@ -365,20 +390,29 @@ export function ringGuardRetry(data, body) {
 }
 
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
-async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
+async function attemptJson(env, model, body, keyIndex, opts) {
+  const { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null, budget = null } = opts;
   let stripRf = false;
   for (;;) {
-    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle });
+    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle, budgetOutputTokens: budget?.outputTokens ?? null });
     if (!req) return { ok: false, skip: true, error: 'no key' };
+    const reserved = await reserveAttempt(opts, body, req);
+    if (!reserved.ok) return outputBudgetDenied(reserved.reason);
     const { res, error } = await post(fetchImpl, req, AbortSignal.timeout(timeoutMs));
-    if (error) return { ok: false, error };
+    if (error) {
+      await settleAttempt(opts, reserved.reservation, null).catch(() => {});
+      return { ok: false, error };
+    }
     if (!res.ok) {
       const errText = String(await res.text().catch(() => ''));
+      await settleAttempt(opts, reserved.reservation, null).catch(() => {});
       // Provider rejects response_format → retry the SAME rung once without it (prompt-only JSON).
       if (res.status === 400 && !stripRf && body.response_format && RF_400_RE.test(errText)) { stripRf = true; continue; }
       return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
     }
     const data = await res.json().catch(() => null);
+    try { await settleAttempt(opts, reserved.reservation, data?.usage); }
+    catch (error) { return { ok: false, error: `budget settlement failed: ${error?.message || 'unknown'}` }; }
     const message = data?.choices?.[0]?.message || {};
     const content = String(message.content || '').trim();
     const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
@@ -406,16 +440,24 @@ function isOutputEvent(line) {
 
 // Streaming attempt: resolves once the first output event arrived (→ committed stream that
 // replays the buffered bytes and pipes the rest), or fails before it (→ caller tries next rung).
-async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
-  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation, appSlug, appTitle });
+async function attemptStream(env, model, body, keyIndex, opts) {
+  const { ttfbMs, fetchImpl, conversation = null, appSlug = null, appTitle = null, budget = null } = opts;
+  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation, appSlug, appTitle, budgetOutputTokens: budget?.outputTokens ?? null });
   if (!req) return { ok: false, skip: true, error: 'no key' };
+  const reserved = await reserveAttempt(opts, body, req);
+  if (!reserved.ok) return outputBudgetDenied(reserved.reason);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('no first token in time')), ttfbMs);
   const { res, error } = await post(fetchImpl, req, ctrl.signal);
-  if (error) { clearTimeout(timer); return { ok: false, error }; }
+  if (error) {
+    clearTimeout(timer);
+    await settleAttempt(opts, reserved.reservation, null).catch(() => {});
+    return { ok: false, error };
+  }
   if (!res.ok) {
     clearTimeout(timer);
     const errText = String(await res.text().catch(() => ''));
+    await settleAttempt(opts, reserved.reservation, null).catch(() => {});
     if (res.status === 400 && !body._stripRf && body.response_format && RF_400_RE.test(errText)) {
       return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle });
     }
@@ -425,32 +467,56 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
   const dec = new TextDecoder();
   const buffered = [];
   let text = '';
+  let usage = null;
+  const inspect = (chunk) => {
+    text += dec.decode(chunk, { stream: true });
+    const lines = text.split('\n');
+    text = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      try {
+        const event = JSON.parse(line.slice(5).trim());
+        if (event.usage && Number.isSafeInteger(event.usage.prompt_tokens) && Number.isSafeInteger(event.usage.completion_tokens)) usage = event.usage;
+      } catch { /* partial or non-JSON SSE frame */ }
+    }
+    return lines;
+  };
   try {
     for (;;) {
       const { value, done } = await reader.read();
-      if (done) { clearTimeout(timer); return { ok: false, error: 'stream ended before first token' }; }
+      if (done) {
+        clearTimeout(timer);
+        await settleAttempt(opts, reserved.reservation, usage).catch(() => {});
+        return { ok: false, error: 'stream ended before first token' };
+      }
       buffered.push(value);
-      text += dec.decode(value, { stream: true });
-      const lines = text.split('\n');
-      text = lines.pop();
+      const lines = inspect(value);
       const errLine = lines.find(l => l.startsWith('data:') && /"error"/.test(l));
-      if (errLine && !lines.some(isOutputEvent)) { clearTimeout(timer); reader.cancel().catch(() => {}); return { ok: false, error: `stream error: ${errLine.slice(5, 300)}` }; }
+      if (errLine && !lines.some(isOutputEvent)) { clearTimeout(timer); reader.cancel().catch(() => {}); await settleAttempt(opts, reserved.reservation, usage).catch(() => {}); return { ok: false, error: `stream error: ${errLine.slice(5, 300)}` }; }
       if (lines.some(isOutputEvent)) break;
     }
   } catch (e) {
     clearTimeout(timer);
+    await settleAttempt(opts, reserved.reservation, usage).catch(() => {});
     return { ok: false, error: `stream failed before first token: ${e.message}` };
   }
   clearTimeout(timer);
+  let settled = false;
+  const settleStream = async (value) => {
+    if (settled || !reserved.reservation) return;
+    settled = true;
+    await settleAttempt(opts, reserved.reservation, value);
+  };
   const stream = new ReadableStream({
     start(controller) { for (const chunk of buffered) controller.enqueue(chunk); },
     async pull(controller) {
       try {
         const { value, done } = await reader.read();
-        if (done) controller.close(); else controller.enqueue(value);
-      } catch (e) { controller.error(e); }
+        if (done) { await settleStream(usage); controller.close(); }
+        else { inspect(value); controller.enqueue(value); }
+      } catch (e) { await settleStream(null).catch(() => {}); controller.error(e); }
     },
-    cancel(reason) { return reader.cancel(reason); },
+    async cancel(reason) { try { await reader.cancel(reason); } finally { await settleStream(null); } },
   });
   return { ok: true, stream };
 }
@@ -459,7 +525,10 @@ function attempt(env, model, body, keyIndex, opts) {
   // Zen Ring rung — in-process, no HTTP and no token: the pool lives in this same worker, so the
   // ladder calls its core directly. A cold ring boots a runner (~10-13 s) and the caller's own
   // watchdog covers it; a warm one answers in ~3 s.
-  if (model.startsWith('zen-rings/')) return attemptRing(env, model, body, opts);
+  if (model.startsWith('zen-rings/')) {
+    if (opts.budget) return Promise.resolve({ ok: false, skip: true, error: 'budgeted call does not support zen-rings provider boundary' });
+    return attemptRing(env, model, body, opts);
+  }
   return body.stream ? attemptStream(env, model, body, keyIndex, opts) : attemptJson(env, model, body, keyIndex, opts);
 }
 
@@ -609,7 +678,14 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
  *                   {ok:false, status, error, attempts, pin?}>}
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null } = {}) {
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, budget = null } = {}) {
+  if (budget) {
+    const estimate = estimateBudgetInput(body);
+    if (!estimate.ok) return { ok: false, status: 413, error: `budget input rejected: ${estimate.reason}`, attempts: [] };
+    if (!budget.db || !budget.claims || !Number.isSafeInteger(budget.outputTokens) || budget.outputTokens <= 0) {
+      return { ok: false, status: 503, error: 'budget authority unavailable', attempts: [] };
+    }
+  }
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
@@ -725,6 +801,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       // фиксированные 15 с резали его до первого токена — см. замер и инцидент в size-policy.js.
       ttfbMs: Math.min(ttfbMs * ttfbFactor(inputTokens), left),
       wantJson, fetchImpl, conversation, appSlug, appTitle,
+      ...(budget ? { budget } : {}),
     };
     let key = keyIndex;
     const tried = new Set([key]);
@@ -735,7 +812,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     let r = race
       ? await raceGoKeys(env, model, body, key, plan.count, opts, pool.length, tried)
       : await attempt(env, model, body, key, opts);
-    if (r.skip) continue;
+    if (r.budgetDenied) return { ok: false, status: 429, error: r.error, attempts: [...attempts, { model, outcome: 'budget-denied', error: r.error }] };
+    if (r.skip) { if (budget) attempts.push({ model, outcome: 'skipped', error: r.error || 'unsupported budgeted provider' }); continue; }
     // #45 (owner «если ошибка то ретрай и далее потом по лесенке»): a guard-failed answer ALREADY
     // arrived — retrying the same rung costs a fraction of one ladder hop, while today's straight
     // descent pays double: a hop to a possibly pricier rung PLUS a health-skip that punishes every
@@ -747,6 +825,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       guardTried.add(model);
       attempts.push({ model, outcome: 'guard-retry', key, error: r.error });
       r = await attempt(env, model, body, key, opts);
+      if (r.budgetDenied) return { ok: false, status: 429, error: r.error, attempts: [...attempts, { model, outcome: 'budget-denied', error: r.error }] };
     }
     while (!r.ok && isGo && !goParked) {
       const fault = keyFaultOf(r.error);
@@ -764,6 +843,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         keyIndex = key; // rotation is shared state: the rest of this call rides the spare key too
         tried.add(key);
         r = await attempt(env, model, body, key, opts);
+        if (r.budgetDenied) return { ok: false, status: 429, error: r.error, attempts: [...attempts, { model, outcome: 'budget-denied', error: r.error }] };
         continue;
       }
       // Not a key-level signal. Never probe for problems the spare key cannot change: a context
@@ -776,6 +856,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       key = spare;
       tried.add(key);
       r = await attempt(env, model, body, key, opts);
+      if (r.budgetDenied) return { ok: false, status: 429, error: r.error, attempts: [...attempts, { model, outcome: 'budget-denied', error: r.error }] };
       if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
     }
     // Sticky same-rung retry (S5): the pinned rung on a paid (non-Go) rung gets ONE more chance on
@@ -786,6 +867,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         pinRetryLeft = 0;
         attempts.push({ model, outcome: 'pin-retry', key, error: r.error });
         r = await attempt(env, model, body, key, opts);
+        if (r.budgetDenied) return { ok: false, status: 429, error: r.error, attempts: [...attempts, { model, outcome: 'budget-denied', error: r.error }] };
       }
     }
     if (r.ok) {
