@@ -1,0 +1,26 @@
+name: context-live-smoke
+on:
+  push:
+    branches: [codex/context-220-live-smoke]
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Live fat-context call to deployed Ladder API
+        env:
+          LADDER_TOKEN: ${{ secrets.LADDER_TOKEN }}
+        run: node scripts/context-live-smoke.mjs
+      - name: Publish evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: context-live-smoke
+          path: context-live-smoke.json
+          retention-days: 1
