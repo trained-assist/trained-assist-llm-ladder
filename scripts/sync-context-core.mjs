@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 
 const repository = 'trained-assist/context-chunks-mcp';
-const ref = '29c7664742f890afdfdad9ae61709984a06c1096';
+const ref = 'd179ba5451122c2dc40405ea2668158587a65079';
 const args = process.argv.slice(2), sourceIndex = args.indexOf('--source-dir');
 const source = sourceIndex >= 0 ? args[sourceIndex + 1] : null;
 const target = new URL('../vendor/context-chunks-mcp/', import.meta.url);
