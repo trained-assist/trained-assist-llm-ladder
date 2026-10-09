@@ -42,7 +42,7 @@ test('vendored core matches its pinned upstream manifest exactly', () => {
   const base = new URL('../vendor/context-chunks-mcp/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('manifest.json', base)));
   assert.equal(manifest.repository, 'trained-assist/context-chunks-mcp');
-  assert.equal(manifest.ref, '29c7664742f890afdfdad9ae61709984a06c1096');
+  assert.equal(manifest.ref, 'd179ba5451122c2dc40405ea2668158587a65079');
   for (const [path, hash] of Object.entries(manifest.files)) assert.equal(createHash('sha256').update(readFileSync(new URL(path, base))).digest('hex'), hash, path);
 });
 
@@ -124,6 +124,52 @@ test('static CI fixture saves at least 75% including contract overhead and prese
     assert.equal(prepared.messages.filter(m => m.role === 'tool').length, 24);
     assert.ok(prepared.messages.some(m => m.content === messages.at(-1).content));
   } finally { session.close(); }
+});
+
+test('the latest user turn preserves its full bash command and completed result', () => {
+  const old = Array.from({ length: 30 }, (_, n) => ({ role: 'tool', tool_call_id: `old-${n}`, content: `old output ${n} ` + 'x'.repeat(22000) }));
+  const command = 'cd /workspace/context-chunks-mcp && git remote add origin git@github.com:trained-assist/context-chunks-mcp.git 2>/dev/null || git remote set-url origin git@github.com:trained-assist/context-chunks-mcp.git';
+  const active = [
+    { role: 'user', content: 'Push this script to main and give me the link.' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'set-origin', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } }] },
+    { role: 'tool', tool_call_id: 'set-origin', content: '(no output)' },
+    { role: 'assistant', content: '' },
+  ];
+  const original = { model: 'service', tools: [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }], messages: [
+    { role: 'system', content: "Complete the user's task." },
+    ...old, ...active,
+  ] };
+  const result = compressRequest(original, { targetRatio: 0.25 });
+  assert.ok(result.compressed);
+  assert.ok(result.stats.savings >= 0.75);
+  assert.deepEqual(result.request.messages.slice(-active.length), active);
+  assert.deepEqual(result.request.tools[0], original.tools[0]);
+  assert.ok(result.request.messages.slice(0, -active.length).some(m => typeof m.content === 'string' && m.content.includes('context ref=')));
+  assert.match(result.request.messages[0].content, /selected as relevant/);
+});
+
+test('a selected older user request keeps its full tool command and answer', () => {
+  const command = 'git remote add origin git@github.com:trained-assist/context-chunks-mcp.git';
+  const messages = [
+    { role: 'system', content: 'Complete the current task.' },
+    { role: 'tool', tool_call_id: 'large-old-output', content: 'irrelevant output '.repeat(20000) },
+    { role: 'user', content: 'Push this repository to main and give me the GitHub link.' },
+    { role: 'assistant', content: 'I will configure the remote and push it.' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'set-origin', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } }] },
+    { role: 'tool', tool_call_id: 'set-origin', content: '(no output)' },
+    { role: 'assistant', content: 'The origin remote is configured.' },
+    { role: 'user', content: 'Unrelated old topic.' },
+    { role: 'user', content: 'Can you finish pushing this repository and give me its link?' },
+  ];
+  const result = compressRequest({ model: 'service', messages }, { targetRatio: 0.4 });
+  const start = messages.findIndex(m => m.role === 'user');
+  const retainedStart = result.request.messages.findIndex(m => m.role === 'user' && m.content === messages[start].content);
+  const retainedEnd = result.request.messages.findIndex((m, i) => i > retainedStart && m.role === 'user');
+  const originalEnd = messages.findIndex((m, i) => i > start && m.role === 'user');
+  assert.ok(result.history.selected.some(m => m.sequence === start));
+  assert.deepEqual(result.request.messages.slice(retainedStart, retainedEnd), messages.slice(start, originalEnd));
+  assert.ok(result.request.messages.find(m => m.tool_call_id === 'large-old-output').content.includes('context ref='));
+  assert.ok(result.stats.savings >= 0.6);
 });
 
 for (const bytes of [349000, 350000, 350001, 351000]) test(`entry boundary ${bytes} bytes of full request`, async () => {
