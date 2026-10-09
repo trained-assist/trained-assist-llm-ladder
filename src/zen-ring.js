@@ -86,7 +86,6 @@ export const ZEN_MODEL_CONTEXTS = Object.freeze({
   'nemotron-3.5-lightning-free': 250_000,
   // longcat-2.5-preview-free и ling-3.1-flash-free в карте НЕТ: окна неизвестны, поэтому их
   // не отбрасываем — неизвестность не должна выкидывать модель из гонки.
-
 });
 
 // Окно модели в токенах или null (неизвестно / не подтверждено замером).
