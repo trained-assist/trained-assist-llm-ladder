@@ -421,7 +421,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     const probeConcurrency = Math.min(Math.max(Number(body.probe_concurrency) || 4, 1), 16);
     try {
       const run = await collectFreeModels(env, db, {
-        fetchImpl, config, probe, probeLimit, probeConcurrency,
+        fetchImpl, config, probe, probeLimit, probeConcurrency, benchmarkGo: !dryRun,
         ...(dryRun ? { write: false } : {}),
       });
       // dry_run: the diff is computed against the table as it stands — nothing was written.
@@ -692,7 +692,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
     if (!body || !Array.isArray(body.messages) || !body.messages.length) return oaError(400, 'messages required', 'invalid_request_error');
-    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ...chat } = body;
+    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ladder_context_compression: contextCompression, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     const conversation = await conversationKey(request, body, env);
     // OpenRouter app attribution (#33): which of our tools eats this call, for the OpenRouter
@@ -708,6 +708,8 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
+      ...(contextCompression === false || /^(0|false|off)$/i.test(request.headers.get('x-ladder-context-compression') || '')
+        ? { contextCompression: { enabled: false } } : {}),
       conversation, appSlug, appTitle, inputBytes: new TextEncoder().encode(JSON.stringify(body)).length,
     });
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   collectCatalogs, planProbes, probeRows, diffRows, collectFreeModels,
   upsertStatement, goneStatement, readFreeModels, markdownReport, summarizeRun, PROVIDERS,
+  benchmarkGoModel, goBenchEligible, goBenchOrder,
 } from '../src/free-models.js';
 import { readPool } from '../src/ladder.js';
 import config from '../config/ladders.json' with { type: 'json' };
@@ -244,6 +245,45 @@ test('probeRows: a provider with no key is skipped, not failed', async () => {
   assert.equal(probes.get('openrouter/x:free').probe_reason, 'no key');
 });
 
+test('benchmarkGoModel: checks actual Go responses by size; empty and punctuation answers fail', async () => {
+  const seen = [];
+  const result = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/step-5-preview-free' }, ENV, {
+    now: 1234,
+    fetchImpl: async (url, init) => {
+      seen.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ready' } }] }), { status: 200 });
+    },
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.benchmark.measured_at, 1234);
+  assert.equal(seen.length, 6, 'two actual completions per context tier');
+  assert.ok(seen.every((s) => s.url === 'https://opencode.ai/zen/go/v1/chat/completions'));
+  assert.ok(seen.every((s) => s.headers.Authorization === 'Bearer go-key-1'));
+  assert.ok(seen.every((s) => s.headers['x-opencode-session']));
+  assert.ok(seen.every((s) => s.body.max_tokens === 1500));
+  assert.deepEqual(Object.keys(result.benchmark.tiers), ['small', 'medium', 'large']);
+  assert.ok(Object.values(result.benchmark.tiers).every((t) => t.attempts === 2 && t.successes === 2));
+  assert.equal(goBenchEligible(result.benchmark, 'large'), true);
+  const partial = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/step-5-preview-free' }, ENV, {
+    fetchImpl: async (_url, init) => {
+      const size = JSON.parse(init.body).messages[1].content.length;
+      return new Response(JSON.stringify({ choices: [{ message: { content: size > 2000 ? '.' : 'ready' } }] }), { status: 200 });
+    },
+  });
+  assert.equal(partial.status, 'ready', 'pass criteria apply per size, not to all sizes at once');
+  assert.equal(goBenchEligible(partial.benchmark, 'small'), true);
+  assert.equal(goBenchEligible(partial.benchmark, 'large'), false);
+});
+
+test('goBenchOrder: only ready, available candidates with two successes in the selected tier', () => {
+  const rows = [
+    { model_id: 'opencode-go/incumbent-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 2, p50_ms: 500 }, large: { attempts: 2, successes: 2, p50_ms: 800 } } } },
+    { model_id: 'opencode-go/new-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 2, p50_ms: 250 }, large: { attempts: 2, successes: 1, p50_ms: 300 } } } },
+  ];
+  assert.deepEqual(goBenchOrder(rows, 'small'), ['opencode-go/new-free', 'opencode-go/incumbent-free']);
+  assert.deepEqual(goBenchOrder(rows, 'large'), ['opencode-go/incumbent-free']);
+});
+
 // ── Diff ──────────────────────────────────────────────────────────────────────────
 
 const ROW = (over) => ({
@@ -349,6 +389,18 @@ test('collectFreeModels: probe budget is respected', async () => {
   });
   assert.equal(run.probed, 2);
   assert.equal(Object.keys(run.probes).length, 2);
+});
+
+test('collectFreeModels: benchmarks an unseen Go free model and persists results automatically', async () => {
+  const db = fakeD1();
+  const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, now: 5000 });
+  assert.equal(run.benchmarks.length, 1);
+  assert.equal(run.benchmarks[0].model_id, 'opencode-go/space-bunny-free');
+  assert.equal(run.benchmarks[0].status, 'ready');
+  const saved = db._stmts.find((s) => s.sql.startsWith('INSERT INTO free_model_benchmarks'));
+  assert.ok(saved);
+  assert.equal(saved.params[0], 'opencode-go/space-bunny-free');
+  assert.equal(saved.params[1], 'ready');
 });
 
 test('readFreeModels: reads the whole inventory ordered by provider, model', async () => {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS, ringGuardRetry } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS, ringGuardRetry, orderBenchmarkedGoRungs } from '../src/ladder.js';
 import { estimateTokens } from '../src/size-policy.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
@@ -22,6 +22,17 @@ function zenDbStub() {
 }
 
 const env = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b', OPENROUTER_API_KEY: 'or_key', ZEN_DB: zenDbStub() };
+
+test('orderBenchmarkedGoRungs: context-specific speed chooses first model and retains fallback', () => {
+  const rungs = ['opencode-go/incumbent-free', 'openrouter/free'];
+  const rows = [
+    { model_id: 'opencode-go/incumbent-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 2, p50_ms: 400 }, large: { attempts: 2, successes: 2, p50_ms: 500 } } } },
+    { model_id: 'opencode-go/new-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 2, p50_ms: 200 }, large: { attempts: 2, successes: 2, p50_ms: 900 } } } },
+    { model_id: 'opencode-go/flaky-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 1, p50_ms: 100 } } } },
+  ];
+  assert.deepEqual(orderBenchmarkedGoRungs(rungs, rows, 500), ['opencode-go/new-free', 'opencode-go/incumbent-free', 'openrouter/free']);
+  assert.deepEqual(orderBenchmarkedGoRungs(rungs, rows, 20_000), ['opencode-go/incumbent-free', 'opencode-go/new-free', 'openrouter/free']);
+});
 
 // Behaviour tests run against a config with the zen-rings head removed: those rungs are cold in
 // tests (no D1 rows, no workers), so every call would failover — and the GOLADDER[0]/GOFREE[0]

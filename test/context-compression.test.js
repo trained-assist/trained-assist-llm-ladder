@@ -408,3 +408,28 @@ test('server kill switch bypasses compression without trusting a caller request 
   const result = await run(sized(351000), options(mock, { contextCompression: spy, env: { ...env, CONTEXT_COMPRESSION_ENABLED: 'false' } }));
   assert.equal(result.content, 'original mode'); assert.equal(spy.applications.length, 0);
 });
+
+test('HTTP caller can opt into the standard ladder without either compression threshold', async () => {
+  for (const scenario of [
+    { bytes: 351000, failFree: false, expectedModel: free, bodyFlag: false },
+    { bytes: 100000, failFree: true, expectedModel: paid, headerFlag: 'off' },
+  ]) {
+    const body = sized(scenario.bytes, scenario.bodyFlag === false ? { ladder_context_compression: false } : {});
+    const mock = mockFetch(({ body: outgoing }) => {
+      assert.equal(outgoing.ladder_context_compression, undefined, 'control must not reach the provider');
+      if (scenario.failFree && outgoing.model === free.split('/')[1]) return { status: 503 };
+      return { content: 'standard ladder response' };
+    });
+    const response = await handle(new Request('https://test/v1/chat/completions', {
+      method: 'POST', headers: {
+        authorization: 'Bearer test-token',
+        'content-type': 'application/json',
+        ...(scenario.headerFlag ? { 'x-ladder-context-compression': scenario.headerFlag } : {}),
+      }, body: JSON.stringify(body),
+    }), { ...env, LADDER_TOKEN: 'test-token' }, { store: memoryStore(), fetchImpl: mock.fetchImpl });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).choices[0].message.content, 'standard ladder response');
+    assert.equal(mock.calls.at(-1).body.model, scenario.expectedModel.split('/')[1]);
+    assert.equal(response.headers.get('x-ladder-compression'), null);
+  }
+});
