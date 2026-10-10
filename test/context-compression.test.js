@@ -42,7 +42,7 @@ test('vendored core matches its pinned upstream manifest exactly', () => {
   const base = new URL('../vendor/context-chunks-mcp/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('manifest.json', base)));
   assert.equal(manifest.repository, 'trained-assist/context-chunks-mcp');
-  assert.equal(manifest.ref, 'd179ba5451122c2dc40405ea2668158587a65079');
+  assert.equal(manifest.ref, '06804e05c8fe4ce4dace6d6deed43cc33ad7d132');
   for (const [path, hash] of Object.entries(manifest.files)) assert.equal(createHash('sha256').update(readFileSync(new URL(path, base))).digest('hex'), hash, path);
 });
 
@@ -109,7 +109,10 @@ test('75% savings is a soft target: protected context below the target still pro
 });
 
 test('static CI fixture saves at least 75% including contract overhead and preserves tool pairs', () => {
-  const messages = [{ role: 'system', content: 'Investigate the reported failures and retain the evidence.' }];
+  const messages = [
+    { role: 'system', content: 'Investigate the reported failures and retain the evidence.' },
+    { role: 'assistant', content: 'Unrelated old archive. ' + 'z'.repeat(1_200_000) },
+  ];
   for (let n = 0; n < 24; n++) {
     messages.push({ role: 'user', content: `Inspect batch ${n} of build results.` });
     messages.push({ role: 'assistant', content: null, tool_calls: [{ id: `batch-${n}`, type: 'function', function: { name: 'read_build', arguments: JSON.stringify({ batch: n }) } }] });
@@ -146,6 +149,20 @@ test('the latest user turn preserves its full bash command and completed result'
   assert.deepEqual(result.request.tools[0], original.tools[0]);
   assert.ok(result.request.messages.slice(0, -active.length).some(m => typeof m.content === 'string' && m.content.includes('context ref=')));
   assert.match(result.request.messages[0].content, /selected as relevant/);
+});
+
+test('compression always keeps the latest five user messages verbatim', () => {
+  const users = Array.from({ length: 12 }, (_, i) => ({ role: 'user', content: `Recent request ${i}: ` + 'detail '.repeat(80) }));
+  const original = { model: 'service', messages: [
+    { role: 'system', content: 'Follow the conversation.' },
+    { role: 'tool', tool_call_id: 'old-output', content: 'unrelated tool output '.repeat(15000) },
+    ...users,
+  ] };
+  const result = compressRequest(original, { targetRatio: 0.4 });
+  assert.ok(result.compressed);
+  for (const user of users.slice(-5)) assert.ok(result.request.messages.some(m => m.role === 'user' && m.content === user.content));
+  assert.deepEqual(result.history.selected.slice(-4).map(m => m.sequence), [9, 10, 11, 12]);
+  assert.ok(result.request.messages.find(m => m.tool_call_id === 'old-output').content.includes('context ref='));
 });
 
 test('a selected older user request keeps its full tool command and answer', () => {
