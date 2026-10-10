@@ -18,6 +18,86 @@
 // free tier is a limit, not a disappearance.
 
 import { readPool } from './ladder.js';
+import { isEmptyAnswer } from './answer-guard.js';
+
+export const GO_BENCH_TIERS = [
+  { name: 'small', bytes: 1_024 },
+  { name: 'medium', bytes: 32_768 },
+  { name: 'large', bytes: 131_072 },
+];
+
+export function goBenchEligible(benchmark, tier) {
+  const b = typeof benchmark === 'string' ? JSON.parse(benchmark) : benchmark;
+  const s = b?.tiers?.[tier];
+  return !!s && s.attempts >= 2 && s.successes >= 2 && Number.isFinite(s.p50_ms);
+}
+
+export function goBenchOrder(rows, tier) {
+  return [...rows]
+    .filter((r) => r.available && r.bench_status === 'ready' && goBenchEligible(r.benchmark, tier))
+    .sort((a, b) => a.benchmark.tiers[tier].p50_ms - b.benchmark.tiers[tier].p50_ms || a.model_id.localeCompare(b.model_id))
+    .map((r) => r.model_id);
+}
+
+function goBenchMessages(bytes) {
+  const unit = 'Review this project request and identify the key requirement. ';
+  return [
+    { role: 'system', content: 'Answer the final user request in one short sentence.' },
+    { role: 'user', content: unit.repeat(Math.max(1, Math.floor(bytes / unit.length))) },
+    { role: 'user', content: 'Reply with exactly: ready' },
+  ];
+}
+
+export async function benchmarkGoModel(row, env, { fetchImpl = fetch, timeoutMs = 45_000, now = Date.now() } = {}) {
+  if (row.provider !== 'opencode-go' || !String(row.model_id).endsWith('-free')) return null;
+  const req = probeRequest(row.provider, row.model_id, env);
+  if (req.skip) return { model_id: row.model_id, status: 'skipped', reason: req.skip, benchmark: null };
+  const tiers = {};
+  for (const tier of GO_BENCH_TIERS) {
+    const times = [];
+    let successes = 0;
+    let lastError = null;
+    for (let i = 0; i < 2; i++) {
+      const started = Date.now();
+      try {
+        const body = { ...req.body, max_tokens: 1500, messages: goBenchMessages(tier.bytes) };
+        const res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+        const text = await res.text().catch(() => '');
+        if (res.body) await res.body.cancel().catch(() => {});
+        let payload = null;
+        try { payload = JSON.parse(text); } catch { /* counted as a failed response */ }
+        const content = String(payload?.choices?.[0]?.message?.content ?? '').trim();
+        if (res.ok && !isEmptyAnswer(content)) { successes++; times.push(Date.now() - started); }
+        else lastError = `http_${res.status}${isEmptyAnswer(content) ? ': empty answer' : ''}`;
+      } catch (e) { lastError = String((e && e.message) || e).slice(0, 120); }
+    }
+    times.sort((a, b) => a - b);
+    const p50 = !times.length ? null : times.length === 1 ? times[0] : (times[0] + times[1]) / 2;
+    tiers[tier.name] = { attempts: 2, successes, p50_ms: p50, last_error: lastError };
+  }
+  const eligible = GO_BENCH_TIERS.some((t) => goBenchEligible({ tiers }, t.name));
+  return { model_id: row.model_id, status: eligible ? 'ready' : 'failed', benchmark: { version: 1, measured_at: now, tiers } };
+}
+
+export async function readGoBenchmarks(db) {
+  const { results = [] } = await db.prepare(
+    'SELECT b.model_id, b.bench_status, b.benchmark, b.measured_at, f.available FROM free_model_benchmarks b '
+      + 'JOIN free_models f ON f.provider = b.provider AND f.model_id = b.model_id '
+      + "WHERE b.provider = 'opencode-go'",
+  ).all();
+  return results.map((r) => ({ ...r, benchmark: typeof r.benchmark === 'string' ? JSON.parse(r.benchmark) : r.benchmark, available: !!r.available }));
+}
+
+export const UPSERT_GO_BENCH_SQL = `INSERT INTO free_model_benchmarks
+  (provider, model_id, bench_status, benchmark, measured_at)
+  VALUES ('opencode-go', ?1, ?2, ?3, ?4)
+  ON CONFLICT(provider, model_id) DO UPDATE SET
+    bench_status = excluded.bench_status, benchmark = excluded.benchmark, measured_at = excluded.measured_at`;
+
+export async function writeGoBenchmark(db, result) {
+  await db.prepare(UPSERT_GO_BENCH_SQL).bind(result.model_id, result.status,
+    result.benchmark ? JSON.stringify(result.benchmark) : null, result.benchmark?.measured_at ?? Date.now()).run();
+}
 
 export const OPENROUTER_CATALOG_URL = 'https://openrouter.ai/api/v1/models';
 // The zen catalog is fetched DIRECTLY from opencode.ai, not through the GCP relay: the relay
@@ -368,7 +448,7 @@ export async function readFreeModels(db) {
 // boundary in the handler). Returns everything the report needs.
 export async function collectFreeModels(env, db, {
   fetchImpl = fetch, timeoutMs = 10_000, probe = true, probeLimit = 12, probeConcurrency = 4,
-  config, write = true, now = Date.now(),
+  config, write = true, benchmarkGo = false, now = Date.now(),
 } = {}) {
   const prevRows = await readFreeModels(db);
   const prev = new Map(prevRows.map((r) => [r.model_id, r]));
@@ -382,6 +462,22 @@ export async function collectFreeModels(env, db, {
   for (const row of rows) {
     const p = probes.get(row.model_id);
     if (p) { row.probe_status = p.probe_status; row.probe_reason = p.probe_reason ?? null; row.probed_at = p.probed_at; }
+  }
+
+  const benchmarks = [];
+  if (benchmarkGo && write) {
+    const known = new Map((await readGoBenchmarks(db)).map((r) => [r.model_id, r]));
+    const targets = rows.filter((r) => {
+      if (r.provider !== 'opencode-go' || !r.model_id.endsWith('-free')) return false;
+      const old = known.get(r.model_id);
+      return !old || old.bench_status !== 'ready' || now - Number(old.measured_at || 0) > 86_400_000;
+    }).slice(0, 3);
+    for (const row of targets) {
+      const result = await benchmarkGoModel(row, env, { fetchImpl, now });
+      if (!result) continue;
+      await writeGoBenchmark(db, result);
+      benchmarks.push(result);
+    }
   }
 
   const statements = rows.map((r) => upsertStatement({ ...r, first_seen: prev.get(r.model_id)?.first_seen ?? now }, now));
@@ -406,6 +502,7 @@ export async function collectFreeModels(env, db, {
     collected: rows.length,
     probed: probeTargets.length,
     probes: Object.fromEntries([...probes.entries()].map(([k, v]) => [k, v])),
+    benchmarks,
     written,
     diff,
     rows,
@@ -436,6 +533,7 @@ export function summarizeRun(run) {
     collected: run.collected,
     by_provider: byProvider,
     probed: run.probed,
+    benchmarked: run.benchmarks?.length || 0,
     probe_counts: probeCounts,
     written: run.written,
     appeared: run.diff.appeared.length,
@@ -453,7 +551,15 @@ export function markdownReport(run) {
   L.push('');
   const prov = run.providers.map((p) => `${p.ok ? '' : '⚠ '}${p.provider} ${p.count}${p.ok ? '' : ` (${p.error})`}`).join(' · ');
   L.push(`**${s.collected} free models** — ${prov}`);
-  L.push(`probed ${s.probed} · written ${s.written} rows · appeared ${s.appeared} · gone ${s.gone} · changed ${s.changed}`);
+  L.push(`probed ${s.probed} · Go benchmarks ${s.benchmarked} · written ${s.written} rows · appeared ${s.appeared} · gone ${s.gone} · changed ${s.changed}`);
+  if (run.benchmarks?.length) {
+    L.push('', '### Go free-model benchmarks', '');
+    for (const b of run.benchmarks) {
+      const tiers = Object.entries(b.benchmark?.tiers || {}).map(([name, value]) =>
+        `${name}: ${value.successes}/${value.attempts}, ${value.p50_ms === null ? '—' : `${Math.round(value.p50_ms)}ms`}`);
+      L.push(`- \`${b.model_id}\` — **${b.status}**${tiers.length ? ` · ${tiers.join(' · ')}` : ''}`);
+    }
+  }
   const pc = Object.entries(s.probe_counts).map(([k, v]) => `${k} ${v}`).join(', ');
   if (pc) L.push(`probe: ${pc}`);
   if (s.appeared) {
