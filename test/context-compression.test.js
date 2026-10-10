@@ -42,7 +42,7 @@ test('vendored core matches its pinned upstream manifest exactly', () => {
   const base = new URL('../vendor/context-chunks-mcp/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('manifest.json', base)));
   assert.equal(manifest.repository, 'trained-assist/context-chunks-mcp');
-  assert.equal(manifest.ref, '29c7664742f890afdfdad9ae61709984a06c1096');
+  assert.equal(manifest.ref, '06804e05c8fe4ce4dace6d6deed43cc33ad7d132');
   for (const [path, hash] of Object.entries(manifest.files)) assert.equal(createHash('sha256').update(readFileSync(new URL(path, base))).digest('hex'), hash, path);
 });
 
@@ -109,7 +109,10 @@ test('75% savings is a soft target: protected context below the target still pro
 });
 
 test('static CI fixture saves at least 75% including contract overhead and preserves tool pairs', () => {
-  const messages = [{ role: 'system', content: 'Investigate the reported failures and retain the evidence.' }];
+  const messages = [
+    { role: 'system', content: 'Investigate the reported failures and retain the evidence.' },
+    { role: 'assistant', content: 'Unrelated old archive. ' + 'z'.repeat(1_200_000) },
+  ];
   for (let n = 0; n < 24; n++) {
     messages.push({ role: 'user', content: `Inspect batch ${n} of build results.` });
     messages.push({ role: 'assistant', content: null, tool_calls: [{ id: `batch-${n}`, type: 'function', function: { name: 'read_build', arguments: JSON.stringify({ batch: n }) } }] });
@@ -124,6 +127,66 @@ test('static CI fixture saves at least 75% including contract overhead and prese
     assert.equal(prepared.messages.filter(m => m.role === 'tool').length, 24);
     assert.ok(prepared.messages.some(m => m.content === messages.at(-1).content));
   } finally { session.close(); }
+});
+
+test('the latest user turn preserves its full bash command and completed result', () => {
+  const old = Array.from({ length: 30 }, (_, n) => ({ role: 'tool', tool_call_id: `old-${n}`, content: `old output ${n} ` + 'x'.repeat(22000) }));
+  const command = 'cd /workspace/context-chunks-mcp && git remote add origin git@github.com:trained-assist/context-chunks-mcp.git 2>/dev/null || git remote set-url origin git@github.com:trained-assist/context-chunks-mcp.git';
+  const active = [
+    { role: 'user', content: 'Push this script to main and give me the link.' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'set-origin', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } }] },
+    { role: 'tool', tool_call_id: 'set-origin', content: '(no output)' },
+    { role: 'assistant', content: '' },
+  ];
+  const original = { model: 'service', tools: [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }], messages: [
+    { role: 'system', content: "Complete the user's task." },
+    ...old, ...active,
+  ] };
+  const result = compressRequest(original, { targetRatio: 0.25 });
+  assert.ok(result.compressed);
+  assert.ok(result.stats.savings >= 0.75);
+  assert.deepEqual(result.request.messages.slice(-active.length), active);
+  assert.deepEqual(result.request.tools[0], original.tools[0]);
+  assert.ok(result.request.messages.slice(0, -active.length).some(m => typeof m.content === 'string' && m.content.includes('context ref=')));
+  assert.match(result.request.messages[0].content, /selected as relevant/);
+});
+
+test('compression always keeps the latest five user messages verbatim', () => {
+  const users = Array.from({ length: 12 }, (_, i) => ({ role: 'user', content: `Recent request ${i}: ` + 'detail '.repeat(80) }));
+  const original = { model: 'service', messages: [
+    { role: 'system', content: 'Follow the conversation.' },
+    { role: 'tool', tool_call_id: 'old-output', content: 'unrelated tool output '.repeat(15000) },
+    ...users,
+  ] };
+  const result = compressRequest(original, { targetRatio: 0.4 });
+  assert.ok(result.compressed);
+  for (const user of users.slice(-5)) assert.ok(result.request.messages.some(m => m.role === 'user' && m.content === user.content));
+  assert.deepEqual(result.history.selected.slice(-4).map(m => m.sequence), [9, 10, 11, 12]);
+  assert.ok(result.request.messages.find(m => m.tool_call_id === 'old-output').content.includes('context ref='));
+});
+
+test('a selected older user request keeps its full tool command and answer', () => {
+  const command = 'git remote add origin git@github.com:trained-assist/context-chunks-mcp.git';
+  const messages = [
+    { role: 'system', content: 'Complete the current task.' },
+    { role: 'tool', tool_call_id: 'large-old-output', content: 'irrelevant output '.repeat(20000) },
+    { role: 'user', content: 'Push this repository to main and give me the GitHub link.' },
+    { role: 'assistant', content: 'I will configure the remote and push it.' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'set-origin', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } }] },
+    { role: 'tool', tool_call_id: 'set-origin', content: '(no output)' },
+    { role: 'assistant', content: 'The origin remote is configured.' },
+    { role: 'user', content: 'Unrelated old topic.' },
+    { role: 'user', content: 'Can you finish pushing this repository and give me its link?' },
+  ];
+  const result = compressRequest({ model: 'service', messages }, { targetRatio: 0.4 });
+  const start = messages.findIndex(m => m.role === 'user');
+  const retainedStart = result.request.messages.findIndex(m => m.role === 'user' && m.content === messages[start].content);
+  const retainedEnd = result.request.messages.findIndex((m, i) => i > retainedStart && m.role === 'user');
+  const originalEnd = messages.findIndex((m, i) => i > start && m.role === 'user');
+  assert.ok(result.history.selected.some(m => m.sequence === start));
+  assert.deepEqual(result.request.messages.slice(retainedStart, retainedEnd), messages.slice(start, originalEnd));
+  assert.ok(result.request.messages.find(m => m.tool_call_id === 'large-old-output').content.includes('context ref='));
+  assert.ok(result.stats.savings >= 0.6);
 });
 
 for (const bytes of [349000, 350000, 350001, 351000]) test(`entry boundary ${bytes} bytes of full request`, async () => {
@@ -193,13 +256,17 @@ test('unknown ref is explicit and independent runs cannot read previous refs', a
   assert.equal((await run(sized(400000), options(second))).content, 'second');
 });
 
-test('contract failure after retrieval gets exactly one small Lfix on the same winner', async () => {
+test('contract repair after retrieval keeps the full conversation on the same winner', async () => {
   const mock = mockFetch(({ body }, n) => {
     if (n === 1) return { content: JSON.stringify({ need_refs: [firstRef(body)] }) };
     if (n === 2) return { content: 'not JSON' };
     const repair = JSON.parse(body.messages.at(-1).content);
     assert.match(repair.error, /valid JSON/); assert.equal(repair.previous_output.content, 'not JSON');
-    assert.equal(body.messages.length, 2); assert.ok(requestBytes(body) < 5000);
+    assert.ok(body.messages.length > 2);
+    assert.ok(body.messages.some(m => m.role === 'user' && m.content.includes('Check the earlier result.')));
+    assert.ok(body.messages.some(m => typeof m.content === 'string' && m.content.includes('context ref=')));
+    assert.deepEqual(body.tools, []);
+    assert.ok(requestBytes(body) > 5000);
     return { content: '{"answer":"fixed"}' };
   });
   const result = await run(sized(400000), options(mock));
@@ -336,7 +403,7 @@ test('compression collision fails explicitly before spending a provider attempt'
   assert.equal(mock.calls.length, 0);
 });
 
-test('server kill switch bypasses compression', async () => {
+test('server kill switch bypasses compression without trusting a caller request flag', async () => {
   const spy = spyCompression(), mock = mockFetch(() => ({ content: 'original mode' }));
   const result = await run(sized(351000), options(mock, { contextCompression: spy, env: { ...env, CONTEXT_COMPRESSION_ENABLED: 'false' } }));
   assert.equal(result.content, 'original mode'); assert.equal(spy.applications.length, 0);
@@ -354,7 +421,11 @@ test('HTTP caller can opt into the standard ladder without either compression th
       return { content: 'standard ladder response' };
     });
     const response = await handle(new Request('https://test/v1/chat/completions', {
-      method: 'POST', headers: { authorization: 'Bearer test-token', 'content-type': 'application/json', ...(scenario.headerFlag ? { 'x-ladder-context-compression': scenario.headerFlag } : {}) }, body: JSON.stringify(body),
+      method: 'POST', headers: {
+        authorization: 'Bearer test-token',
+        'content-type': 'application/json',
+        ...(scenario.headerFlag ? { 'x-ladder-context-compression': scenario.headerFlag } : {}),
+      }, body: JSON.stringify(body),
     }), { ...env, LADDER_TOKEN: 'test-token' }, { store: memoryStore(), fetchImpl: mock.fetchImpl });
     assert.equal(response.status, 200);
     assert.equal((await response.json()).choices[0].message.content, 'standard ladder response');
