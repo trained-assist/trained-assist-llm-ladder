@@ -153,6 +153,20 @@ comma-separated list of additional bearer tokens. Existing `LADDER_TOKEN` and
 `LADDER_TOKEN_PREVIOUS` remain valid while additional tokens are added or rotated.
 Store each issued value in the consumer's secret store; never expose this list through
 an API response or logs.
+For independent additions without rewriting that write-only list, store each credential
+in its own `LADDER_CLIENT_TOKEN_01` … `LADDER_CLIENT_TOKEN_16` Worker secret. Keep the
+slot-to-client mapping in the operator's secret inventory; replacing or deleting one
+slot does not change other credentials.
+
+To revoke individual credentials without replacing the write-only `LADDER_TOKENS`
+secret, set `LADDER_REVOKED_TOKEN_HASHES` to a comma-separated list of lowercase
+SHA-256 hashes of the raw bearer tokens. The Worker rejects a matching token before
+checking the accepted-token lists. Generate a digest without printing the token with
+`printf '%s' "$TOKEN" | shasum -a 256`; keep the hash list in Cloudflare secret storage.
+Removing one named client-token slot revokes that client after the secret update; the hash
+list supports immediate revocation for credentials stored elsewhere.
+The isolated auth probe setup and its scope are documented in
+[`docs/auth-revocation-sandbox.md`](docs/auth-revocation-sandbox.md).
 
 | Method | Path | |
 |---|---|---|

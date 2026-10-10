@@ -1,0 +1,7 @@
+name = "trained-assist-llm-ladder-auth-sandbox"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+# Deliberately isolated auth probe: no production routes, durable objects,
+# databases, queues, or scheduled jobs are bound in this Worker.
