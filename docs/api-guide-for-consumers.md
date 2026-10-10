@@ -118,6 +118,7 @@ x-ladder-app-title: My App    # человекочитаемое имя (нео�
 
 - `ladder_rung` и `ladder_conversation` **взаимоисключающи** — пин делает выбор за вас.
 - Для тестов из OpenCode можно передать `"ladder_context_compression": false` в теле запроса или настроить заголовок `x-ladder-context-compression: off`; оба способа отключают сжатие только для этого вызова, а управляющий флаг не уходит провайдеру. Серверный `CONTEXT_COMPRESSION_ENABLED=false` по-прежнему отключает сжатие глобально.
+- В `opencode.json` заголовок задаётся в `provider.ladder.options.headers`: `"headers": { "x-ladder-context-compression": "off" }`. Если нужен переключатель без изменения основного провайдера, добавь отдельный OpenCode provider с тем же `baseURL` и этой настройкой.
 - При `stream: true` после первого токена **фейловера нет**: ранг закреплён, дальше — только он.
 - `ladder_total_timeout_ms` режет проход по лестнице: потрачен весь бюджет → в `attempts`
   появляется `skipped: time budget spent`, и вызов завершается.
