@@ -1,10 +1,10 @@
 {
   "repository": "trained-assist/context-chunks-mcp",
-  "ref": "d179ba5451122c2dc40405ea2668158587a65079",
+  "ref": "06804e05c8fe4ce4dace6d6deed43cc33ad7d132",
   "files": {
     "src/core.js": "1206b94c5fa948452f25fe62bcf317893537ab9fe1deea1b4888e9b38daf8cd0",
     "src/context-snapshot.js": "7cce8afeafc2ca8833919a5be7304104724c06adabf053899a5d2293ac81dced",
-    "src/history-context.js": "175da6195cd15d9c1b0be9d57ad7570c83c30a4f27fa23754c15c01354b1ebd1",
+    "src/history-context.js": "376cb7852176d4df8c981e599dc0b752ddd8e91ae59aefa3d357f98a0650b5bc",
     "src/local-embedder.js": "be49e42db6e000ca4ac64f4859363c33d297f03c6fc11fe8c53d16b1bbd627df",
     "src/history-semantic-rank.js": "74b7aaab058b9dec566531ab3a260e57ecae487d05d9124da3c0fb0122731ad8",
     "src/compress-request.js": "559a9688f066977a0a1a03167980c36e66bdf8b1574a67695a88f1d68224df5c",
