@@ -205,7 +205,7 @@ opaque and bound to the rung, provider credential and stable conversation ID. Se
 no scope. Zen ring attempts get no scope because the backing worker cache cannot be identified
 reliably; they always use default `messages`. A changed key or scope also selects the default.
 
-Only update a cache mask after a successful response with cache usage. A reported scope or a
+Only update a cache mask after a successful response with usable token usage. A reported scope or a
 `masked` selection alone is not proof of a cache hit, and some streams contain no usage. The
 caller owns projection and ledger policy; Ladder only selects the supplied version per attempt.
 
