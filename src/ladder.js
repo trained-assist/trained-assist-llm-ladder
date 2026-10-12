@@ -77,6 +77,7 @@ export function minTokensFor(model) {
 }
 
 export const DEFAULT_LADDER = 'service'; // legacy alias 'deepseek' resolves here (issue #49)
+export const MAX_CACHE_VARIANT_BYTES = 2_000_000;
 const DEFAULT_ROLE = 'build';
 // OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
 // OpenRouter dashboard ("Application" cut), Title is its display name, hidden keeps our internal
@@ -131,6 +132,18 @@ const WEEKLY_LIMIT_RE = /limitName["'\s:]{0,6}weekly/i;
 
 export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+// Opaque cache-domain fingerprint. Different Go keys can have different prompt caches even
+// when they serve the same rung; Zen ring worker identity is not stable enough to attest.
+export async function cacheScopeFor(env, model, keyIndex, conversation) {
+  if (!conversation) return null;
+  const key = model.startsWith('opencode-go/') ? readPool(env)[keyIndex]
+    : model.startsWith('openrouter/') ? env.OPENROUTER_API_KEY : null;
+  if (!key) return null;
+  const bytes = new TextEncoder().encode(`ladder-cache-v1\0${model}\0${key}\0${conversation}`);
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return `v1_${Array.from(new Uint8Array(hash).slice(0, 16), b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
 // Remaining Go allowance per pool key: GET /zen/go/v1/usage returns ONE unified percent per
@@ -465,11 +478,11 @@ function attempt(env, model, body, keyIndex, opts) {
 // key rotation and the spare-key probe below behave exactly as they do for a single attempt —
 // a race that silently returned some other key's error would make #45/#69 reason about the wrong
 // account. Every raced key is recorded in `tried` so the probe cannot land on one already burnt.
-async function raceGoKeys(env, model, body, primaryKey, count, opts, poolSize, tried) {
+async function raceGoKeys(model, primaryKey, count, poolSize, tried, attemptKey) {
   const n = Math.max(2, Math.min(count, poolSize));
   const keys = [...new Set(Array.from({ length: n }, (_, i) => (primaryKey + i) % poolSize))];
   for (const k of keys) tried.add(k);
-  if (keys.length < 2) return attempt(env, model, body, primaryKey, opts);
+  if (keys.length < 2) return attemptKey(primaryKey);
   return new Promise((resolve) => {
     let pending = keys.length;
     let primaryResult = null;
@@ -481,7 +494,7 @@ async function raceGoKeys(env, model, body, primaryKey, count, opts, poolSize, t
     };
     for (const k of keys) {
       const isPrimary = k === primaryKey;
-      attempt(env, model, body, k, opts).then(
+      attemptKey(k).then(
         (r) => (r.ok ? settle({ ...r, winner: { model: r.winner?.model || model, keyIndex: k } }) : lose(r, isPrimary)),
         (e) => lose({ ok: false, error: String(e?.message || e) }, isPrimary),
       );
@@ -605,9 +618,16 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
  *                   {ok:false, status, error, attempts, pin?}>}
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null } = {}) {
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, cacheVariant = null } = {}) {
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
+  if (cacheVariant !== null && (
+    !cacheVariant || typeof cacheVariant !== 'object' || Array.isArray(cacheVariant)
+    || typeof cacheVariant.rung !== 'string' || !all.includes(cacheVariant.rung)
+    || !/^v1_[a-f0-9]{32}$/.test(cacheVariant.cache_scope)
+    || !Array.isArray(cacheVariant.messages) || !cacheVariant.messages.length
+    || new TextEncoder().encode(JSON.stringify(cacheVariant.messages)).length > MAX_CACHE_VARIANT_BYTES
+  )) return { ok: false, status: 400, error: 'invalid ladder_cache_variant', attempts: [] };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
   // through the worker without handing provider keys to the bench.
   if (pinRung) {
@@ -699,6 +719,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // clock, three keys burned, still no answer. Refusing BEFORE the attempt is pure win; the
   // attempt record stays so /v1/calls shows why the rung was not tried.
   const inputTokens = estimateTokens(body);
+  const selectedFor = async (model, key) => {
+    const cacheScope = await cacheScopeFor(env, model, key, conversation);
+    const candidate = cacheVariant?.rung === model && cacheVariant.cache_scope === cacheScope
+      ? { ...body, messages: cacheVariant.messages } : null;
+    const masked = !!candidate && fits(model, estimateTokens(candidate));
+    return { requestBody: masked ? candidate : body, cacheScope, cacheVariant: masked ? 'masked' : 'default' };
+  };
   const attempts = [];
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
@@ -709,12 +736,15 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
     // Skipped, not failed: the request is wrong for THIS rung, exactly like a context overflow —
     // recording a failure would health-skip a perfectly good model for every other caller.
-    if (!fits(model, inputTokens)) {
-      attempts.push({ model, outcome: 'skipped', error: `input ~${inputTokens}t above the rung ceiling` });
+    let key = keyIndex;
+    const firstSelection = await selectedFor(model, key);
+    const rungInputTokens = estimateTokens(firstSelection.requestBody);
+    if (!fits(model, rungInputTokens)) {
+      attempts.push({ model, outcome: 'skipped', error: `input ~${rungInputTokens}t above the rung ceiling` });
       continue;
     }
     const isFreeGo = isGo && model.endsWith('-free');
-    const plan = hedgePlan(inputTokens);
+    const plan = hedgePlan(rungInputTokens);
     const rungBudget = Math.min(timeoutMs, left);
     // A SMALL context gets a SMALL budget — but only on the fast rung. Cutting zen to 0.4× would
     // destroy exactly what it is there for: a <2K prompt needs ~20 s there (9.4 s of zen + ~10 s
@@ -723,18 +753,24 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       timeoutMs: isFreeGo ? Math.max(1_000, Math.round(rungBudget * plan.timeoutFactor)) : rungBudget,
       // Окно первого токена растёт с промптом (ttfbFactor): жирный запрос имеет префилл, и
       // фиксированные 15 с резали его до первого токена — см. замер и инцидент в size-policy.js.
-      ttfbMs: Math.min(ttfbMs * ttfbFactor(inputTokens), left),
+      ttfbMs: Math.min(ttfbMs * ttfbFactor(rungInputTokens), left),
       wantJson, fetchImpl, conversation, appSlug, appTitle,
     };
-    let key = keyIndex;
+    const attemptKey = async (attemptKeyIndex) => {
+      const selection = await selectedFor(model, attemptKeyIndex);
+      const tokens = estimateTokens(selection.requestBody);
+      if (!fits(model, tokens)) return { ok: false, skip: true, error: 'input above the rung ceiling' };
+      const result = await attempt(env, model, selection.requestBody, attemptKeyIndex, opts);
+      return { ...result, cacheScope: selection.cacheScope, cacheVariant: selection.cacheVariant };
+    };
     const tried = new Set([key]);
     // Гоним только бесплатный Go: у него четыре ключа, нет надбавки и нет дневной квоты, то есть
     // параллельный зов стоит только времени. Пин и стрим исключены — бенчмарк меряет один ранг,
     // а стрим закрепляет ранг на первом токене и отмена потерь тут отдельная история.
     const race = isFreeGo && plan.count > 1 && !pinRung && !body.stream && pool.length > 1;
     let r = race
-      ? await raceGoKeys(env, model, body, key, plan.count, opts, pool.length, tried)
-      : await attempt(env, model, body, key, opts);
+      ? await raceGoKeys(model, key, plan.count, pool.length, tried, attemptKey)
+      : await attemptKey(key);
     if (r.skip) continue;
     // #45 (owner «если ошибка то ретрай и далее потом по лесенке»): a guard-failed answer ALREADY
     // arrived — retrying the same rung costs a fraction of one ladder hop, while today's straight
@@ -746,7 +782,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (r.guard && !guardTried.has(model)) {
       guardTried.add(model);
       attempts.push({ model, outcome: 'guard-retry', key, error: r.error });
-      r = await attempt(env, model, body, key, opts);
+      r = await attemptKey(key);
     }
     while (!r.ok && isGo && !goParked) {
       const fault = keyFaultOf(r.error);
@@ -763,7 +799,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         key = rot.toIndex;
         keyIndex = key; // rotation is shared state: the rest of this call rides the spare key too
         tried.add(key);
-        r = await attempt(env, model, body, key, opts);
+        r = await attemptKey(key);
+        if (r.skip) break;
         continue;
       }
       // Not a key-level signal. Never probe for problems the spare key cannot change: a context
@@ -775,7 +812,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       attempts.push({ model, outcome: 'key-probe', key, error: r.error });
       key = spare;
       tried.add(key);
-      r = await attempt(env, model, body, key, opts);
+      r = await attemptKey(key);
+      if (r.skip) break;
       if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
     }
     // Sticky same-rung retry (S5): the pinned rung on a paid (non-Go) rung gets ONE more chance on
@@ -785,7 +823,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       if (cls === 'transient') {
         pinRetryLeft = 0;
         attempts.push({ model, outcome: 'pin-retry', key, error: r.error });
-        r = await attempt(env, model, body, key, opts);
+        r = await attemptKey(key);
       }
     }
     if (r.ok) {
@@ -794,7 +832,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       }
       attempts.push({ model, outcome: 'ok', key });
       await store.recordSuccess(model, conversation && !pinRung ? { pin: { pinKey: conversation, rung: model } } : {});
-      return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState };
+      return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState,
+        cacheScope: r.cacheScope, cacheVariant: r.cacheVariant };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     if (!goParked) {

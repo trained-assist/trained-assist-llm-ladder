@@ -692,7 +692,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
     if (!body || !Array.isArray(body.messages) || !body.messages.length) return oaError(400, 'messages required', 'invalid_request_error');
-    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ladder_context_compression: _legacyCompression, ...chat } = body;
+    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ladder_context_compression: _legacyCompression, ladder_cache_variant: cacheVariant, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     const conversation = await conversationKey(request, body, env);
     // OpenRouter app attribution (#33): which of our tools eats this call, for the OpenRouter
@@ -708,7 +708,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
-      conversation, appSlug, appTitle,
+      conversation, appSlug, appTitle, cacheVariant: cacheVariant ?? null,
     });
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
@@ -732,14 +732,20 @@ console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || nul
     if (waitUntil) waitUntil(traceWrite);
     else await traceWrite;
     if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
+    const cacheHeaders = {
+      ...(r.cacheScope ? { 'x-ladder-cache-scope': r.cacheScope } : {}),
+      'x-ladder-cache-variant': r.cacheVariant || 'default',
+    };
     if (r.stream) {
       return new Response(r.stream, { status: 200, headers: {
         'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache',
         'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin,
+        ...cacheHeaders,
       } });
     }
-    const out = { ...r.data, model: r.model };
-    return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin });
+    const out = { ...r.data, model: r.model, ladder_cache_scope: r.cacheScope || null,
+      ladder_cache_variant: r.cacheVariant || 'default' };
+    return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin, ...cacheHeaders });
   }
 
   return oaError(404, 'not found', 'invalid_request_error');
