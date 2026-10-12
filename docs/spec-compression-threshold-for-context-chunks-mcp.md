@@ -1,5 +1,8 @@
 # Порог сжатия для context-chunks-mcp и как его забенчить
 
+> Update 2026-10-12: the Ladder-wide Go input ceiling described below was removed in [#251](https://github.com/trained-assist/trained-assist-llm-ladder/pull/251). Size measurements and skip examples below are historical; the provider now decides whether a Go request fits.
+
+
 Статус: расчёт на замерах 2026-10-08, живом проде и трассе за сутки. Решение — цифры ниже;
 контракт с прокси — `COMPRESS_THRESHOLD` в `trained-assist/context-chunks-mcp`.
 

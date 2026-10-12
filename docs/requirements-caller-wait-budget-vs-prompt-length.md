@@ -1,5 +1,8 @@
 # Требования к бюджету ожидания вызывающего и его зависимости от длины промпта
 
+> Update 2026-10-12: the Ladder-wide Go input ceiling described below was removed in [#251](https://github.com/trained-assist/trained-assist-llm-ladder/pull/251). Size measurements and skip examples below are historical; the provider now decides whether a Go request fits.
+
+
 Статус: **проект требований**, на согласование. Написан 2026-10-08 по замерам этой сессии.
 
 Зачем отдельно: выяснилось, что система **систематически не доставляет ответ вызывающему** —

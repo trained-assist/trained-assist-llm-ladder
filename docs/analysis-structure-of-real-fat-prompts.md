@@ -1,5 +1,8 @@
 # Анализ структуры настоящих жирных промптов
 
+> Update 2026-10-12: the Ladder-wide Go input ceiling described below was removed in [#251](https://github.com/trained-assist/trained-assist-llm-ladder/pull/251). Size measurements and skip examples below are historical; the provider now decides whether a Go request fits.
+
+
 Замер 2026-10-08. Ответ на вопрос «какие промпты реально приходят и из чего они состоят» —
 потому что `'x'.repeat(N)` и реальный промпт разные вещи, а все потолки и таймауты мы
 калибровали именно на реальных.

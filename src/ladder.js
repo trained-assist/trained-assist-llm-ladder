@@ -15,7 +15,7 @@ export { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, resetFree
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
-import { estimateTokens, fits, hedgePlan, ttfbFactor } from './size-policy.js';
+import { estimateTokens, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 
@@ -714,17 +714,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
 
   const wantJson = body.response_format && body.response_format.type === 'json_object';
   const deadline = totalTimeoutMs ? now + totalTimeoutMs : Infinity;
-  // Size gate (owner 2026-10-07): a rung whose window is smaller than this request cannot answer,
-  // and its refusal is expensive — measured the same day, opencode-go takes ~98K tokens and at
-  // ~123K answers `429 Endpoint is unavailable` while rotating through every key: 48 s of wall
-  // clock, three keys burned, still no answer. Refusing BEFORE the attempt is pure win; the
-  // attempt record stays so /v1/calls shows why the rung was not tried.
-  const inputTokens = estimateTokens(body);
   const selectedFor = async (model, key) => {
     const cacheScope = await cacheScopeFor(env, model, key, conversation);
     const candidate = cacheVariant?.rung === model && cacheVariant.cache_scope === cacheScope
       ? { ...body, messages: cacheVariant.messages } : null;
-    const masked = !!candidate && fits(model, estimateTokens(candidate));
+    const masked = !!candidate;
     return { requestBody: masked ? candidate : body, cacheScope, cacheVariant: masked ? 'masked' : 'default' };
   };
   const attempts = [];
@@ -735,15 +729,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
      if (isGo && goParked && !model.endsWith('-free')) continue;
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
-    // Skipped, not failed: the request is wrong for THIS rung, exactly like a context overflow —
-    // recording a failure would health-skip a perfectly good model for every other caller.
     let key = keyIndex;
     const firstSelection = await selectedFor(model, key);
     const rungInputTokens = estimateTokens(firstSelection.requestBody);
-    if (!fits(model, rungInputTokens)) {
-      attempts.push({ model, outcome: 'skipped', error: `input ~${rungInputTokens}t above the rung ceiling` });
-      continue;
-    }
     const isFreeGo = isGo && model.endsWith('-free');
     const plan = hedgePlan(rungInputTokens);
     const rungBudget = Math.min(timeoutMs, left);
@@ -759,8 +747,6 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     };
     const attemptKey = async (attemptKeyIndex) => {
       const selection = await selectedFor(model, attemptKeyIndex);
-      const tokens = estimateTokens(selection.requestBody);
-      if (!fits(model, tokens)) return { ok: false, skip: true, error: 'input above the rung ceiling' };
       const result = await attempt(env, model, selection.requestBody, attemptKeyIndex, opts);
       return { ...result, cacheScope: selection.cacheScope, cacheVariant: selection.cacheVariant };
     };

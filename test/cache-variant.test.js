@@ -57,18 +57,18 @@ test('a changed provider key or conversation uses the default projection', async
   assert.equal(await cacheScopeFor(env, 'zen-rings/example-free', 0, 'conv-a'), null);
 });
 
-test('an oversized masked projection falls back to the compact default for that rung', async () => {
+test('a large masked projection reaches its matching provider scope unchanged', async () => {
   const seen = [];
   const scope = await cacheScopeFor(env, paid, 0, 'conv-a');
+  const large = [{ role: 'user', content: 'x'.repeat(450_000) }];
   const result = await run({ model: 'service', messages: compact }, {
     env, config: { ladders: { service: { build: [paid] } } }, store: memoryStore(2),
     fetchImpl: fakeFetch(seen), conversation: 'conv-a',
-    cacheVariant: { rung: paid, cache_scope: scope,
-      messages: [{ role: 'user', content: 'x'.repeat(450_000) }] },
+    cacheVariant: { rung: paid, cache_scope: scope, messages: large },
   });
   assert.equal(result.ok, true);
-  assert.equal(result.cacheVariant, 'default');
-  assert.deepEqual(seen[0].body.messages, compact);
+  assert.equal(result.cacheVariant, 'masked');
+  assert.deepEqual(seen[0].body.messages, large);
 });
 
 test('Go key rotation selects the projection again for the new cache scope', async () => {

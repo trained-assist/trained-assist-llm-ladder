@@ -1,5 +1,8 @@
 # ТЗ: чанкирование и предобработка жирных промптов (для соседней сессии)
 
+> Update 2026-10-12: the Ladder-wide Go input ceiling described below was removed in [#251](https://github.com/trained-assist/trained-assist-llm-ladder/pull/251). Size measurements and skip examples below are historical; the provider now decides whether a Go request fits.
+
+
 Статус: ТЗ на исполнение. Все пороги — замеры 2026-10-08 на живом проде, не теория.
 
 Кому: сессии, которая делает **чанкирование и предобработку** жирных запросов, чтобы они

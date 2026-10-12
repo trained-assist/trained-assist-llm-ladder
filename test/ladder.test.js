@@ -383,25 +383,34 @@ test('a WEEKLY Go allowance parks the key for hours; a plain rate-limit hit keep
   assert.equal(keyFaultOf('HTTP 401: invalid api key').dead, true);
 });
 
-// ── size gate: a rung whose window is smaller than the request is skipped, not failed ─────────
-// Measured 2026-10-07: opencode-go takes ~98K tokens, and at ~123K answers `429 Endpoint is
-// unavailable` while rotating through every key — 48 s and three keys for no answer. Refusing
-// before the attempt is the whole point, and refusing must NOT poison the rung's health: the
-// request is wrong for it, the model is fine (same rule as a context overflow).
-test('input above a rung ceiling skips it — no attempt, no health failure', async () => {
+test('large input is sent to the selected Go rung without a ladder size gate', async () => {
   const calls = [];
   const store = memoryStore(2);
-  // ~100 007 токенов по нашей оценке — ровно за границей для opencode-go
   const fat = { ...msg, messages: [{ role: 'user', content: 'x'.repeat(400_001) }] };
   const r = await run(fat, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls) });
 
-  assert.equal(r.ok, true, 'the ladder still answers from a rung that fits');
-  const skipped = r.attempts.filter(a => a.outcome === 'skipped' && /above the rung ceiling/.test(a.error || ''));
-  assert.ok(skipped.length >= 2, `both opencode-go rungs are skipped, got ${JSON.stringify(r.attempts)}`);
-  assert.ok(skipped.every(a => a.model.startsWith('opencode-go/')), 'only rungs with a measured ceiling are refused');
-  assert.equal(calls.filter(c => c.url.includes('opencode.ai')).length, 0, 'the Go gateway is never called');
-  assert.equal(store.state.health['opencode-go/longcat-2.5-preview-free'], undefined,
-    'a ceiling skip is not a failure — the rung stays healthy for every other caller');
+  assert.equal(r.ok, true);
+  assert.equal(r.model, GOLADDER[0]);
+  assert.ok(calls.some(c => c.url.includes('opencode.ai')));
+  assert.equal(r.attempts.some(a => a.outcome === 'skipped'), false);
+});
+
+test('fast: paid MiMo receives large input despite the historical Go gate', async () => {
+  const store = memoryStore(2);
+  const fallback = config.ladders.fast.build[1];
+  const conversation = 'fast-large-context';
+  const first = await run({ model: 'fast', messages: [{ role: 'user', content: 'hello' }] },
+    { env, config, store, conversation, fetchImpl: fakeFetch({}, []) });
+  assert.equal(first.model, config.ladders.fast.build[0], 'the small turn pins MiMo first');
+  store.state.health[fallback] = { failures: 1, firstFailureAt: Date.now(), skipUntil: Date.now() + 60_000 };
+  const calls = [];
+  const large = { model: 'fast', messages: [{ role: 'user', content: 'x'.repeat(410_000) }] };
+  const result = await run(large, { env, config, store, conversation, fetchImpl: fakeFetch({}, calls) });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.model, config.ladders.fast.build[0]);
+  assert.deepEqual(calls.map(c => c.model), [short(config.ladders.fast.build[0])]);
+  assert.equal(result.attempts.filter(a => a.outcome === 'skipped').length, 0);
 });
 
 // ── гонка: одна и та же бесплатная Go-модель на двух разных аккаунтах ─────────────────────────

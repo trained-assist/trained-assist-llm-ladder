@@ -43,7 +43,7 @@ test('large requests pass unchanged through free and paid rungs', async () => {
   }
 });
 
-test('oversized Go request skips its measured ceiling and reaches OpenRouter unchanged', async () => {
+test('450 KB Go request is sent unchanged instead of skipped by a local ceiling', async () => {
   const input = bodyOfSize(450_000);
   const calls = [];
   const result = await run(input, { env, config, store: memoryStore(), fetchImpl: async (_url, init) => {
@@ -51,10 +51,10 @@ test('oversized Go request skips its measured ceiling and reaches OpenRouter unc
     return new Response(JSON.stringify(completion()));
   } });
   assert.equal(result.ok, true);
-  assert.equal(result.model, fallback);
+  assert.equal(result.model, free);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].messages, input.messages);
-  assert.deepEqual(result.attempts.slice(0, 2).map(attempt => attempt.outcome), ['skipped', 'skipped']);
+  assert.deepEqual(result.attempts.map(attempt => attempt.outcome), ['ok']);
 });
 
 test('HTTP endpoint drops the retired compression flag and returns no compression header', async () => {

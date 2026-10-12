@@ -1,10 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, ceilingFor, fits, hedgePlan, ttfbFactor, INPUT_CEILING_TOKENS } from '../src/size-policy.js';
-
-// The ceilings are measurements, not guesses — see src/size-policy.js for where each number came
-// from. A wrong ceiling either wastes a hop (too low) or burns 48 s and three keys (too high),
-// so both directions are pinned here.
+import { estimateTokens, hedgePlan, ttfbFactor } from '../src/size-policy.js';
 
 test('estimateTokens: a token count without talking to a provider', () => {
   assert.equal(estimateTokens(undefined), 0, 'no messages → 0, and it must not throw');
@@ -24,22 +20,6 @@ test('estimateTokens: a token count without talking to a provider', () => {
   const byBytes = estimateTokens(cyr);
   assert.ok(byBytes > byChars * 1.5, `по байтам должно быть заметно больше: ${byBytes} против ${byChars}`);
   assert.ok(withHistory > 100, 'more messages → more tokens, not fewer');
-});
-
-test('ceilingFor: only rungs with a measured ceiling refuse', () => {
-  assert.equal(ceilingFor('opencode-go/longcat-2.5-preview-free'), INPUT_CEILING_TOKENS['opencode-go/']);
-  assert.equal(ceilingFor('opencode-go/mimo-v2.6-flash'), INPUT_CEILING_TOKENS['opencode-go/']);
-  assert.equal(ceilingFor('zen-rings/nemotron-3-ultra-free'), null, 'the ring gates at 50 KB before this ever matters');
-  assert.equal(ceilingFor('openrouter/inclusionai/ling-3.0-flash:free'), null, 'unknown → do not refuse');
-  assert.equal(ceilingFor(undefined), null);
-});
-
-test('fits: 98K passes and 123K does not — the measured Go boundary', () => {
-  const GO = 'opencode-go/longcat-2.5-preview-free';
-  assert.equal(fits(GO, 98_000), true, 'measured 2026-10-07: 98K answered 200');
-  assert.equal(fits(GO, 100_000), true, 'the ceiling itself is inclusive');
-  assert.equal(fits(GO, 123_000), false, 'measured 2026-10-07: 123K → 429 + 3-key rotation');
-  assert.equal(fits('zen-rings/mimo-v2.6-flash-free', 10_000_000), true, 'no ceiling → never refused here');
 });
 
 // The owner's bands (2026-10-07): a small context gets a small budget, a mid-size request is
