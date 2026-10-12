@@ -315,6 +315,7 @@ export function upstreamRequest(env, model, body, keyIndex, { stream = false, st
     stream,
     max_tokens: Math.max(Number(body.max_tokens) || 0, minTokensFor(model)),
   };
+  delete upstream.ladder_cache_variant;
   delete upstream.stream_options;
   if (stream && !isGo && !isZen) upstream.stream_options = { include_usage: true };
   if (stripRf) { delete upstream.response_format; delete upstream.stream_options; }
