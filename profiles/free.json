@@ -1,0 +1,26 @@
+{
+  "model": "ladder/free",
+  "small_model": "ladder/free",
+  "agent": {
+    "build": {
+      "model": "ladder/free"
+    },
+    "plan": {
+      "model": "ladder/free"
+    },
+    "explore": {
+      "model": "ladder/free"
+    },
+    "general": {
+      "model": "ladder/free"
+    },
+    "review": {
+      "model": "ladder/free",
+      "description": "Review code and report findings without editing files",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny"
+      }
+    }
+  }
+}

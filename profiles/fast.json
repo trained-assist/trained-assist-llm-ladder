@@ -1,0 +1,26 @@
+{
+  "model": "ladder/fast",
+  "small_model": "ladder/fast",
+  "agent": {
+    "build": {
+      "model": "ladder/fast"
+    },
+    "plan": {
+      "model": "ladder/fast"
+    },
+    "explore": {
+      "model": "ladder/fast"
+    },
+    "general": {
+      "model": "ladder/fast"
+    },
+    "review": {
+      "model": "ladder/fast",
+      "description": "Review code and report findings without editing files",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny"
+      }
+    }
+  }
+}

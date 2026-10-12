@@ -13,8 +13,8 @@ Live: `https://llm-ladder.trainedassist.store`
 
 ## The one rule
 
-**One ladder = one canonical name. No aliases.** Every name below is final; the config has an
-empty `aliases` object. A request that names a ladder which doesn't exist gets
+**One ladder = one canonical name.** The only compatibility alias is legacy `deepseek` → `build`.
+A request that names a ladder which doesn't exist gets
 `404 unknown ladder: <name>` — loud, not silent.
 
 Rung providers:
@@ -30,7 +30,17 @@ Rung providers:
 
 ## Ladders
 
-`config/ladders.json` is the source of truth. Thirteen ladders, three groups.
+`config/ladders.json` is the source of truth. The public interactive modes are `standard`,
+`free`, and `fast`; the older role and service ladders remain internal and for existing callers.
+
+`standard` tries five $0 rungs before its paid tail. `fast` starts with paid MiMo and
+falls back to paid Gemini and DeepSeek. Both paid modes include an OpenRouter rung so an
+OpenCode Go account-level limit does not exhaust every reserve. The `free` mode has no paid
+rung, including in subagents. Prompt cache scope and masked variant are request metadata;
+the ladder preserves the selected variant on a matching rung and reports cache-hit tokens.
+The paid price and cache-read entries were checked on 2026-10-12 against
+[OpenCode Go](https://dev.opencode.ai/v2/docs/console/go/) and
+[OpenRouter Gemini 3.1 Flash Lite](https://openrouter.ai/google/gemini-3.1-flash-lite-preview/providers).
 
 ### 1. Service calls (`service`) — the default
 
@@ -80,27 +90,22 @@ There is **no escalation between levels**: a ladder retries down its own rungs; 
 
 ---
 
-## opencode profiles (the assembly)
+## OpenCode profiles
 
-A profile is **not** a single ladder — it is a **per-role ladder mapping**, one
-`~/.config/opencode/profiles/<name>.json` that sets the model for each opencode agent
-(`build` / `plan` / `explore` / `general` / `review`):
+The three supported user profiles are in `profiles/`. Each routes `model`, `small_model`,
+and all five OpenCode agent roles to one policy, so a subagent cannot silently leave the
+selected budget:
 
-| profile | build | plan | explore | general | review |
-|---|---|---|---|---|---|
-| **`master`** | `ladder/build` | `ladder/plan` | `ladder/explore` | `ladder/general` | `ladder/review` |
-| **`phd`** | `ladder/build advanced` | `ladder/plan` | `ladder/explore` | `ladder/general` | `ladder/review` |
-| **`free`** | `ladder/free` | `ladder/plan` | `ladder/explore` | `ladder/general` | `ladder/review` |
-| `ladder-research` | `ladder/research` | `ladder/research:plan` | `ladder/research:explore` | `ladder/research:general` | `ladder/research:review` |
+| profile | policy |
+|---|---|
+| `standard` | free first; paid Go and independent OpenRouter reserves after free exhaustion |
+| `free` | only verified $0 rungs; fails closed if they all fail |
+| `fast` | paid Go first; paid OpenRouter reserve; cache-read accounting on every rung |
 
-`master` is the default assembly: the **base** build ladder + each role's own ladder.
-`phd` swaps build to the advanced tier. `free` puts build on the $0 ceiling. The role ladders
-(`build`, `plan`, `explore`, `general`, `review`) are the ones the assembly points at — **not**
-the `service` ladder (which is for small mechanical service calls, a separate concern).
-
-The ladder worker does **not** choose a profile — the caller (opencode, the agent's runner)
-does. Every ladder name a profile points at must exist; there are no aliases, so a rename
-breaks the profile loudly (404) unless the profile is updated too.
+The worker does not select a profile: the caller installs and selects one of the JSON files.
+Existing `master`, `phd`, and role-specific profile files must be explicitly migrated; the
+worker does not silently reinterpret those names. Internal role ladders remain callable for
+existing integrations. The `service` ladder is for mechanical service calls.
 
 ---
 

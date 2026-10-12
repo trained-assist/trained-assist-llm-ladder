@@ -330,6 +330,25 @@
         "openrouter/google/gemini-3.8-flash"
       ]
     },
+    "standard": {
+      "build": [
+        "opencode-go/longcat-2.5-preview-free",
+        "zen-rings/nemotron-3-ultra-free",
+        "zen-rings/mimo-v2.6-flash-free",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "openrouter/dots-studio/dots-3-note-preview:free",
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/google/gemini-3.1-flash-lite-preview",
+        "opencode-go/deepseek-v4-pro"
+      ]
+    },
+    "fast": {
+      "build": [
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/google/gemini-3.1-flash-lite-preview",
+        "opencode-go/deepseek-v4-pro"
+      ]
+    },
     "free": {
       "build": [
         "opencode-go/longcat-2.5-preview-free",

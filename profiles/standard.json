@@ -1,0 +1,26 @@
+{
+  "model": "ladder/standard",
+  "small_model": "ladder/standard",
+  "agent": {
+    "build": {
+      "model": "ladder/standard"
+    },
+    "plan": {
+      "model": "ladder/standard"
+    },
+    "explore": {
+      "model": "ladder/standard"
+    },
+    "general": {
+      "model": "ladder/standard"
+    },
+    "review": {
+      "model": "ladder/standard",
+      "description": "Review code and report findings without editing files",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny"
+      }
+    }
+  }
+}

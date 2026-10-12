@@ -844,7 +844,7 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
 // самая дешёвая Go-модель в прайсе встанет первой сама, а чья-то забытая правка уронит тест.
 test('config: во всех не-фри лестницах платный сегмент — сплошной сразу за zen, от дешёвых к дорогим, без Muse (owner 2026-10-08)', () => {
   const prices = JSON.parse(fs.readFileSync(new URL('../config/prices.json', import.meta.url)));
-  const SKIP = new Set(['free', 'vision', 'vision advanced']); // $0-потолок и multimodal-only (Go текстовый)
+  const SKIP = new Set(['free', 'vision', 'vision advanced', 'standard', 'fast']); // Public profiles have their own policy contract.
   let checked = 0;
   for (const [name, roles] of Object.entries(config.ladders)) {
     if (SKIP.has(name)) continue;
@@ -1103,6 +1103,7 @@ test('CONFIG CONTRACT: the zen-rings head is nemotron-3-ultra-free → mimo-2.6-
   // Every text ladder opens with the pair. vision* is the one deliberate exception: it answers
   // image+text and zen-rings is a text-only call — it would fail every request there.
   for (const [name, roles] of Object.entries(config.ladders)) {
+    if (name === 'fast') continue; // The explicit paid-first profile has a separate contract.
     for (const [role, rungs] of Object.entries(roles)) {
       if (name.startsWith('vision')) {
         assert.ok(!rungs.some((m) => m.startsWith('zen-rings/')), `${name}/${role}: vision needs multimodal`);
@@ -1114,7 +1115,7 @@ test('CONFIG CONTRACT: the zen-rings head is nemotron-3-ultra-free → mimo-2.6-
 
   // The pair is the ONLY head: no paid rung may precede it, or the free tier is decorative.
   for (const [name, roles] of Object.entries(config.ladders)) {
-    if (name.startsWith('vision')) continue;
+    if (name.startsWith('vision') || name === 'fast') continue;
     const firstPaid = roles.build.findIndex((m) => m.startsWith('openrouter/') && !m.endsWith(':free'));
     if (firstPaid !== -1) assert.ok(firstPaid >= 3, `${name}: a paid rung sits ahead of the free head`);
   }
