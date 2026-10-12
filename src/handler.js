@@ -4,6 +4,7 @@
 
 import { run, readPool, fetchGoUsage, fetchOrUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
+import { settleStream } from './stream-settlement.js';
 import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
 import * as ring from './zen-ring.js';
@@ -78,8 +79,8 @@ const ANALYTICS_ERRORS_SQL =
 //
 // Two rank tracks, two denominators:
 //   · ms     — every ok call, `n` = all calls of the model. Latency exists for streams too.
-//   · tokens_in — only calls that carried usage. Stream rows log NULL (#22), so ranking them
-//     would put 40% of the model at the bottom of the prompt-size distribution and make p20
+//   · tokens_in — only calls that carried usage. A provider may omit final stream usage, so
+//     NULL rows would otherwise sit at the bottom of the prompt-size distribution and make p20
 //     read like "tiny prompts". Hence the explicit `(tokens_in IS NULL)` sort key to push
 //     NULLs past the real values, and `n_tin` = COUNT(tokens_in) as the denominator.
 //     `with_usage` ships alongside so the reporter can say how much of the model it saw.
@@ -724,25 +725,45 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     // Null keeps "unknown caller" unknown; /v1/analytics reports those rows as `no_app` so the
     // coverage is visible instead of silently missing.
     trace.app = sanitizeAppSlugOrNull(appRaw);
-    // usage: non-stream answers only (stream usage arrives after the relay → D1 trace has the same gap, #22).
-console.log(JSON.stringify({ ladder: chat.model, ok: r.ok, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
-    // Diagnostic persistence is best effort. Keep it alive after the response,
-    // without delaying a completed model call behind a slow D1 write.
-    const traceWrite = logCall(env, trace, chat.model, r, started, { events });
-    if (waitUntil) waitUntil(traceWrite);
-    else await traceWrite;
-    if (!r.ok) return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
+    if (!r.ok) {
+      console.log(JSON.stringify({ ladder: chat.model, ok: false, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
+      const traceWrite = logCall(env, trace, chat.model, r, started, { events });
+      if (waitUntil) waitUntil(traceWrite);
+      else await traceWrite;
+      return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
+    }
     const cacheHeaders = {
       ...(r.cacheScope ? { 'x-ladder-cache-scope': r.cacheScope } : {}),
       'x-ladder-cache-variant': r.cacheVariant || 'default',
     };
     if (r.stream) {
-      return new Response(r.stream, { status: 200, headers: {
+      const tracked = settleStream(r.stream, async ({ complete, reason, usage }) => {
+        const final = {
+          ...r,
+          ok: complete,
+          stream: undefined,
+          data: usage ? { usage } : undefined,
+          error: complete ? undefined : `stream ${reason} after first token`,
+          attempts: complete ? r.attempts : r.attempts.map((attempt, index) =>
+            index === r.attempts.length - 1 && attempt.outcome === 'ok'
+              ? { ...attempt, outcome: 'stream_incomplete' }
+              : attempt),
+        };
+        console.log(JSON.stringify({ ladder: chat.model, ok: complete, model: r.model || null, app: appSlug, ms: Date.now() - started, usage, stream_end: reason, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: final.attempts, trace }));
+        const traceWrite = logCall(env, trace, chat.model, final, started, { events, retryable: false });
+        if (waitUntil) waitUntil(traceWrite);
+        else await traceWrite;
+      });
+      return new Response(tracked, { status: 200, headers: {
         'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache',
         'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin,
         ...cacheHeaders,
       } });
     }
+    console.log(JSON.stringify({ ladder: chat.model, ok: true, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
+    const traceWrite = logCall(env, trace, chat.model, r, started, { events });
+    if (waitUntil) waitUntil(traceWrite);
+    else await traceWrite;
     const out = { ...r.data, model: r.model, ladder_cache_scope: r.cacheScope || null,
       ladder_cache_variant: r.cacheVariant || 'default' };
     return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin, ...cacheHeaders });

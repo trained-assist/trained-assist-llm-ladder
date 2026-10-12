@@ -31,16 +31,16 @@ const TRACE_SQL = `INSERT INTO ladder_calls
   (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, app)
   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`;
 
-// Best-effort D1 append: never fails the call, never throws. Non-stream responses carry
-// usage.prompt_tokens/completion_tokens → stored for "how many tokens did this call burn".
+// Best-effort D1 append: never fails the call, never throws. Non-stream usage and
+// observed terminal-frame stream usage both count toward tokens_in/out.
 // tokens_cached (#94) = usage.prompt_tokens_details.cached_tokens — a subset of tokens_in,
 // priced ~50x cheaper, so cost = (in-cached)*in_price + out*out_price + cached*cache_price.
 // app (#107) = the caller's sub-task tag, so the cost cut can be per sub-task and not only
 // per ladder — `service` covers ~20 different tools, which is too coarse to prioritise.
-export async function logCall(env, trace, ladder, r, started, { events } = {}) {
+export async function logCall(env, trace, ladder, r, started, { events, retryable = true } = {}) {
   const db = env.LADDER_TRACE_DB;
   if (!db && !events) return;
-  const usage = !r.stream && r.data && r.data.usage ? r.data.usage : null;
+  const usage = r.data && r.data.usage ? r.data.usage : null;
   const cached = usage && usage.prompt_tokens_details ? usage.prompt_tokens_details.cached_tokens : null;
   try {
     if (db) {
@@ -65,7 +65,7 @@ export async function logCall(env, trace, ladder, r, started, { events } = {}) {
       ladder,
       error: r.error || 'every rung failed',
       outcome: 'failed',
-      retryable: true,
+      retryable,
     });
     events.publishError(event);
   }
