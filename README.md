@@ -297,17 +297,19 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 | [docs/free-tier-limits.md](docs/free-tier-limits.md) | бесплатные потолки: зен, Go, OpenRouter `:free` |
 | [docs/go-key-management.md](docs/go-key-management.md) | ключи Go: пул, парковка, ротация, `/v1/go-usage` |
 
-**Размеры, жирность, сжатие**
+**Размеры и большой контекст**
+
+Сжатие выполняется до обращения к лестнице. Лестница получает готовый запрос и проверяет размер для каждого ранга.
 
 | документ | о чём |
 |---|---|
 | [docs/spec-chunking-fat-prompts-for-free-tiers.md](docs/spec-chunking-fat-prompts-for-free-tiers.md) | единицы лимитов (байты vs токены), примеры запросов A–J, правила чанкирования |
 | [docs/spec-fatness-labeling-and-prompt-sources.md](docs/spec-fatness-labeling-and-prompt-sources.md) | как метить жирные промпты и откуда их брать |
 | [docs/analysis-structure-of-real-fat-prompts.md](docs/analysis-structure-of-real-fat-prompts.md) | из чего реально состоит мегабайтный промпт |
-| [docs/spec-compression-threshold-for-context-chunks-mcp.md](docs/spec-compression-threshold-for-context-chunks-mcp.md) | порог сжатия: 350 КБ базовый, 100 КБ перед платной + план бенча |
-| [docs/spec-context-proxy-call-graph.md](docs/spec-context-proxy-call-graph.md) | граф вызовов прокси: COMPRESS / LLM-REF / липкий пин / ветка нарушения контракта |
-| [docs/spec-context-proxy-module-layout.md](docs/spec-context-proxy-module-layout.md) | распиливание `proxy.js` на три модуля |
-| [docs/lazy-context-retrieval-spec.md](docs/lazy-context-retrieval-spec.md) | сжатый контекст + отложенная загрузка по указателям |
+| [docs/spec-compression-threshold-for-context-chunks-mcp.md](docs/spec-compression-threshold-for-context-chunks-mcp.md) | исторический проект порогов сжатия для отдельного контекстного прокси |
+| [docs/spec-context-proxy-call-graph.md](docs/spec-context-proxy-call-graph.md) | исторический граф вызовов контекстного прокси |
+| [docs/spec-context-proxy-module-layout.md](docs/spec-context-proxy-module-layout.md) | исторический проект модулей контекстного прокси |
+| [docs/lazy-context-retrieval-spec.md](docs/lazy-context-retrieval-spec.md) | исторический проект отложенной загрузки контекста |
 
 **Почему лестница устроена так, а не иначе**
 

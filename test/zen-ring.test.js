@@ -1113,43 +1113,6 @@ test('exact Zen continuation disables the fat-input race and preserves queued co
   assert.deepEqual(result.data.tool_calls, calls);
 });
 
-test('compressed Ladder continues on the actual Zen race winner outside the configured ladder', async () => {
-  const d1 = fakeD1();
-  const registered = await post('/zen/pool/register', { worker_id: 'ctx-race:1' }, d1);
-  const lease = (await registered.json()).lease_id;
-  const registered2 = await post('/zen/pool/register', { worker_id: 'ctx-race:2' }, d1);
-  const lease2 = (await registered2.json()).lease_id;
-  const cfg = { ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free'] } } };
-  const input = { model: 'service', messages: [{ role: 'system', content: 'rules '.repeat(10000) },
-    { role: 'assistant', content: 'original '.repeat(60000) }, { role: 'user', content: 'Check the old result.' }] };
-  const pending = run(input, { env: { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW }, config: cfg, store: memoryStore() });
-  await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(d1._tasks.size, 4);
-  const task1 = (await (await get(`/zen/pool/pull?lease=${lease}&hold_ms=5000`, d1)).json()).task;
-  const winnerTask = (await (await get(`/zen/pool/pull?lease=${lease2}&hold_ms=5000`, d1)).json()).task;
-  assert.notEqual(winnerTask.model, 'nemotron-3-ultra-free');
-  const ref = winnerTask.messages.find(m => typeof m.content === 'string' && /context ref=ctx:/.test(m.content)).content.match(/ref=([^;]+);/)[1];
-  await post('/zen/pool/result', { task_id: winnerTask.id, ok: true, text: JSON.stringify({ need_refs: [{ ref, limit: 50 }] }) }, d1);
-  // The initial race's other queued jobs remain intact. The new continuation is ONE task.
-  for (let tries = 0; tries < 30 && d1._tasks.size < 5; tries++) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(d1._tasks.size, 5);
-  const continuation = [...d1._tasks.values()].at(-1);
-  assert.equal(continuation.model, winnerTask.model);
-  assert.equal(continuation.state, 'queued');
-  // Claim exactly the new task; older losers may still be serving, as in the live ring.
-  for (const t of d1._tasks.values()) if (t.id !== continuation.id && t.state === 'queued') t.state = 'expired';
-  const pulled = (await (await get(`/zen/pool/pull?lease=${lease2}&hold_ms=5000`, d1)).json()).task;
-  assert.equal(pulled.id, continuation.id);
-  const pages = JSON.parse(pulled.messages.at(-1).content.split('\n')[1]);
-  assert.equal(pages[0].text, input.messages[1].content.slice(0, 50));
-  await post('/zen/pool/result', { task_id: pulled.id, ok: true, text: '{"answer":"same Zen winner"}' }, d1);
-  const result = await pending;
-  assert.equal(result.ok, true); assert.equal(result.model, `zen-rings/${winnerTask.model}`);
-  assert.equal(result.content, 'same Zen winner'); assert.equal(result.compression.refRounds, 1);
-  assert.equal(d1._tasks.size, 5);
-});
-
-
 test('late raced answer picks an actual winner even after the first task failed', async () => {
   const d1 = fakeD1();
   d1._tasks.set('first', { id: 'first', model: 'nemotron-3-ultra-free', state: 'failed', ok: 0, kind: 'error', error: 'lost' });
