@@ -115,9 +115,23 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
-          if ! npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-zen --file schema/migrations/0008_zen_pool_options.sql --remote > /tmp/zen-options-migration.log 2>&1; then
-            cat /tmp/zen-options-migration.log
-            python3 -c "import sys; sys.exit(0 if 'duplicate column name: options' in open('/tmp/zen-options-migration.log').read().lower() else 1)"
+          npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-zen --remote --json \
+            --command 'PRAGMA table_info(zen_pool_tasks)' > /tmp/zen-options-schema.json
+          COLUMN_STATE=$(python3 - <<'PY'
+          import json
+
+          output = open('/tmp/zen-options-schema.json').read()
+          results = json.loads(output[output.index('['):])[0]['results']
+          print('present' if any(row.get('name') == 'options' for row in results) else 'absent')
+          PY
+          )
+          if [ "$COLUMN_STATE" = absent ]; then
+            if ! npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-zen --file schema/migrations/0008_zen_pool_options.sql --remote > /tmp/zen-options-migration.log 2>&1; then
+              cat /tmp/zen-options-migration.log
+              python3 -c "import sys; sys.exit(0 if 'duplicate column name: options' in open('/tmp/zen-options-migration.log').read().lower() else 1)"
+            fi
+          else
+            echo 'zen_pool_tasks.options already present; skipping migration'
           fi
       - name: Publish zen-runner secrets
         env:
