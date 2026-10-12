@@ -351,12 +351,11 @@
     },
     "free": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "openrouter/inclusionai/ling-3.0-flash-sante:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "openrouter/nvidia/nemotron-3.5-lightning:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",

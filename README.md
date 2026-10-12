@@ -83,7 +83,7 @@ There is **no escalation between levels**: a ladder retries down its own rungs; 
 
 | ladder | shape |
 |---|---|
-| `free` | hard **$0**: zen rings ×2 → longcat → OR `:free` ×6 → zen ×4. Never spends money. |
+| `free` | hard **$0** without a Go subscription: zen rings ×2 → OpenRouter `:free` ×6 → zen ring tail ×2. Never calls a paid API rung. |
 | `conversation` | candidate-message writing (hh-skill): gemini-3.1-flash-lite-preview → gemini-2.5-flash → mimo |
 | `doctor` | strongest Go tier for playbook doctor steps: mimo → qwen3.7-plus → deepseek-v4-pro → paid xiaomi |
 | `research` | hermes/researcher reads: mimo → deepseek-v4.1 → paid gemini-2.5-flash-lite (explore) |
