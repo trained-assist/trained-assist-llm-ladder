@@ -4,6 +4,7 @@ import {
   collectCatalogs, planProbes, probeRows, diffRows, collectFreeModels,
   upsertStatement, goneStatement, readFreeModels, markdownReport, summarizeRun, PROVIDERS,
   benchmarkGoModel, goBenchEligible, goBenchOrder,
+  probeHistoryStatements, readFreeModelAvailability,
 } from '../src/free-models.js';
 import { readPool } from '../src/ladder.js';
 import config from '../config/ladders.json' with { type: 'json' };
@@ -193,6 +194,33 @@ test('planProbes: least-recently-probed first, bounded by the limit', () => {
   assert.equal(planProbes(rows, { limit: 0 }).length, 0);
 });
 
+test('probe history stores only actual checks and summarizes uptime separately from free-tier limits', async () => {
+  const statements = probeHistoryStatements({
+    'opencode-go/a-free': { probe_status: 'ok', probed_at: 1000 },
+    'opencode-go/b-free': { probe_status: 'limited', probed_at: 2000 },
+    'opencode-zen/c-free': { probe_status: 'http_503', probed_at: 3000 },
+    'openrouter/d-free': { probe_status: 'skipped', probed_at: 4000 },
+  });
+  assert.equal(statements.length, 3, 'skips are not availability observations');
+  assert.deepEqual(statements[0].params, ['opencode-go', 'opencode-go/a-free', 1000, 'ok']);
+  assert.ok(statements.every((s) => s.sql.includes('free_model_probe_history')));
+
+  const db = fakeD1([
+    { provider: 'opencode-go', model_id: 'opencode-go/a-free', status: 'ok', observations: 3, last_checked: 3000 },
+    { provider: 'opencode-go', model_id: 'opencode-go/b-free', status: 'limited', observations: 1, last_checked: 2000 },
+    { provider: 'opencode-go', model_id: 'opencode-go/b-free', status: 'http_503', observations: 1, last_checked: 4000 },
+  ]);
+  const report = await readFreeModelAvailability(db, { since: 0 });
+  assert.equal(report.providers['opencode-go'].observations, 5);
+  assert.equal(report.providers['opencode-go'].responding_percent, 100,
+    'HTTP 429/503 still proves the provider endpoint returned an HTTP response');
+  assert.equal(report.providers['opencode-go'].serving_percent, 60,
+    'only a usable answer counts as serving capacity');
+  assert.equal(report.models[1].http_errors, 1);
+  assert.match(db._stmts[0].sql, /checked_at >= \?1/);
+  assert.deepEqual(db._stmts[0].params, [0]);
+});
+
 // Capture everything the module prints; a key must never reach the log.
 async function captureConsole(fn) {
   const lines = [];
@@ -333,6 +361,7 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
     fetchImpl: fakeFetch(CATALOGS), config, probe: true, probeLimit: 10, now: 5000,
   });
   assert.equal(run.collected, 5);
+  assert.equal(run.probe_events_written, 5, 'each real probe is retained as a historical observation');
   const upserts = db._stmts.filter((s) => s.sql.startsWith('INSERT INTO free_models'));
   assert.equal(upserts.length, 5);
   const mimo = upserts.find((s) => s.params[1] === 'openrouter/xiaomi/mimo-v2.6-flash:free');
@@ -344,6 +373,7 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
   assert.equal(db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models')).length, 0, 'nothing to reconcile');
   assert.equal(run.diff.appeared.length, 5, 'first run: everything is new');
   assert.match(markdownReport(run), /New \(5\)/);
+  assert.equal(db._stmts.filter((s) => s.sql.startsWith('INSERT INTO free_model_probe_history')).length, 5);
 });
 
 test('collectFreeModels: a model that left the catalog is marked gone, not deleted', async () => {

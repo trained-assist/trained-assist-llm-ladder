@@ -170,6 +170,7 @@ an API response or logs.
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
 | GET | `/v1/calls/{call_id}/events` | short-lived SSE progress for the matching call (per-call secret required) |
 | GET | `/v1/free-models?provider=&available=0\|1` | the free-model inventory (D1 `free_models`) with context/price + last probe |
+| GET | `/v1/free-models/availability?hours=N` | rolling per-model/provider probe history and response/serving rates |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
 | POST | `/v1/free-models/collect` | one collection pass + diff report; body `{probe, probe_limit, probe_concurrency, dry_run}` |
 | POST | `/v1/state/reset-keys` | unpark all Go keys (after replacing the pool) |
@@ -320,7 +321,12 @@ trace DB) and refreshed by GitHub Actions every 4h (`.github/workflows/collect-f
   `probe_limit` (default 12) and aimed at the least-recently-probed models first, so a small
   budget still rotates coverage. `probe_status`: `ok` / `limited` (429) / `not_found` /
   `http_<n>` / `error` / `skipped`. zen needs the opencode-client fingerprint and `stream:true`
-  (issue #106); Go needs a session header; both are in `src/free-models.js`.
+  (issue #106); Go needs a session header; both are in `src/free-models.js`. Actual probes are
+  appended to `free_model_probe_history` without response bodies or credentials. Skips are not
+  availability observations. `responding_percent` counts HTTP responses, including 404/5xx;
+  `serving_percent` counts only usable `ok` probes. The `limited` count identifies a free quota
+  response separately from provider errors. The endpoint defaults to seven days and accepts
+  1–720 hours.
 - **Reconcile** — upsert on `(provider, model_id)`, `first_seen` preserved, `last_seen` bumped,
   `available=0` for what disappeared (never deleted — the history is the point).
 - **Diff** — `appeared` / `gone` / `changed` (context, price, name, owned_by) between this run
@@ -331,7 +337,10 @@ npm run collect        # one pass against prod, markdown diff on stdout
 ```
 
 The Go catalog is fetched inside the worker with the `OPENCODE_GO_API_KEYS` pool — the key never
-leaves the worker and is never logged. `GET /v1/free-models` reads the inventory back.
+leaves the worker and is never logged. `GET /v1/free-models` reads the inventory back and
+`GET /v1/free-models/availability?hours=168` shows whether the free providers/models are
+intermittent or merely returning quota limits. New catalog entries stay candidates until reviewed;
+catalog discovery never changes active rung order.
 
 ---
 

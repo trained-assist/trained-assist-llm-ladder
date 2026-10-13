@@ -90,6 +90,34 @@ test('GET /v1/free-models: a non-numeric available is a 400, not a silent match-
   assert.match((await r.json()).error.message, /available must be 0 or 1/);
 });
 
+test('GET /v1/free-models/availability: reports observed response and serving rates by provider', async () => {
+  const rows = [
+    { provider: 'opencode-go', model_id: 'opencode-go/a-free', status: 'ok', observations: 3, last_checked: 3000 },
+    { provider: 'opencode-go', model_id: 'opencode-go/a-free', status: 'limited', observations: 1, last_checked: 4000 },
+    { provider: 'opencode-go', model_id: 'opencode-go/a-free', status: 'http_503', observations: 1, last_checked: 5000 },
+  ];
+  const d1 = fakeD1({ rows });
+  const r = await handle(authed('GET', '/v1/free-models/availability?hours=24'), { ...ENV, LADDER_TRACE_DB: d1 }, {});
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.equal(body.window_hours, 24);
+  assert.equal(body.providers['opencode-go'].responding_percent, 100);
+  assert.equal(body.providers['opencode-go'].serving_percent, 60);
+  assert.equal(body.models[0].http_errors, 1);
+  assert.match(d1._stmts[0].sql, /free_model_probe_history/);
+  assert.ok(Math.abs(d1._stmts[0].params[0] - (Date.now() - 24 * 3_600_000)) < 100);
+});
+
+test('GET /v1/free-models/availability: auth, database and window validation', async () => {
+  assert.equal((await handle(new Request('https://l.test/v1/free-models/availability'), ENV, {})).status, 401);
+  assert.equal((await handle(authed('GET', '/v1/free-models/availability'), ENV, {})).status, 503);
+  assert.equal((await handle(authed('GET', '/v1/free-models/availability?hours=wat'),
+    { ...ENV, LADDER_TRACE_DB: fakeD1() }, {})).status, 400);
+  const bounded = await handle(authed('GET', '/v1/free-models/availability?hours=99999'),
+    { ...ENV, LADDER_TRACE_DB: fakeD1() }, {});
+  assert.equal((await bounded.json()).window_hours, 720);
+});
+
 test('POST /v1/free-models/collect: requires auth', async () => {
   assert.equal((await handle(new Request('https://l.test/v1/free-models/collect', { method: 'POST' }), ENV, {})).status, 401);
 });

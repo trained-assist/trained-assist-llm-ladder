@@ -7,7 +7,7 @@ import { safeAttemptDiagnostics } from './diagnostics.js';
 import { makeTrace, logCall, beginStreamCall, settleStreamCall } from './trace.js';
 import { settleStream } from './stream-settlement.js';
 import { createProgressRecorder, progressEventsResponse, validCallId } from './progress.js';
-import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
+import { collectFreeModels, readFreeModels, readFreeModelAvailability, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
 import * as ring from './zen-ring.js';
 import config from '../config/ladders.json' with { type: 'json' };
@@ -417,6 +417,23 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       return json(200, { models, count: models.length, by_provider: counts, generated_ms: Date.now() });
     } catch (e) {
       return oaError(500, `free-models query failed: ${e.message}`, 'server_error');
+    }
+  }
+
+  // GET /v1/free-models/availability — observed free-model reliability over a rolling window.
+  // Skipped probes (for example, missing credentials) are reported but excluded from rates.
+  if (request.method === 'GET' && url.pathname === '/v1/free-models/availability') {
+    const db = env.LADDER_TRACE_DB;
+    if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+    const rawHours = url.searchParams.get('hours');
+    const hours = rawHours === null ? 168 : Number(rawHours);
+    if (!Number.isFinite(hours)) return oaError(400, 'hours must be a number', 'invalid_request_error');
+    const boundedHours = Math.min(Math.max(hours, 1), 720);
+    try {
+      const report = await readFreeModelAvailability(db, { since: Date.now() - boundedHours * 3_600_000 });
+      return json(200, { window_hours: boundedHours, generated_ms: Date.now(), ...report });
+    } catch (e) {
+      return oaError(500, `free-model availability query failed: ${e.message}`, 'server_error');
     }
   }
 

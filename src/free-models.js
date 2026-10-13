@@ -390,6 +390,58 @@ export function diffRows(prev, next, { okProviders } = {}) {
 
 export const FREE_MODELS_TABLE = 'free_models';
 
+export const FREE_MODEL_PROBE_HISTORY_TABLE = 'free_model_probe_history';
+
+export const INSERT_PROBE_HISTORY_SQL = `INSERT INTO ${FREE_MODEL_PROBE_HISTORY_TABLE}
+  (provider, model_id, checked_at, status) VALUES (?1, ?2, ?3, ?4)`;
+
+export function probeHistoryStatements(probes) {
+  return Object.entries(probes || {})
+    .filter(([, p]) => p?.probe_status && p.probe_status !== 'skipped')
+    .map(([modelId, p]) => ({
+      sql: INSERT_PROBE_HISTORY_SQL,
+      params: [String(modelId).split('/')[0],
+        String(modelId), Number(p.probed_at) || Date.now(), String(p.probe_status).slice(0, 32)],
+    }));
+}
+
+export async function readFreeModelAvailability(db, { since = Date.now() - 7 * 86_400_000 } = {}) {
+  const { results = [] } = await db.prepare(
+    `SELECT provider, model_id, status, COUNT(*) AS observations, MAX(checked_at) AS last_checked `
+      + `FROM ${FREE_MODEL_PROBE_HISTORY_TABLE} WHERE checked_at >= ?1 `
+      + 'GROUP BY provider, model_id, status ORDER BY provider, model_id, status',
+  ).bind(since).all();
+  const providers = {};
+  const models = new Map();
+  for (const row of results) {
+    const count = Number(row.observations) || 0;
+    const provider = providers[row.provider] ||= { observations: 0, ok: 0, limited: 0, not_found: 0, http_errors: 0, errors: 0, skipped: 0 };
+    const model = models.get(row.model_id) || {
+      provider: row.provider, model_id: row.model_id, observations: 0,
+      ok: 0, limited: 0, not_found: 0, http_errors: 0, errors: 0, skipped: 0, last_checked: 0,
+    };
+    const status = String(row.status || 'error');
+    const bucket = status === 'ok' || status === 'limited' || status === 'not_found' || status === 'skipped'
+      ? status : /^http_\d+$/.test(status) ? 'http_errors' : 'errors';
+    model[bucket] += count;
+    provider[bucket] += count;
+    if (bucket !== 'skipped') { model.observations += count; provider.observations += count; }
+    model.last_checked = Math.max(model.last_checked, Number(row.last_checked) || 0);
+    models.set(row.model_id, model);
+  }
+  const rate = (n, d) => d ? Math.round((n / d) * 10_000) / 100 : null;
+  for (const p of Object.values(providers)) {
+    p.responding_percent = rate(p.ok + p.limited + p.not_found + p.http_errors, p.observations);
+    p.serving_percent = rate(p.ok, p.observations);
+  }
+  const modelRows = [...models.values()].sort((a, b) => a.provider.localeCompare(b.provider) || a.model_id.localeCompare(b.model_id));
+  for (const m of modelRows) {
+    m.responding_percent = rate(m.ok + m.limited + m.not_found + m.http_errors, m.observations);
+    m.serving_percent = rate(m.ok, m.observations);
+  }
+  return { since, providers, models: modelRows };
+}
+
 export const UPSERT_SQL = `INSERT INTO ${FREE_MODELS_TABLE}
   (provider, model_id, name, context, price_in, price_out, price_cached, owned_by, description,
    in_ladder, first_seen, last_seen, available, probe_status, probed_at)
@@ -491,7 +543,11 @@ export async function collectFreeModels(env, db, {
   }
 
   const written = write ? statements.length : 0;
-  if (write) await runStatements(db, statements);
+  const probeEvents = probeHistoryStatements(Object.fromEntries(probes));
+  if (write) {
+    await runStatements(db, statements);
+    await runStatements(db, probeEvents);
+  }
 
   const diff = diffRows(prev, next, { okProviders });
   return {
@@ -504,6 +560,7 @@ export async function collectFreeModels(env, db, {
     probes: Object.fromEntries([...probes.entries()].map(([k, v]) => [k, v])),
     benchmarks,
     written,
+    probe_events_written: write ? probeEvents.length : 0,
     diff,
     rows,
   };
@@ -533,6 +590,7 @@ export function summarizeRun(run) {
     collected: run.collected,
     by_provider: byProvider,
     probed: run.probed,
+    probe_events_written: run.probe_events_written ?? 0,
     benchmarked: run.benchmarks?.length || 0,
     probe_counts: probeCounts,
     written: run.written,
@@ -551,7 +609,7 @@ export function markdownReport(run) {
   L.push('');
   const prov = run.providers.map((p) => `${p.ok ? '' : '⚠ '}${p.provider} ${p.count}${p.ok ? '' : ` (${p.error})`}`).join(' · ');
   L.push(`**${s.collected} free models** — ${prov}`);
-  L.push(`probed ${s.probed} · Go benchmarks ${s.benchmarked} · written ${s.written} rows · appeared ${s.appeared} · gone ${s.gone} · changed ${s.changed}`);
+  L.push(`probed ${s.probed} (${s.probe_events_written} history observations) · Go benchmarks ${s.benchmarked} · written ${s.written} rows · appeared ${s.appeared} · gone ${s.gone} · changed ${s.changed}`);
   if (run.benchmarks?.length) {
     L.push('', '### Go free-model benchmarks', '');
     for (const b of run.benchmarks) {
