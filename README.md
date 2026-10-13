@@ -325,8 +325,8 @@ trace DB) and refreshed by GitHub Actions every 4h (`.github/workflows/collect-f
   appended to `free_model_probe_history` without response bodies or credentials. Skips are not
   availability observations. `responding_percent` counts HTTP responses, including 404/5xx;
   `serving_percent` counts only usable `ok` probes. The `limited` count identifies a free quota
-  response separately from provider errors. The endpoint defaults to seven days and accepts
-  1–720 hours.
+  response separately from provider errors. Probe history is retained for 180 days. The endpoint
+  defaults to seven days and accepts 1–720 hours.
 - **Reconcile** — upsert on `(provider, model_id)`, `first_seen` preserved, `last_seen` bumped,
   `available=0` for what disappeared (never deleted — the history is the point).
 - **Diff** — `appeared` / `gone` / `changed` (context, price, name, owned_by) between this run

@@ -394,6 +394,7 @@ export const FREE_MODEL_PROBE_HISTORY_TABLE = 'free_model_probe_history';
 
 export const INSERT_PROBE_HISTORY_SQL = `INSERT INTO ${FREE_MODEL_PROBE_HISTORY_TABLE}
   (provider, model_id, checked_at, status) VALUES (?1, ?2, ?3, ?4)`;
+export const PRUNE_PROBE_HISTORY_SQL = `DELETE FROM ${FREE_MODEL_PROBE_HISTORY_TABLE} WHERE checked_at < ?1`;
 
 export function probeHistoryStatements(probes) {
   return Object.entries(probes || {})
@@ -545,8 +546,11 @@ export async function collectFreeModels(env, db, {
   const written = write ? statements.length : 0;
   const probeEvents = probeHistoryStatements(Object.fromEntries(probes));
   if (write) {
-    await runStatements(db, statements);
-    await runStatements(db, probeEvents);
+    await runStatements(db, [
+      ...statements,
+      ...probeEvents,
+      { sql: PRUNE_PROBE_HISTORY_SQL, params: [now - 180 * 86_400_000] },
+    ]);
   }
 
   const diff = diffRows(prev, next, { okProviders });

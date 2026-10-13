@@ -374,6 +374,8 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
   assert.equal(run.diff.appeared.length, 5, 'first run: everything is new');
   assert.match(markdownReport(run), /New \(5\)/);
   assert.equal(db._stmts.filter((s) => s.sql.startsWith('INSERT INTO free_model_probe_history')).length, 5);
+  const prune = db._stmts.find((s) => s.sql.startsWith('DELETE FROM free_model_probe_history'));
+  assert.equal(prune.params[0], 5000 - 180 * 86_400_000, 'history has a bounded retention window');
 });
 
 test('collectFreeModels: a model that left the catalog is marked gone, not deleted', async () => {
