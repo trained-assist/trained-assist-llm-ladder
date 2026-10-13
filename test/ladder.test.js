@@ -1136,6 +1136,10 @@ test('CONFIG CONTRACT: the zen-rings head is nemotron-3-ultra-free → mimo-2.6-
   for (const [name, roles] of Object.entries(config.ladders)) {
     if (name === 'fast' || name === 'free') continue; // Public profile policies have separate contracts.
     for (const [role, rungs] of Object.entries(roles)) {
+      if (name === 'standard' && role === 'plan') {
+        assert.equal(rungs[0], 'opencode-go/mimo-v2.6-flash', 'Standard Plan deliberately starts on paid Go MiMo');
+        continue;
+      }
       if (name.startsWith('vision')) {
         assert.ok(!rungs.some((m) => m.startsWith('zen-rings/')), `${name}/${role}: vision needs multimodal`);
         continue;

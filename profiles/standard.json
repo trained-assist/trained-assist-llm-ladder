@@ -6,7 +6,7 @@
       "model": "ladder/standard"
     },
     "plan": {
-      "model": "ladder/standard"
+      "model": "ladder/standard:plan"
     },
     "explore": {
       "model": "ladder/standard"
