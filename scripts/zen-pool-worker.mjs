@@ -19,6 +19,7 @@
 import { writeFileSync } from 'node:fs';
 import { createZenClient } from './zen-client.mjs';
 import { normalizeZenResponse } from './zen-response.mjs';
+import { sanitizePoolArtifact } from './zen-artifact.mjs';
 
 const T0 = Date.now();
 const iso = () => new Date().toISOString();
@@ -131,8 +132,6 @@ async function serve(task) {
   const record = {
     ok,
     model: task.model,
-    prompt: task.prompt,
-    text,
     kind,
     stopped_by: res.ok ? null : (res.stopped_by || null),
     status: res.status ?? null,
@@ -152,11 +151,11 @@ async function serve(task) {
     marks,
     served_at: iso(),
   };
-  if (args.out) writeFileSync(args.out, JSON.stringify(record, null, 2));
+  if (args.out) writeFileSync(args.out, JSON.stringify(sanitizePoolArtifact(record), null, 2));
   console.log('POOL_SERVE_RESULT ' + JSON.stringify({
     task_id: task.id, ok: record.ok, model: record.model, kind: record.kind,
     status: record.status, provider_ms: record.provider_ms, served_ms: record.served_ms,
-    chars: text.length, text: text.slice(0, 800), error: record.error,
+    chars: text.length, error_present: !!record.error,
   }));
   const posted = await call('/zen/pool/result', {
     task_id: task.id, ok: record.ok, text, kind: record.kind, error: record.error,

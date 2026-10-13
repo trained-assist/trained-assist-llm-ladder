@@ -12,7 +12,7 @@ import {
   ZEN_RACE_MAX_INPUT_BYTES, ZEN_RACE_MODELS, ZEN_RACE_MAX, raceModelsFor, zenContextOf, ZEN_MODEL_CONTEXTS,
   abandonQueuedTasks,
 } from '../src/zen-ring.js';
-import { STALE_TASK_MS } from '../src/zen-runner.js';
+import { STALE_TASK_MS, TASK_PAYLOAD_RETENTION_MS, TASK_METADATA_RETENTION_MS, reapStaleTasks } from '../src/zen-runner.js';
 import { classifyError } from '../src/classify.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
@@ -76,10 +76,31 @@ function fakeD1(seed = {}) {
     return [];
   }
   function run_(sql, p) {
+    if (/UPDATE zen_pool_tasks SET prompt = ''/.test(sql)) {
+      let n = 0;
+      for (const task of tasks.values()) {
+        if (['done', 'failed', 'abandoned', 'expired'].includes(task.state) && task.finished_at < p[0]
+            && (task.prompt !== '' || task.messages != null || task.tools != null || task.text != null
+              || task.tool_calls != null || task.error != null)) {
+          Object.assign(task, { prompt: '', messages: null, tools: null, text: null, tool_calls: null, error: null });
+          n++;
+        }
+      }
+      return { success: true, meta: { changes: n } };
+    }
+    if (/DELETE FROM zen_pool_tasks WHERE state IN \('done', 'failed', 'abandoned', 'expired'\)/.test(sql)) {
+      let n = 0;
+      for (const [id, task] of tasks) {
+        if (['done', 'failed', 'abandoned', 'expired'].includes(task.state) && task.finished_at < p[0]) {
+          tasks.delete(id); n++;
+        }
+      }
+      return { success: true, meta: { changes: n } };
+    }
     if (/DELETE FROM zen_pool_tasks WHERE state IN/.test(sql)) {
       const before = tasks.size;
       for (const [k, t] of [...tasks]) {
-        if ((t.state === 'queued' || t.state === 'claimed' || t.state === 'abandoned') && t.enqueued_at < p[0]) tasks.delete(k);
+        if ((t.state === 'queued' || t.state === 'claimed') && t.enqueued_at < p[0]) tasks.delete(k);
       }
       return { success: true, meta: { changes: before - tasks.size } };
     }
@@ -1001,6 +1022,38 @@ test('watchdog failover abandons queued work and does not enqueue a duplicate', 
   assert.equal(shouldRetryRingCall(result), false, 'accepted task_id prevents a second enqueue');
   assert.equal(shouldRetryRingCall({ status: 503, data: { error: 'worker not warm' } }), true,
     'a failure before enqueue can still be retried once');
+});
+
+test('pool cleanup scrubs terminal payloads after one hour and purges metadata after one day', async () => {
+  const d1 = fakeD1();
+  d1._tasks.set('scrub', {
+    id: 'scrub', state: 'done', finished_at: NOW - TASK_PAYLOAD_RETENTION_MS - 1,
+    prompt: 'private prompt', messages: '[{"content":"private history"}]', tools: 'private schema',
+    text: 'private answer', tool_calls: 'private args', error: 'private provider body',
+    model: 'example', kind: 'ok', usage: '{"completion_tokens":5}', provider_ms: 10,
+  });
+  d1._tasks.set('young', {
+    id: 'young', state: 'failed', finished_at: NOW - TASK_PAYLOAD_RETENTION_MS + 1,
+    prompt: 'still briefly available', messages: '[{"content":"history"}]', text: null,
+  });
+  d1._tasks.set('purge', {
+    id: 'purge', state: 'failed', finished_at: NOW - TASK_METADATA_RETENTION_MS - 1,
+    prompt: '', messages: null, text: null,
+  });
+  d1._tasks.set('stale-queue', { id: 'stale-queue', state: 'queued', enqueued_at: NOW - STALE_TASK_MS - 1 });
+
+  const result = await reapStaleTasks({ ZEN_DB: d1 }, NOW);
+  assert.deepEqual(result, { ok: true, reaped: 1, scrubbed: 1, purged: 1 });
+  assert.deepEqual(
+    { prompt: d1._tasks.get('scrub').prompt, messages: d1._tasks.get('scrub').messages,
+      tools: d1._tasks.get('scrub').tools, text: d1._tasks.get('scrub').text,
+      tool_calls: d1._tasks.get('scrub').tool_calls, error: d1._tasks.get('scrub').error },
+    { prompt: '', messages: null, tools: null, text: null, tool_calls: null, error: null },
+  );
+  assert.equal(d1._tasks.get('scrub').usage, '{"completion_tokens":5}', 'operational usage metadata remains');
+  assert.equal(d1._tasks.get('young').messages, '[{"content":"history"}]', 'recent watchdog results stay readable');
+  assert.equal(d1._tasks.has('purge'), false);
+  assert.equal(d1._tasks.has('stale-queue'), false);
 });
 
 test('watchdog never abandons a task that a worker already claimed', async () => {

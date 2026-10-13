@@ -494,6 +494,11 @@ in-process from the ladder (`poolInvoke`, no token):
 
 `cold_start` is present only when the call itself booted the worker.
 
+**Retention** — terminal task results remain fetchable for at most one hour; then the scheduled
+pool sweep erases prompt/history, tool schemas and arguments, answer text and provider error text.
+Operational metadata remains for up to 24 hours, after which the terminal row is deleted. CI pool
+artifacts contain operational metadata only and expire after one day.
+
 **Errors** — every non-200 carries `{"error": "…", …}`:
 
 | status | meaning | what the ladder does |

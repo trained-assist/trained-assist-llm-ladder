@@ -102,4 +102,5 @@ jobs:
           path: |
             zen-pool-last.json
             pool.log
-          retention-days: 30
+          # The worker artifact contains operational timings only; retain it briefly for debugging.
+          retention-days: 1

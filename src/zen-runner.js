@@ -419,16 +419,37 @@ export async function zenRepos(request, env) {
 // EVERY call with pool_backlog while the worker itself was serving fine. Measured 2026-10-07:
 // 139 `claimed` rows, enqueued_at up to 45 h old, head dead for 17 h, worker alive.
 export const STALE_TASK_MS = 10 * 60_000;
+// Full prompts, tool schemas and generated text can contain user data. Keep the answer briefly
+// available for a caller that returned after a watchdog, then erase payloads while retaining
+// bounded operational metadata for one day.
+export const TASK_PAYLOAD_RETENTION_MS = 60 * 60_000;
+export const TASK_METADATA_RETENTION_MS = 24 * 60 * 60_000;
 
 // Drop dead tasks so the queue only ever counts work someone can still be waiting for.
 export async function reapStaleTasks(env, now = Date.now()) {
   if (!env.ZEN_DB) return { ok: false, reaped: 0 };
-  const res = await env.ZEN_DB.prepare(
-    "DELETE FROM zen_pool_tasks WHERE state IN ('queued', 'claimed', 'abandoned') AND enqueued_at < ?1"
+  const db = env.ZEN_DB;
+  const scrub = await db.prepare(
+    `UPDATE zen_pool_tasks SET prompt = '', messages = NULL, tools = NULL, text = NULL,
+       tool_calls = NULL, error = NULL
+     WHERE state IN ('done', 'failed', 'abandoned', 'expired') AND finished_at < ?1
+       AND (prompt <> '' OR messages IS NOT NULL OR tools IS NOT NULL OR text IS NOT NULL
+         OR tool_calls IS NOT NULL OR error IS NOT NULL)`
+  ).bind(now - TASK_PAYLOAD_RETENTION_MS).run();
+  const purge = await db.prepare(
+    "DELETE FROM zen_pool_tasks WHERE state IN ('done', 'failed', 'abandoned', 'expired') AND finished_at < ?1"
+  ).bind(now - TASK_METADATA_RETENTION_MS).run();
+  const stale = await db.prepare(
+    "DELETE FROM zen_pool_tasks WHERE state IN ('queued', 'claimed') AND enqueued_at < ?1"
   ).bind(now - STALE_TASK_MS).run();
-  const reaped = res?.meta?.changes ?? 0;
-  if (reaped) console.log(JSON.stringify({ route: 'zen/reap', reaped, older_than_ms: STALE_TASK_MS }));
-  return { ok: true, reaped };
+  const scrubbed = scrub?.meta?.changes ?? 0;
+  const purged = purge?.meta?.changes ?? 0;
+  const reaped = stale?.meta?.changes ?? 0;
+  if (scrubbed || purged || reaped) console.log(JSON.stringify({
+    route: 'zen/reap', reaped, scrubbed, purged,
+    payload_retention_ms: TASK_PAYLOAD_RETENTION_MS, metadata_retention_ms: TASK_METADATA_RETENTION_MS,
+  }));
+  return { ok: true, reaped, scrubbed, purged };
 }
 
 export async function zenSweep(env, fetchImpl = fetch) {
