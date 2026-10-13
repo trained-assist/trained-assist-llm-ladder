@@ -401,6 +401,51 @@ test('collectFreeModels: a FAILED provider does not mark its models gone', async
   assert.equal(run.providers.find((p) => p.provider === 'opencode-go').ok, false);
 });
 
+test('collectFreeModels: outage, recovery, new free model discovery, and real catalog removal', async () => {
+  const old = ROW({ model_id: 'opencode-go/space-bunny-free', provider: 'opencode-go', last_seen: 1000 });
+  const db = fakeD1([old]);
+  let catalog = [503, { error: 'temporarily unavailable' }];
+  let probeStatus = 503;
+  const fetchImpl = async (url, init = {}) => {
+    if (url === GO_MODELS) {
+      const status = catalog[0];
+      return new Response(JSON.stringify(catalog[1]), { status, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://opencode.ai/zen/go/v1/chat/completions') {
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: probeStatus });
+    }
+    return fakeFetch(CATALOGS)(url, init);
+  };
+
+  // A catalog outage and model probe outage are separate signals: keep the known model,
+  // report the provider failure, and never announce that the model disappeared.
+  const outage = await collectFreeModels(ENV, db, { fetchImpl, config, probe: false, now: 10_000 });
+  assert.equal(outage.providers.find((p) => p.provider === 'opencode-go').ok, false);
+  assert.deepEqual(outage.diff.gone, []);
+  assert.equal(db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models')).length, 0);
+
+  // Once the catalog recovers, discover a new free candidate while the old model is still
+  // rate limited. Discovery does not silently change ladder routing (`in_ladder` stays false).
+  catalog = [200, { data: [
+    { id: 'space-bunny-free', name: 'Space Bunny' },
+    { id: 'new-free-model-free', name: 'New free model' },
+  ] }];
+  const limited = await collectFreeModels(ENV, db, { fetchImpl, config, probe: true, probeLimit: 10, now: 20_000 });
+  assert.equal(limited.providers.find((p) => p.provider === 'opencode-go').ok, true);
+  assert.ok(limited.diff.appeared.some((r) => r.model_id === 'opencode-go/new-free-model-free'));
+  assert.equal(limited.rows.find((r) => r.model_id === 'opencode-go/new-free-model-free').probe_status, 'http_503');
+  assert.equal(limited.rows.find((r) => r.model_id === 'opencode-go/new-free-model-free').in_ladder, 0);
+
+  // A successful probe is a recovery signal; a model is only marked gone after a successful
+  // catalog fetch omits it, never because the provider or its free quota briefly failed.
+  probeStatus = 200;
+  catalog = [200, { data: [{ id: 'new-free-model-free', name: 'New free model' }] }];
+  const recovered = await collectFreeModels(ENV, db, { fetchImpl, config, probe: true, probeLimit: 10, now: 30_000 });
+  assert.equal(recovered.rows.find((r) => r.model_id === 'opencode-go/new-free-model-free').probe_status, 'ok');
+  assert.deepEqual(recovered.diff.gone.map((r) => r.model_id), ['opencode-go/space-bunny-free']);
+  assert.equal(db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models')).length, 1);
+});
+
 test('collectFreeModels: dry_run reports the diff without writing', async () => {
   const db = fakeD1();
   const run = await collectFreeModels(ENV, db, {
