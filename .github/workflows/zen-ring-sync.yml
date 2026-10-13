@@ -1,9 +1,10 @@
 name: zen-ring-sync
 # Zen Pool ring — provision ring repositories and (re)register their rows in the pool registry.
 #
-# One place where "which repositories are in the ring and with which token" lives: the JSON payload
-# in the ZEN_RING_PAYLOAD secret. Nothing about a token is ever printed or passed as a workflow
-# input — a public repository's dispatch inputs and logs are readable by anyone.
+# Ring membership and tokens are read from the authenticated worker registry. The legacy
+# ZEN_RING_PAYLOAD secret remains a fallback for installations that have not migrated. Nothing
+# about a token is ever printed or passed as a workflow input — public dispatch inputs/logs are
+# readable by anyone.
 #
 # Payload = JSON array, one object per ring member:
 #   [{ "repo": "owner/name", "location": "eu", "token": "ghp_…" | "token_ref": "env:NAME" }]
@@ -42,13 +43,25 @@ jobs:
         id: payload
         env:
           RING_PAYLOAD: ${{ secrets.ZEN_RING_PAYLOAD }}
+          BASE: ${{ vars.ZEN_RUNNER_URL }}
+          RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p .ring
           if [ -n "${RING_PAYLOAD:-}" ]; then
             printf '%s' "$RING_PAYLOAD" > .ring/ring.json
+            echo "ring payload source: legacy secret"
           else
-            printf '[]' > .ring/ring.json
+            if [ -z "${BASE:-}" ] || [ -z "${RUNNER_TOKEN:-}" ]; then
+              echo "ring registry unavailable: configure ZEN_RUNNER_URL and ZEN_RUNNER_TOKEN" >&2
+              exit 1
+            fi
+            curl --fail --silent --show-error --retry 2 \
+              -H "authorization: Bearer $RUNNER_TOKEN" \
+              "$BASE/zen/ring/payload" > .ring/registry-response.json
+            node -e 'const fs=require("fs"); const v=JSON.parse(fs.readFileSync(".ring/registry-response.json","utf8")); const a=Array.isArray(v)?v:v.repos; if(!Array.isArray(a)) throw new Error("registry response has no repos array"); fs.writeFileSync(".ring/ring.json", JSON.stringify(a));'
+            rm -f .ring/registry-response.json
+            echo "ring payload source: authenticated worker registry"
           fi
           node -e 'const a=JSON.parse(require("fs").readFileSync(".ring/ring.json","utf8")); if(!Array.isArray(a)||!a.length) throw new Error("payload is not a non-empty JSON array"); for (const r of a) if(!/^[\w.-]+\/[\w.-]+$/.test(r.repo||"")) throw new Error("bad repo: "+r.repo); console.log("RING_ROWS="+a.length)'
 
@@ -71,7 +84,7 @@ jobs:
           echo "worker source: $SOURCE_REPO@$SOURCE_REF"
           # Each row carries its own token: the ring is per-repo, so provisioning must be too.
           # A row without a token falls back to GH_RING_ADMIN_PAT (kept for the legacy path).
-          jq -c '.[]' .ring/ring.json | while read -r row; do
+          jq -c '.[] | select(.enabled != false)' .ring/ring.json | while read -r row; do
             repo=$(jq -r '.repo' <<<"$row")
             pat=$(jq -r '.token // empty' <<<"$row")
             if [ -z "$pat" ]; then pat="${ADMIN_PAT:-}"; fi
@@ -122,7 +135,7 @@ jobs:
             if [ "$MODE" = "disable" ]; then
               jq -c '{repo, enabled:false}' <<<"$row" > /tmp/body.json
             else
-              jq -c '{repo, location:(.location // ""), enabled:true}
+              jq -c '{repo, location:(.location // ""), enabled:(.enabled // true)}
                      + (if .token then {token:.token} else {} end)
                      + (if .token_ref then {token_ref:.token_ref} else {} end)' <<<"$row" > /tmp/body.json
             fi

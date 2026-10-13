@@ -66,6 +66,9 @@ function fakeD1(seed = {}) {
     return null;
   }
   function all(sql, p) {
+    if (/FROM zen_repos ORDER BY added_at, repo/.test(sql)) {
+      return [...repos.values()].sort((a, b) => String(a.added_at || '').localeCompare(String(b.added_at || '')) || a.repo.localeCompare(b.repo));
+    }
     if (/FROM zen_pool_workers WHERE state = \?1 AND lease_expires_at/.test(sql)) {
       return [...workers.values()].filter((w) => w.state === p[0] && w.lease_expires_at > p[1]);
     }
@@ -202,6 +205,21 @@ const post = (path, body, d1, extra = {}) =>
   }), env(d1, extra));
 const get = (path, d1, headers = auth) =>
   handle(new Request(`https://l.test${path}`, { headers }), env(d1));
+
+test('authenticated ring payload endpoint returns provisioning rows from the worker registry', async () => {
+  const d1 = fakeD1({ repos: [
+    { repo: 'trained-assist/gha-worker-01', location: 'eu', enabled: 1, token_ref: 'env:RING_TOKEN_01' },
+    { repo: 'trained-assist/gha-worker-02', location: 'us', enabled: 1, token_ref: 'env:RING_TOKEN_02' },
+  ] });
+  const response = await get('/zen/ring/payload', d1);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { repos: [
+    { repo: 'trained-assist/gha-worker-01', location: 'eu', enabled: true, token_ref: 'env:RING_TOKEN_01' },
+    { repo: 'trained-assist/gha-worker-02', location: 'us', enabled: true, token_ref: 'env:RING_TOKEN_02' },
+  ] });
+  const denied = await get('/zen/ring/payload', d1, {});
+  assert.equal(denied.status, 401);
+});
 
 test('rotation rule: only a spent address rotates; a transient one keeps the worker', () => {
   // daily = the ~1000-request per-IP quota is gone, provider = the bare 429 burst wall,
