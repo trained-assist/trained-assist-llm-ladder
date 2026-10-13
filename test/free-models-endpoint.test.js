@@ -168,7 +168,7 @@ test('probe: пустой ответ модели → ok:false с причино
   assert.equal(res.status, 200);
   const j = await res.json();
   assert.equal(j.ok, false, 'пустой ответ — не успех');
-  assert.match(j.note, /empty answer/, 'причина конкретная (из первой попытки), а не «every rung failed»');
+  assert.match(j.note, /no usable answer/, 'причина конкретная и безопасная, а не «every rung failed»');
 });
 
 test('probe: кривой model → 400, без токена → 401', async () => {

@@ -329,7 +329,7 @@ test('GET /v1/analytics: sources empty → no division by zero', async () => {
   assert.deepEqual(b.models, []);
 });
 
-test('GET /v1/analytics: errors — digit variants merged, re-sorted, capped at 20', async () => {
+test('GET /v1/analytics: errors redact historical provider bodies while merging safe status buckets', async () => {
   const d1 = fakeD1({
     // Raw rows arrive frequency-ordered; after normalize+merge the order can change.
     errorRows: [
@@ -344,14 +344,14 @@ test('GET /v1/analytics: errors — digit variants merged, re-sorted, capped at 
   const b = await r.json();
 
   assert.ok(Array.isArray(b.errors), 'errors array present');
-  assert.equal(b.errors[0].error, 'HTTP 402: {"error":{"message":"can only afford #"}}', 'digit variants merged into one bucket');
+  assert.equal(b.errors[0].error, 'provider returned HTTP 402', 'digit variants merge without returning provider body text');
   assert.equal(b.errors[0].calls, 65, '40 + 25 summed');
   assert.deepEqual(b.errors.map(e => e.calls), [65, 30, 12, 5], 're-sorted by merged count');
-  // #34 diagnostics: digits masked so one failure with varying token counts is one row
-  const guard = b.errors.find(e => e.error.startsWith('empty answer'));
-  assert.ok(guard, 'guard error present');
-  assert.equal(guard.error, 'empty answer (finish=length, out=#, reasoning=#, prompt=#, max_tokens=#)');
-  assert.match(b.errors[1].error, /^HTTP 500: upstream exploded$/);
+  assert.equal(b.errors[1].error, 'provider returned HTTP 500');
+  assert.equal(b.errors[2].error, 'provider returned no usable answer');
+  assert.equal(b.errors[3].error, 'provider timed out');
+  assert.equal(JSON.stringify(b.errors).includes('can only afford'), false);
+  assert.equal(JSON.stringify(b.errors).includes('upstream exploded'), false);
 });
 
 test('GET /v1/analytics: errors — empty window → empty array, not missing key', async () => {

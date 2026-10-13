@@ -100,7 +100,22 @@ test('GET /v1/calls: returns the per-call rung trace with attempts already parse
   assert.equal(c.chat_id, '1714048');
   assert.equal(c.tokens_cached, 0, 'an explicit provider zero survives the per-call API');
   assert.equal(c.tokens_cache_write, null, 'a missing provider counter remains unknown');
-  assert.deepEqual(c.attempts, [{ model: 'opencode-go/mimo-v2.6-flash', outcome: 'ok', key: 0 }]);
+  assert.deepEqual(c.attempts, [{ model: 'opencode-go/mimo-v2.6-flash', outcome: 'ok' }]);
+});
+
+test('GET /v1/calls: historical raw provider bodies are redacted on read', async () => {
+  const row = { ...ROW, ok: 0, attempts: JSON.stringify([
+    { model: 'openrouter/example/model', outcome: 'error', key: 0,
+      error: 'HTTP 503: PRIVATE_PROMPT and private upstream body' },
+  ]) };
+  const r = await handle(authed('?trace=task-7'),
+    { ...ENV, LADDER_TRACE_DB: fakeD1({ rows: [row] }) }, {});
+  const { calls } = await r.json();
+  assert.deepEqual(calls[0].attempts[0], {
+    model: 'openrouter/example/model', outcome: 'error', source: 'provider',
+    reason_code: 'provider_http_error', http_status: 503, error: 'provider returned HTTP 503',
+  });
+  assert.equal(JSON.stringify(calls).includes('PRIVATE_PROMPT'), false);
 });
 
 test('GET /v1/calls: abandoned response stays visible as unconfirmed, never claimed complete', async () => {

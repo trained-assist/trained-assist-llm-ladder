@@ -3,6 +3,7 @@
 // handler and exports the LadderState Durable Object for the platform binding.
 
 import { run, readPool, fetchGoUsage, fetchOrUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
+import { safeAttemptDiagnostics } from './diagnostics.js';
 import { makeTrace, logCall, beginStreamCall, settleStreamCall } from './trace.js';
 import { settleStream } from './stream-settlement.js';
 import { createProgressRecorder, progressEventsResponse, validCallId } from './progress.js';
@@ -483,7 +484,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       const { results = [] } = await db.prepare(CALLS_SQL)
         .bind(since, trace, user, chat, session, limit).all();
       const calls = results.map((r) => {
-        const attempts = r.attempts ? JSON.parse(r.attempts) : null;
+        const attempts = r.attempts ? safeAttemptDiagnostics(JSON.parse(r.attempts)) : null;
         const pending = attempts?.at(-1)?.outcome === 'stream_pending';
         // A client disconnect may never invoke ReadableStream.cancel in Workerd. After
         // two minutes the row is unconfirmed, not a proven provider failure.
@@ -592,7 +593,9 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       // can promote a variant, so re-sort after grouping.
       const errGroups = new Map();
       for (const r of errRows) {
-        const key = normalizeError(r.err);
+        // Older rows may contain a provider body. Keep a useful status/reason bucket while
+        // ensuring analytics never returns that historical text to a caller.
+        const key = safeAttemptDiagnostics([{ model: 'unknown', outcome: 'error', error: r.err }])[0].error;
         errGroups.set(key, (errGroups.get(key) || 0) + num(r.n));
       }
       const errors = [...errGroups.entries()]
@@ -714,8 +717,8 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       // одноступенчатой probe-лестнице там всегда конкретика (`empty answer (out=0, …)`).
       note: r.ok
         ? (content ? '' : 'пустой ответ')
-        : String(r.attempts?.find((a) => a.error)?.error || r.error || '').slice(0, 300),
-      attempts: (r.attempts || []).map((a) => ({ model: a.model, outcome: a.outcome, error: a.error || null })),
+        : (safeAttemptDiagnostics(r.attempts).find((a) => a.error)?.error || 'provider request failed'),
+      attempts: safeAttemptDiagnostics(r.attempts),
     });
   }
 
@@ -760,6 +763,10 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       conversation, appSlug, appTitle, cacheVariant: cacheVariant ?? null,
       ...(progress ? { onProgress: publishProgress } : {}),
     });
+    // Internal retry classification sees the original errors inside run(); only the public
+    // response, durable trace and logs receive stable metadata with arbitrary provider bodies
+    // removed.
+    const diagnosticResult = { ...r, attempts: safeAttemptDiagnostics(r.attempts) };
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
@@ -775,28 +782,33 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     // coverage is visible instead of silently missing.
     trace.app = sanitizeAppSlugOrNull(appRaw);
     if (!r.ok) {
-      console.log(JSON.stringify({ ladder: chat.model, ok: false, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
-      const traceWrite = logCall(env, trace, chat.model, r, started, { events });
+      console.log(JSON.stringify({ ladder: chat.model, ok: false, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: diagnosticResult.attempts, trace }));
+      const traceWrite = logCall(env, trace, chat.model, diagnosticResult, started, { events });
       if (waitUntil) waitUntil(traceWrite);
       else await traceWrite;
       if (progress) publishProgress({ type: 'failed', reason: 'all_rungs_failed' });
       await flushProgress();
-      return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
+      return oaError(r.status, r.error, 'ladder_error', {
+        reason_code: diagnosticResult.attempts.some((attempt) => ['provider', 'zen_pool'].includes(attempt.source))
+          ? 'provider_unavailable' : 'ladder_unavailable',
+        service_status: 'operational',
+        attempts: diagnosticResult.attempts,
+      }, { 'x-ladder-attempts': attemptsHeaderWithPin });
     }
     const cacheHeaders = {
       ...(r.cacheScope ? { 'x-ladder-cache-scope': r.cacheScope } : {}),
       'x-ladder-cache-variant': r.cacheVariant || 'default',
     };
     if (r.stream) {
-      const pendingRowId = await beginStreamCall(env, trace, chat.model, r, started);
+      const pendingRowId = await beginStreamCall(env, trace, chat.model, diagnosticResult, started);
       const tracked = settleStream(r.stream, async ({ complete, reason, usage }) => {
         const final = {
-          ...r,
+          ...diagnosticResult,
           ok: complete,
           stream: undefined,
           data: usage ? { usage } : undefined,
           error: complete ? undefined : `stream ${reason} after first token`,
-          attempts: complete ? r.attempts : r.attempts.map((attempt, index) =>
+          attempts: complete ? diagnosticResult.attempts : diagnosticResult.attempts.map((attempt, index) =>
             index === r.attempts.length - 1 && attempt.outcome === 'ok'
               ? { ...attempt, outcome: 'stream_incomplete' }
               : attempt),
@@ -816,8 +828,8 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         ...cacheHeaders,
       } });
     }
-    console.log(JSON.stringify({ ladder: chat.model, ok: true, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: r.attempts, trace }));
-    const traceWrite = logCall(env, trace, chat.model, r, started, { events });
+    console.log(JSON.stringify({ ladder: chat.model, ok: true, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: diagnosticResult.attempts, trace }));
+    const traceWrite = logCall(env, trace, chat.model, diagnosticResult, started, { events });
     if (waitUntil) waitUntil(traceWrite);
     else await traceWrite;
     if (progress) publishProgress({ type: 'completed', model: r.model, attempt: r.attempts.length });
