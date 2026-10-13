@@ -585,7 +585,14 @@ export function summarizeRun(run) {
     byProvider[p.provider] = { ok: p.ok, count: p.count, error: p.error ?? null };
   }
   const probeCounts = {};
-  for (const v of Object.values(run.probes)) probeCounts[v.probe_status] = (probeCounts[v.probe_status] || 0) + 1;
+  const probesByProvider = {};
+  for (const [modelId, v] of Object.entries(run.probes)) {
+    const status = String(v.probe_status || 'unknown');
+    probeCounts[status] = (probeCounts[status] || 0) + 1;
+    const provider = String(modelId).split('/')[0];
+    const counts = probesByProvider[provider] ||= {};
+    counts[status] = (counts[status] || 0) + 1;
+  }
   return {
     collected: run.collected,
     by_provider: byProvider,
@@ -593,6 +600,7 @@ export function summarizeRun(run) {
     probe_events_written: run.probe_events_written ?? 0,
     benchmarked: run.benchmarks?.length || 0,
     probe_counts: probeCounts,
+    probe_counts_by_provider: probesByProvider,
     written: run.written,
     appeared: run.diff.appeared.length,
     gone: run.diff.gone.length,
@@ -620,6 +628,9 @@ export function markdownReport(run) {
   }
   const pc = Object.entries(s.probe_counts).map(([k, v]) => `${k} ${v}`).join(', ');
   if (pc) L.push(`probe: ${pc}`);
+  for (const [provider, counts] of Object.entries(s.probe_counts_by_provider)) {
+    L.push(`probe ${provider}: ${Object.entries(counts).map(([status, count]) => `${status} ${count}`).join(', ')}`);
+  }
   if (s.appeared) {
     L.push('', `### New (${s.appeared})`, '');
     for (const r of run.diff.appeared) {

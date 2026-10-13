@@ -443,12 +443,14 @@ test('readFreeModels: reads the whole inventory ordered by provider, model', asy
 
 test('markdownReport: a degraded provider is visible in the summary line', async () => {
   const routes = { ...CATALOGS, [GO_MODELS]: [500, { error: 'boom' }] };
-  const run = await collectFreeModels(ENV, fakeD1(), { fetchImpl: fakeFetch(routes), config, probe: false, now: 5000 });
+  const run = await collectFreeModels(ENV, fakeD1(), { fetchImpl: fakeFetch(routes), config, probe: true, probeLimit: 10, now: 5000 });
   const md = markdownReport(run);
   assert.match(md, /⚠ opencode-go 0 \(HTTP 500/);
+  assert.match(md, /probe openrouter: ok \d+/);
   const s = summarizeRun(run);
   assert.equal(s.by_provider['opencode-go'].ok, false);
   assert.equal(s.collected, 4);
+  assert.ok(s.probe_counts_by_provider.openrouter.ok > 0);
 });
 
 test('readPool: the Go pool is read from the worker secret, order preserved', () => {
