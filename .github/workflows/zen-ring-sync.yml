@@ -119,6 +119,12 @@ jobs:
             echo "provision $repo var ZEN_DAILY_BUDGET rc=$code"
             code=$(GH_TOKEN="$pat" gh secret set ZEN_RUNNER_TOKEN --repo "$repo" < /tmp/runner-token >/dev/null 2>&1; echo $?)
             echo "provision $repo secret ZEN_RUNNER_TOKEN rc=$code"
+            # Old workflow runs uploaded prompts/responses as `zen-pool-*` artifacts. Delete only
+            # those payload-bearing artifacts while the per-repo admin token is in scope.
+            if ! GH_TOKEN="$pat" bash scripts/purge-zen-artifacts.sh "$repo"; then
+              echo "artifact cleanup failed for $repo" >&2
+              exit 1
+            fi
           done
           rm -f /tmp/runner-token
 
