@@ -424,7 +424,7 @@ export const STALE_TASK_MS = 10 * 60_000;
 export async function reapStaleTasks(env, now = Date.now()) {
   if (!env.ZEN_DB) return { ok: false, reaped: 0 };
   const res = await env.ZEN_DB.prepare(
-    "DELETE FROM zen_pool_tasks WHERE state IN ('queued', 'claimed') AND enqueued_at < ?1"
+    "DELETE FROM zen_pool_tasks WHERE state IN ('queued', 'claimed', 'abandoned') AND enqueued_at < ?1"
   ).bind(now - STALE_TASK_MS).run();
   const reaped = res?.meta?.changes ?? 0;
   if (reaped) console.log(JSON.stringify({ route: 'zen/reap', reaped, older_than_ms: STALE_TASK_MS }));

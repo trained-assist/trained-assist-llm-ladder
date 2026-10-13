@@ -18,6 +18,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { createZenClient } from './zen-client.mjs';
+import { normalizeZenResponse } from './zen-response.mjs';
 
 const T0 = Date.now();
 const iso = () => new Date().toISOString();
@@ -125,25 +126,20 @@ async function serve(task) {
     ...(task.options?.response_format !== undefined ? { responseFormat: task.options.response_format } : {}),
     ...(task.options?.tool_choice !== undefined ? { toolChoice: task.options.tool_choice } : {}),
   });
-  const text = res.ok ? String(res.message?.content ?? '').trim() : '';
-  // A tool-call answer with no text IS an answer — the rest of the stack already treats it that
-  // way (`attemptJson` in src/ladder.js: «A tool-call answer with no text is a valid answer»),
-  // but this worker required text as well. An agent that got a tool call back was therefore
-  // written down as a FAILED task with an empty body, which the ladder reports as
-  // `zen-rings: ok` and then health-skips the head rung for every other caller.
-  const hasTools = res.ok && Array.isArray(res.message?.tool_calls) && res.message.tool_calls.length > 0;
+  const normalized = normalizeZenResponse(res, task.model);
+  const { text, ok, kind, error, tool_calls: toolCalls } = normalized;
   const record = {
-    ok: !!res.ok && (text.length > 0 || hasTools),
+    ok,
     model: task.model,
     prompt: task.prompt,
     text,
-    kind: res.ok ? 'ok' : res.kind,
+    kind,
     stopped_by: res.ok ? null : (res.stopped_by || null),
     status: res.status ?? null,
-    error: res.ok ? null : String(res.error || res.bodySnippet || '').slice(0, 500),
+    error,
     provider_ms: res.ms ?? null,
     served_ms: Date.now() - started,
-    ...(res.ok && res.message?.tool_calls?.length ? { tool_calls: res.message.tool_calls } : {}),
+    ...(toolCalls ? { tool_calls: toolCalls } : {}),
     ...(res.ok && res.usage ? { usage: res.usage } : {}),
     ...(res.ok && res.finish_reason ? { finish_reason: res.finish_reason } : {}),
     runner: {

@@ -274,6 +274,25 @@ async function readTask(env, id) {
   return await db(env).prepare('SELECT * FROM zen_pool_tasks WHERE id = ?1').bind(id).first();
 }
 
+// Release work the ladder has already failed over from, but only if no worker has claimed it.
+// The state predicate races atomically with claimTask's queued→claimed UPDATE: whichever writes
+// first owns the task. A claimed provider request is already in flight and is never cancelled.
+export async function abandonQueuedTasks(env, taskIds, reason = 'caller moved on') {
+  if (!env.ZEN_DB) return { abandoned: 0, still_claimed: 0 };
+  let abandoned = 0;
+  let stillClaimed = 0;
+  for (const id of [...new Set((Array.isArray(taskIds) ? taskIds : [taskIds]).filter(Boolean).map(String))]) {
+    const result = await db(env).prepare(
+      `UPDATE zen_pool_tasks SET state = 'abandoned', ok = 0, kind = 'abandoned', error = ?1, finished_at = ?2
+       WHERE id = ?3 AND state = 'queued'`
+    ).bind(String(reason).slice(0, 160), nowMs(env), id).run();
+    if (result?.meta?.changes) { abandoned++; continue; }
+    const row = await readTask(env, id);
+    if (row?.state === 'claimed') stillClaimed++;
+  }
+  return { abandoned, still_claimed: stillClaimed };
+}
+
 async function readLiveWorkers(env, now) {
   return (await db(env).prepare(
     'SELECT * FROM zen_pool_workers WHERE state = ?1 AND lease_expires_at > ?2 ORDER BY last_seen_at DESC'
@@ -619,6 +638,10 @@ async function awaitRacedAnswer(env, ids, { waitMs, cold = null }) {
     if (win >= 0) {
       const row = rows[win];
       const { id, model } = ids[win];
+      // A winning hedge makes any not-yet-claimed alternatives useless. Do not cancel work
+      // that a runner has already taken; the conditional UPDATE resolves that race safely.
+      try { await abandonQueuedTasks(env, ids.filter((_, index) => index !== win).map((task) => task.id), 'another rung won'); }
+      catch (error) { console.error('zen pool hedge cleanup failed:', error?.message || error); }
       return {
         status: 200,
         data: {
@@ -632,14 +655,14 @@ async function awaitRacedAnswer(env, ids, { waitMs, cold = null }) {
         },
       };
     }
-    const allTerminal = rows.every((row) => row && (row.state === 'done' || row.state === 'failed'));
+    const allTerminal = rows.every((row) => row && ['done', 'failed', 'abandoned', 'expired'].includes(row.state));
     if (allTerminal) {
       const first = rows.find((row) => row && row.state === 'done' && !row.ok) || rows.find((row) => row) || {};
       return {
         status: 502,
         data: {
           task_id: ids[0].id, model: first.model || ids[0].model, ok: false, text: null, kind: first.kind,
-          error: first.error || 'empty answer from every raced model',
+          error: first.error || (first.state === 'abandoned' ? 'caller no longer waiting' : 'empty answer from every raced model'),
           raced, provider_ms: first.provider_ms, served_ms: first.served_ms, wait_ms: waitMs,
           ...(first.tool_calls ? { tool_calls: JSON.parse(first.tool_calls) } : {}),
           ...(first.usage ? { usage: JSON.parse(first.usage) } : {}),
@@ -833,13 +856,14 @@ export async function ringWaitForTask(env, taskId, { deadlineMs = 60_000 } = {})
     const rows = await Promise.all(ids.map(id => readTask(env, String(id || ''))));
     if (rows.every(row => !row)) return { ok: false, data: { error: 'unknown task' } };
     const winner = rows.find(row => row && row.state === 'done' && (row.ok || row.tool_calls));
-    const terminal = rows.every(row => !row || row.state === 'done' || row.state === 'failed' || row.state === 'expired');
+    const terminal = rows.every(row => !row || ['done', 'failed', 'expired', 'abandoned'].includes(row.state));
     const row = winner || rows.find(row => row);
     if (winner || terminal) {
       return {
         ok: row.state === 'done',
         data: {
           task_id: row.id, model: row.model, ok: !!row.ok, text: row.text || null, kind: row.kind,
+          state: row.state,
           error: row.error, provider_ms: row.provider_ms, served_ms: row.served_ms,
           worker_id: row.worker_id,
           ...(row.tool_calls ? { tool_calls: JSON.parse(row.tool_calls) } : {}),

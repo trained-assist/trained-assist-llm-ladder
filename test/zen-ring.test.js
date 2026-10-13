@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { handle } from '../src/handler.js';
-import { run } from '../src/ladder.js';
+import { run, ringCall, shouldRetryRingCall } from '../src/ladder.js';
 import { memoryStore } from '../src/state.js';
 import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
@@ -10,6 +10,7 @@ import {
   RING_CEILING, RING_RESERVE, RING_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS, BACKLOG_FACTOR,
   ringCooldown, ringInvoke, ringWaitForTask, zenRingRegister, runMaintenance, ZEN_MAX_INPUT_BYTES, ZEN_MODEL_MAX_INPUT_BYTES,
   ZEN_RACE_MAX_INPUT_BYTES, ZEN_RACE_MODELS, ZEN_RACE_MAX, raceModelsFor, zenContextOf, ZEN_MODEL_CONTEXTS,
+  abandonQueuedTasks,
 } from '../src/zen-ring.js';
 import { STALE_TASK_MS } from '../src/zen-runner.js';
 import { classifyError } from '../src/classify.js';
@@ -78,7 +79,7 @@ function fakeD1(seed = {}) {
     if (/DELETE FROM zen_pool_tasks WHERE state IN/.test(sql)) {
       const before = tasks.size;
       for (const [k, t] of [...tasks]) {
-        if ((t.state === 'queued' || t.state === 'claimed') && t.enqueued_at < p[0]) tasks.delete(k);
+        if ((t.state === 'queued' || t.state === 'claimed' || t.state === 'abandoned') && t.enqueued_at < p[0]) tasks.delete(k);
       }
       return { success: true, meta: { changes: before - tasks.size } };
     }
@@ -127,6 +128,7 @@ function fakeD1(seed = {}) {
     if (/INSERT INTO zen_pool_tasks/.test(sql)) {
       const [id, model, prompt, messages, tools, maxTokens, waitMs, state, enqueued, options] = p;
       tasks.set(id, { id, model, prompt, messages, tools, options, max_tokens: maxTokens, wait_ms: waitMs, state, enqueued_at: enqueued });
+      seed.onTaskInsert?.(tasks.get(id));
       return { success: true, meta: { changes: 1 } };
     }
     if (/UPDATE zen_pool_tasks SET wait_returned_at/.test(sql)) {
@@ -134,8 +136,8 @@ function fakeD1(seed = {}) {
       return { success: true, meta: { changes: t ? 1 : 0 } };
     }
     if (/UPDATE zen_pool_tasks SET state = 'abandoned'/.test(sql)) {
-      const t = tasks.get(p[1]);
-      if (t && t.state === 'queued') { t.state = 'abandoned'; return { success: true, meta: { changes: 1 } }; }
+      const t = tasks.get(p[2]);
+      if (t && t.state === 'queued') { t.state = 'abandoned'; t.ok = 0; t.kind = 'abandoned'; t.error = p[0]; t.finished_at = p[1]; return { success: true, meta: { changes: 1 } }; }
       return { success: true, meta: { changes: 0 } };
     }
     if (/INSERT INTO zen_models/.test(sql)) {
@@ -984,6 +986,48 @@ const registerWorkers = async (d1, n = 3, envBase = {}) => {
   }
 };
 
+test('watchdog failover abandons queued work and does not enqueue a duplicate', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  await registerWorkers(d1, 1, { RING_TOKEN: 'gh-tok' });
+  const result = await ringCall(env2, {
+    model: 'nemotron-3.5-lightning-free', prompt: 'short synthetic request', wait_ms: 1,
+  }, fetch, 1);
+  assert.equal(result.status, 504, 'the configured caller wait still expires');
+  assert.equal(result.data.abandoned_tasks, 1);
+  assert.match(result.data.hint, /no worker will spend quota/);
+  assert.equal(d1._tasks.size, 1, 'only the original enqueue exists; no retry was posted');
+  assert.equal([...d1._tasks.values()][0].state, 'abandoned');
+  assert.equal(shouldRetryRingCall(result), false, 'accepted task_id prevents a second enqueue');
+  assert.equal(shouldRetryRingCall({ status: 503, data: { error: 'worker not warm' } }), true,
+    'a failure before enqueue can still be retried once');
+});
+
+test('watchdog never abandons a task that a worker already claimed', async () => {
+  const d1 = fakeD1({ repos: [RING], onTaskInsert: (task) => { task.state = 'claimed'; task.claimed_at = NOW; } });
+  const env2 = { ...ENV, ZEN_DB: d1, ZEN_NOW_MS: NOW, RING_TOKEN: 'gh-tok', OPENROUTER_API_KEY: 'k' };
+  await registerWorkers(d1, 1, { RING_TOKEN: 'gh-tok' });
+  const result = await ringCall(env2, {
+    model: 'nemotron-3.5-lightning-free', prompt: 'short synthetic request', wait_ms: 1,
+  }, fetch, 1);
+  assert.equal(result.status, 504);
+  assert.equal(result.data.abandoned_tasks, 0);
+  assert.equal(result.data.claimed_tasks, 1);
+  assert.match(result.data.hint, /already-claimed provider request may still finish/);
+  assert.equal([...d1._tasks.values()][0].state, 'claimed');
+});
+
+test('abandonQueuedTasks only performs the atomic queued → abandoned transition', async () => {
+  const d1 = fakeD1();
+  d1._tasks.set('queued', { id: 'queued', state: 'queued' });
+  d1._tasks.set('claimed', { id: 'claimed', state: 'claimed' });
+  assert.deepEqual(await abandonQueuedTasks({ ZEN_DB: d1, ZEN_NOW_MS: NOW }, ['queued', 'claimed']), {
+    abandoned: 1, still_claimed: 1,
+  });
+  assert.equal(d1._tasks.get('queued').state, 'abandoned');
+  assert.equal(d1._tasks.get('claimed').state, 'claimed');
+});
+
 // Один потолок на всех был ошибкой: модели держат разный размер. Замер 2026-10-08 (5394 задачи,
 // байты JSON messages): в полосе 20–50 KB nemotron держит 62 % (661/1072), а mimo — 18 % (33/186).
 // В полосе ГОНКИ свой потолок больше не отказывает: mimo участвует как одна из моделей, и её
@@ -1036,6 +1080,8 @@ test('гонка: пустой ответ не побеждает — возвр
   assert.equal(r.data.model, 'big-pickle', 'побеждает тот, кто написал текст');
   assert.equal(r.data.text, 'готово');
   assert.ok(Array.isArray(r.data.raced) && r.data.raced.length >= 2, 'в ответе видно, кого гоняли');
+  assert.ok([...d1._tasks.values()].every((task) => task.state !== 'queued'),
+    'queued hedge alternatives are abandoned after a winner, before workers spend their quota');
 });
 
 test('гонка: если никто не ответил непустым — отказ с перечнем моделей', async () => {

@@ -20,6 +20,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { createZenClient } from './zen-client.mjs';
+import { normalizeZenResponse } from './zen-response.mjs';
 
 const T0 = Date.now();
 const iso = () => new Date().toISOString();
@@ -65,20 +66,20 @@ const t = mark('request_sent', { model: args.model, prompt_chars: args.prompt.le
 const res = await client.chat({ model: args.model, messages, maxTokens: args.maxTokens });
 mark('response_received', { ok: !!res.ok, ms: res.ms ?? null, kind: res.kind || 'ok' });
 
-const text = res.ok
-  ? String(res.message?.content ?? '').trim()
-  : '';
+const normalized = normalizeZenResponse(res, args.model);
+const { text, ok, kind, error, tool_calls: toolCalls } = normalized;
 const record = {
-  ok: !!res.ok && text.length > 0,
+  ok,
   model: args.model,
   prompt: args.prompt,
   text,
   finish_reason: res.finish_reason ?? null,
   usage: res.usage ?? null,
   provider_ms: res.ms ?? null,
-  kind: res.ok ? 'ok' : res.kind,
+  kind,
   status: res.status ?? null,
-  error: res.ok ? null : String(res.error || res.bodySnippet || '').slice(0, 500),
+  error,
+  ...(toolCalls ? { tool_calls: toolCalls } : {}),
   runner: {
     run_id: process.env.ZEN_RUN_ID || null,
     run_attempt: process.env.GITHUB_RUN_ATTEMPT || null,

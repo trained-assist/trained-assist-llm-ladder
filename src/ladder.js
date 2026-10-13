@@ -16,7 +16,7 @@ export { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, resetFree
 
 import { classifyError } from './classify.js';
 import { estimateTokens, hedgePlan, ttfbFactor } from './size-policy.js';
-import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown } from './zen-ring.js';
+import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
@@ -520,11 +520,40 @@ async function raceGoKeys(model, primaryKey, count, poolSize, tried, attemptKey)
 // short grace for the answer that is already in flight rather than starting a duplicate task. The
 // grace is bounded — the task already had the caller's whole rung budget, so a longer wait would
 // only delay the failover.
-async function ringCall(env, payload, fetchImpl, graceMs = 15_000) {
+export async function ringCall(env, payload, fetchImpl, graceMs = 15_000) {
   let r = await ringInvoke(env, payload, fetchImpl);
   if (r.status === 504 && r.data?.task_id) {
-    const w = await ringWaitForTask(env, r.data.task_ids || r.data.task_id, { deadlineMs: graceMs });
+    const taskIds = r.data.task_ids || [r.data.task_id];
+    const w = await ringWaitForTask(env, taskIds, { deadlineMs: graceMs });
     if (w.ok) return { status: 200, data: w.data };
+    // The caller is about to fail over. Release any task a worker has not taken yet; claimed
+    // work may finish, but it cannot be cancelled safely. Never submit this timed-out call again.
+    let cleanup = { abandoned: 0, still_claimed: 0 };
+    let taskRows = [];
+    try {
+      cleanup = await abandonQueuedTasks(env, taskIds, 'ladder caller failed over after watchdog');
+      taskRows = await Promise.all(taskIds.map((id) => env.ZEN_DB.prepare(
+        'SELECT id, state FROM zen_pool_tasks WHERE id = ?1'
+      ).bind(id).first()));
+    } catch (error) {
+      // Cleanup failure must not turn a provider timeout into a thrown handler error. The
+      // initial wait_returned_at marker and stale-task reaper remain as recovery paths.
+      console.error('zen pool watchdog cleanup failed:', error?.message || error);
+    }
+    const completedTasks = taskRows.some((row) => row && ['done', 'failed'].includes(row.state));
+    r = { ...r, data: {
+      ...r.data,
+      abandoned_tasks: cleanup.abandoned,
+      claimed_tasks: cleanup.still_claimed,
+      hint: cleanup.still_claimed
+        ? 'queued work was abandoned; an already-claimed provider request may still finish; task state is available from GET /zen/pool/result/{task_id}'
+        : cleanup.abandoned
+          ? 'queued work was abandoned after the watchdog; no worker will spend quota on it'
+          : completedTasks
+            ? 'the task finished during the grace period; its result is recorded and will not be submitted again'
+            : 'no queued work remains after the watchdog; task state is available from GET /zen/pool/result/{task_id}',
+      task_states: taskRows.filter(Boolean).map((row) => ({ task_id: row.id, state: row.state })),
+    } };
   }
   return r;
 }
@@ -567,7 +596,7 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
   // 413 (input too long for the free tier) is decided locally before anything is queued: the same
   // payload cannot fit on a second attempt either, so there is nothing to retry — unlike a transient
   // fault or a cold ring, where a second look genuinely can succeed.
-  if (r.status !== 200 && r.status !== 429 && r.status !== 413) r = await ringCall(env, payload, fetchImpl);
+  if (shouldRetryRingCall(r)) r = await ringCall(env, payload, fetchImpl);
   if (r.status !== 200 || !r.data?.ok) {
     // No status code in the message on purpose: '429'/'503' would classify as a quota skip (up to
     // 1h), and a pool that is merely cold or briefly over its per-minute cap is transient.
@@ -608,6 +637,12 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
   const sse = `data: ${JSON.stringify(head)}\n\ndata: ${JSON.stringify(tail)}\n\ndata: [DONE]\n\n`;
   const stream = new ReadableStream({ start(c) { c.enqueue(enc.encode(sse)); c.close(); } });
   return { ok: true, stream };
+}
+
+// A 504 carrying task_id means the work has already been enqueued and charged. Polling that id
+// is the only safe continuation; a second invoke would charge and serve a duplicate request.
+export function shouldRetryRingCall(result) {
+  return result.status !== 200 && !result.data?.task_id && result.status !== 429 && result.status !== 413;
 }
 
 /**
