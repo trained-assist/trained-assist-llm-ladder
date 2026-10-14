@@ -184,15 +184,118 @@ function bearerToken(request) {
   return m ? m[1].trim() : null;
 }
 
-function authorized(request, env) {
+async function authenticate(request, env) {
   const token = bearerToken(request);
-  if (!token) return false;
+  if (!token) return null;
   const additional = typeof env.LADDER_TOKENS === 'string' ? env.LADDER_TOKENS.split(',').map((token) => token.trim()) : [];
-  const accepted = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS, ...additional]
+  const adminTokens = [env.LADDER_TOKEN, env.LADDER_TOKEN_PREVIOUS]
     .filter((candidate) => typeof candidate === 'string' && candidate.length > 0);
-  let matches = false;
-  for (const candidate of accepted) matches = timingSafeEqual(token, candidate) || matches;
-  return matches;
+  let adminMatch = false;
+  for (const candidate of adminTokens) adminMatch = timingSafeEqual(token, candidate) || adminMatch;
+  if (adminMatch) return { userId: null, role: 'owner', tokenKind: 'admin' };
+  let legacyMatch = false;
+  for (const candidate of additional) {
+    if (candidate) legacyMatch = timingSafeEqual(token, candidate) || legacyMatch;
+  }
+  if (legacyMatch) return { userId: null, role: 'legacy', tokenKind: 'legacy' };
+
+  // Personal keys are looked up by their SHA-256 hash in the canonical identity tables.
+  // A D1 error fails closed, while the existing environment tokens remain usable above.
+  if (!env.LADDER_TRACE_DB) return null;
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+    const keyHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    const user = await env.LADDER_TRACE_DB.prepare(
+      `SELECT u.user_id, u.role, u.status, u.email,
+              k.status AS key_status, k.expires_at, k.revoked_at
+       FROM identity_api_keys k
+       JOIN identity_users u ON u.user_id = k.user_id
+       WHERE k.key_hash = ?1`
+    ).bind(keyHash).first();
+    if (!user || user.status !== 'active' || user.key_status !== 'active'
+        || user.revoked_at !== null
+        || (user.expires_at !== null && user.expires_at <= Date.now())) return null;
+    env.LADDER_TRACE_DB.prepare(
+      'UPDATE identity_api_keys SET last_used_at = ?1 WHERE key_hash = ?2'
+    ).bind(Date.now(), keyHash).run().catch(() => {});
+    return { userId: user.user_id, role: user.role, email: user.email, tokenKind: 'personal' };
+  } catch {
+    return null;
+  }
+}
+
+function randomBase64Url(size = 32) {
+  const bytes = new Uint8Array(size);
+  crypto.getRandomValues(bytes);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function hashPersonalKey(token) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function isAdmin(auth) {
+  return auth.tokenKind === 'admin' || auth.role === 'admin' || auth.role === 'owner';
+}
+
+async function adminUsersRoute(request, env, auth, pathname) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'identity database not configured', 'unavailable');
+  if (request.method !== 'POST') return oaError(405, 'method not allowed', 'invalid_request_error', {}, { allow: 'POST' });
+
+  let body;
+  try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return oaError(400, 'json object required', 'invalid_request_error');
+  const now = Date.now();
+  const userMatch = /^\/v1\/users\/([A-Za-z0-9_-]{1,100})\/tokens$/.exec(pathname);
+  const adminKeyMatch = /^\/v1\/admin\/users\/([A-Za-z0-9_-]{1,100})\/keys$/.exec(pathname);
+  if (pathname === '/v1/admin/users') {
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const requestedUserId = typeof body.user_id === 'string' ? body.user_id.trim() : '';
+    const role = typeof body.role === 'string' ? body.role.trim() : 'user';
+    const allowedRoles = auth.tokenKind === 'admin' ? ['user', 'recruiter', 'sales', 'admin'] : ['user', 'recruiter', 'sales'];
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return oaError(400, 'valid email required', 'invalid_request_error');
+    }
+    if (requestedUserId && !/^[A-Za-z0-9_-]{1,100}$/.test(requestedUserId)) {
+      return oaError(400, 'user_id must contain only letters, numbers, hyphens, or underscores', 'invalid_request_error');
+    }
+    if (!allowedRoles.includes(role)) return oaError(400, 'unsupported role', 'invalid_request_error');
+    const userId = requestedUserId || `usr_${randomBase64Url(12)}`;
+    const token = randomBase64Url();
+    const keyHash = await hashPersonalKey(token);
+    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 80) : 'OpenCode';
+    try {
+      await db.batch([
+        db.prepare(`INSERT INTO identity_users (user_id, email, role, service, status, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, 'ladder', 'active', ?4, ?4)`).bind(userId, email, role, now),
+        db.prepare(`INSERT INTO identity_api_keys (key_hash, user_id, label, status, created_at)
+                    VALUES (?1, ?2, ?3, 'active', ?4)`).bind(keyHash, userId, label, now),
+      ]);
+    } catch (error) {
+      if (/unique|constraint/i.test(String(error && error.message || ''))) {
+        return oaError(409, 'account already exists', 'conflict_error');
+      }
+      return oaError(503, 'identity database unavailable', 'unavailable');
+    }
+    return json(201, { user: { user_id: userId, email, role, status: 'active' }, token, label });
+  }
+  if (userMatch || adminKeyMatch) {
+    const userId = decodeURIComponent((userMatch || adminKeyMatch)[1]);
+    const user = await db.prepare('SELECT user_id, status FROM identity_users WHERE user_id = ?1').bind(userId).first();
+    if (!user || user.status !== 'active') return oaError(404, 'active user not found', 'invalid_request_error');
+    const token = randomBase64Url();
+    const keyHash = await hashPersonalKey(token);
+    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 80) : 'OpenCode';
+    await db.prepare(`INSERT INTO identity_api_keys (key_hash, user_id, label, status, created_at)
+                      VALUES (?1, ?2, ?3, 'active', ?4)`).bind(keyHash, userId, label, now).run();
+    return json(201, { user_id: userId, token, label });
+  }
+  return oaError(404, 'not found', 'invalid_request_error');
 }
 
 // Pin kill-switch: LADDER_PIN_ENABLED=false/0/off disables sticky rungs entirely (no pin
@@ -343,7 +446,22 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   const mResult = /^\/zen\/pool\/result\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
   if (request.method === 'GET' && mResult) return ring.zenRingResultById(request, env, mResult[1]);
 
-  if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
+  const auth = await authenticate(request, env);
+  if (!auth) return oaError(401, 'unauthorized', 'auth_error');
+
+  if (url.pathname === '/v1/admin/users' || url.pathname.startsWith('/v1/admin/users/')
+      || /^\/v1\/users\/[A-Za-z0-9_-]{1,100}\/tokens$/.test(url.pathname)) {
+    return adminUsersRoute(request, env, auth, url.pathname);
+  }
+
+  // Personal keys are for the user-facing model API only. Existing owner and legacy
+  // service tokens retain the operational API surface; a personal key cannot read
+  // aggregate analytics/state or trigger maintenance routes.
+  if (auth.tokenKind === 'personal'
+      && !((request.method === 'GET' && url.pathname === '/v1/models')
+        || (request.method === 'POST' && url.pathname === '/v1/chat/completions'))) {
+    return oaError(403, 'endpoint is not available to personal keys', 'permission_error');
+  }
 
   const progressRoute = /^\/v1\/calls\/([0-9a-f-]{36})\/events$/i.exec(url.pathname);
   if (request.method === 'GET' && progressRoute) return progressEventsResponse(request, env, progressRoute[1]);
@@ -788,6 +906,9 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
     const attemptsHeaderWithPin = conversation ? attemptsHeader + `, pin=${r.pin || 'none'}` : attemptsHeader;
     const trace = makeTrace(request);
+    // A personal key is authoritative for attribution; callers cannot bill another user
+    // by supplying x-ladder-user. Legacy service tokens retain their existing header behavior.
+    if (auth.tokenKind === 'personal') trace.userId = auth.userId;
     // The D1 row carries the SAME slug as the OpenRouter "Application" cut (#107) — the sanitised
     // value, not the raw header, so the two views of one call can never disagree.
     //

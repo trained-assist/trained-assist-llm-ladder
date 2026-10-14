@@ -31,6 +31,34 @@ printf '%s' "$NEW_TOKEN" | npx wrangler secret put LADDER_TOKENS   # или пр
 
 Ответ на неверный токен: `HTTP 401`.
 
+### Персональные ключи пользователей
+
+Для ключа, который связывает Ladder и MCP с конкретным `user_id`, не добавляйте токен в
+`LADDER_TOKENS`: этот список предназначен для общих клиентских credentials и не задаёт
+пользовательскую identity. Администратор создаёт пользователя через `POST /v1/admin/users`,
+а для уже существующего пользователя выпускает дополнительный ключ через
+`POST /v1/users/{user_id}/tokens`. Оба запроса требуют административный `LADDER_TOKEN`.
+
+Секрет появляется в ответе ровно один раз; в D1 сохраняется только SHA-256-хэш. Сразу
+сохраните его в файл с ограниченными правами и не печатайте ответ:
+
+```bash
+set -euo pipefail
+umask 077
+TOKEN_FILE="$HOME/agent-tokens/trained-assist/personal-token"
+test ! -e "$TOKEN_FILE" || { echo 'token file already exists; refusing to overwrite' >&2; exit 1; }
+mkdir -p "$(dirname "$TOKEN_FILE")"
+response=$(curl -fsS https://llm-ladder.trainedassist.store/v1/users/trained-assist-product-owner/tokens \
+  -H "Authorization: Bearer $LADDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Mem-GPT OpenCode"}')
+printf '%s' "$response" | jq -er .token > "$TOKEN_FILE"
+unset response
+```
+
+Потерянный секрет нельзя прочитать из базы повторно: выпустите новый ключ и отзовите старый.
+Общие `LADDER_TOKEN`/`LADDER_TOKENS` не являются заменой персональному ключу для MCP.
+
 ---
 
 ## 2. Первый вызов
