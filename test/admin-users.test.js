@@ -67,6 +67,51 @@ test('admin provisioning rejects malformed explicit identity IDs', async () => {
   }
 });
 
+test('identity provisioning creates an explicit Ladder user without a key and safely retries', async () => {
+  const { db, env } = await setup();
+  try {
+    const request = (body) => handle(new Request('https://ladder.test/v1/admin/users', {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-admin-token', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+    const payload = { user_id: 'usr_signup_123', email: 'new@example.com', role: 'user', issue_key: false };
+
+    const created = await request(payload);
+    assert.equal(created.status, 201);
+    assert.deepEqual(await created.json(), {
+      user: { user_id: 'usr_signup_123', email: 'new@example.com', role: 'user', status: 'active' },
+      existing: false,
+    });
+    assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM identity_api_keys').bind().first()).count, 0);
+
+    const retried = await request(payload);
+    assert.equal(retried.status, 200);
+    assert.equal((await retried.json()).existing, true);
+
+    const conflict = await request({ ...payload, email: 'different@example.com' });
+    assert.equal(conflict.status, 409);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM identity_users').bind().first()).count, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test('identity provisioning requires an explicit user ID when key issuance is disabled', async () => {
+  const { db, env } = await setup();
+  try {
+    const response = await handle(new Request('https://ladder.test/v1/admin/users', {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-admin-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'new@example.com', issue_key: false }),
+    }), env);
+    assert.equal(response.status, 400);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM identity_users').bind().first()).count, 0);
+  } finally {
+    db.close();
+  }
+});
+
 test('admin token endpoint issues a one-time personal token and stores only its hash', async () => {
   const { db, env } = await setup();
   try {

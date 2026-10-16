@@ -266,9 +266,35 @@ async function adminUsersRoute(request, env, auth, pathname) {
     }
     if (!allowedRoles.includes(role)) return oaError(400, 'unsupported role', 'invalid_request_error');
     const userId = requestedUserId || `usr_${randomBase64Url(12)}`;
+    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 80) : 'OpenCode';
+    const issueKey = body.issue_key !== false;
+    if (!issueKey && !requestedUserId) {
+      return oaError(400, 'user_id is required when issue_key is false', 'invalid_request_error');
+    }
+    if (!issueKey) {
+      try {
+        const existing = await db.prepare(
+          'SELECT user_id, email, role, service, status FROM identity_users WHERE user_id = ?1'
+        ).bind(userId).first();
+        if (existing) {
+          if (existing.email !== email || existing.role !== role || existing.service !== 'ladder' || existing.status !== 'active') {
+            return oaError(409, 'account identity conflicts with existing user', 'conflict_error');
+          }
+          return json(200, { user: { user_id: userId, email, role, status: 'active' }, existing: true });
+        }
+        await db.prepare(`INSERT INTO identity_users (user_id, email, role, service, status, created_at, updated_at)
+                          VALUES (?1, ?2, ?3, 'ladder', 'active', ?4, ?4)`)
+          .bind(userId, email, role, now).run();
+      } catch (error) {
+        if (/unique|constraint/i.test(String(error && error.message || ''))) {
+          return oaError(409, 'account already exists', 'conflict_error');
+        }
+        return oaError(503, 'identity database unavailable', 'unavailable');
+      }
+      return json(201, { user: { user_id: userId, email, role, status: 'active' }, existing: false });
+    }
     const token = randomBase64Url();
     const keyHash = await hashPersonalKey(token);
-    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 80) : 'OpenCode';
     try {
       await db.batch([
         db.prepare(`INSERT INTO identity_users (user_id, email, role, service, status, created_at, updated_at)
