@@ -193,6 +193,10 @@ async function authenticate(request, env) {
   let adminMatch = false;
   for (const candidate of adminTokens) adminMatch = timingSafeEqual(token, candidate) || adminMatch;
   if (adminMatch) return { userId: null, role: 'owner', tokenKind: 'admin' };
+  if (typeof env.IDENTITY_PROVISIONER_TOKEN === 'string' && env.IDENTITY_PROVISIONER_TOKEN.length > 0
+      && timingSafeEqual(token, env.IDENTITY_PROVISIONER_TOKEN)) {
+    return { userId: null, role: 'identity-provisioner', tokenKind: 'identity-provisioner' };
+  }
   let legacyMatch = false;
   for (const candidate of additional) {
     if (candidate) legacyMatch = timingSafeEqual(token, candidate) || legacyMatch;
@@ -242,7 +246,8 @@ function isAdmin(auth) {
 }
 
 async function adminUsersRoute(request, env, auth, pathname) {
-  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const identityProvisioner = auth.tokenKind === 'identity-provisioner';
+  if (!identityProvisioner && !isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
   const db = env.LADDER_TRACE_DB;
   if (!db) return oaError(503, 'identity database not configured', 'unavailable');
   if (request.method !== 'POST') return oaError(405, 'method not allowed', 'invalid_request_error', {}, { allow: 'POST' });
@@ -257,7 +262,8 @@ async function adminUsersRoute(request, env, auth, pathname) {
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const requestedUserId = typeof body.user_id === 'string' ? body.user_id.trim() : '';
     const role = typeof body.role === 'string' ? body.role.trim() : 'user';
-    const allowedRoles = auth.tokenKind === 'admin' ? ['user', 'recruiter', 'sales', 'admin'] : ['user', 'recruiter', 'sales'];
+    const allowedRoles = auth.tokenKind === 'admin' ? ['user', 'recruiter', 'sales', 'admin']
+      : identityProvisioner ? ['user'] : ['user', 'recruiter', 'sales'];
     if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return oaError(400, 'valid email required', 'invalid_request_error');
     }
@@ -268,6 +274,9 @@ async function adminUsersRoute(request, env, auth, pathname) {
     const userId = requestedUserId || `usr_${randomBase64Url(12)}`;
     const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 80) : 'OpenCode';
     const issueKey = body.issue_key !== false;
+    if (identityProvisioner && (issueKey || role !== 'user' || !requestedUserId)) {
+      return oaError(403, 'identity provisioner may only create keyless user accounts with an explicit ID', 'permission_error');
+    }
     if (!issueKey && !requestedUserId) {
       return oaError(400, 'user_id is required when issue_key is false', 'invalid_request_error');
     }
@@ -474,6 +483,11 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
 
   const auth = await authenticate(request, env);
   if (!auth) return oaError(401, 'unauthorized', 'auth_error');
+
+  if (auth.tokenKind === 'identity-provisioner'
+      && !(request.method === 'POST' && url.pathname === '/v1/admin/users')) {
+    return oaError(403, 'endpoint is not available to the identity provisioner', 'permission_error');
+  }
 
   if (url.pathname === '/v1/admin/users' || url.pathname.startsWith('/v1/admin/users/')
       || /^\/v1\/users\/[A-Za-z0-9_-]{1,100}\/tokens$/.test(url.pathname)) {

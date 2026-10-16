@@ -31,7 +31,7 @@ function localD1() {
 async function setup() {
   const db = localD1();
   await db.exec(await readFile(new URL('../schema/migrations/0009_identity.sql', import.meta.url), 'utf8'));
-  const env = { LADDER_TOKEN: 'test-admin-token', LADDER_TRACE_DB: db };
+  const env = { LADDER_TOKEN: 'test-admin-token', IDENTITY_PROVISIONER_TOKEN: 'test-identity-provisioner-token', LADDER_TRACE_DB: db };
   return { db, env };
 }
 
@@ -107,6 +107,35 @@ test('identity provisioning requires an explicit user ID when key issuance is di
     }), env);
     assert.equal(response.status, 400);
     assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM identity_users').bind().first()).count, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('identity provisioner can only create keyless standard users and cannot access the model API', async () => {
+  const { db, env } = await setup();
+  try {
+    const request = (path, body, method = 'POST') => handle(new Request(`https://ladder.test${path}`, {
+      method,
+      headers: { authorization: 'Bearer test-identity-provisioner-token', 'content-type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }), env);
+
+    const created = await request('/v1/admin/users', {
+      user_id: 'usr_signup_456', email: 'identity@example.com', role: 'user', issue_key: false,
+    });
+    assert.equal(created.status, 201);
+
+    assert.equal((await request('/v1/admin/users', {
+      user_id: 'usr_signup_789', email: 'token@example.com', role: 'user',
+    })).status, 403, 'provisioner cannot issue user API keys');
+    assert.equal((await request('/v1/admin/users', {
+      user_id: 'usr_signup_admin', email: 'admin@example.com', role: 'admin', issue_key: false,
+    })).status, 400, 'provisioner cannot create admin accounts');
+    assert.equal((await request('/v1/models', undefined, 'GET')).status, 403);
+    assert.equal((await request('/v1/users/usr_signup_456/tokens', {})).status, 403);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM identity_users').bind().first()).count, 1);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM identity_api_keys').bind().first()).count, 0);
   } finally {
     db.close();
   }
