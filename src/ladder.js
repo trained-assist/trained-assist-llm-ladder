@@ -417,7 +417,11 @@ function isOutputEvent(line) {
     const d = JSON.parse(payload);
     if (d.error) return false;
     const delta = d.choices?.[0]?.delta || {};
-    return !!(delta.content || delta.reasoning || delta.reasoning_content || (delta.tool_calls && delta.tool_calls.length));
+    // An empty/whitespace-only or reasoning-only frame is not real output: committing on
+    // reasoning alone lets a rung that never produces content pass as a successful stream.
+    const hasContent = typeof delta.content === 'string' && delta.content.trim().length > 0;
+    const hasTools = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
+    return !!(hasContent || hasTools);
   } catch { return false; }
 }
 
