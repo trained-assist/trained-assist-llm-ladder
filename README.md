@@ -170,6 +170,7 @@ an API response or logs.
 | GET | `/v1/admin/key-usage?period=15m\|1h\|4h\|24h\|all` | admin-only per-key, app and model usage; `key_id` is a 16-character hash prefix, not the credential; `no_usage` and `pending` remain visible |
 | GET | `/v1/admin/keys` | admin-only key labels, owners and lifecycle metadata without key values |
 | POST | `/v1/admin/keys/:key_id/suspend\|resume\|revoke` | admin-only key lifecycle; a revoked key cannot resume |
+| GET | `/admin` | same Worker, no new Cloudflare resource; the page uses an HttpOnly Secure SameSite cookie after verifying an admin key and calls only same-origin admin routes |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
 | GET | `/v1/calls/{call_id}/events` | short-lived SSE progress for the matching call (per-call secret required) |
 | GET | `/v1/free-models?provider=&available=0\|1` | the free-model inventory (D1 `free_models`) with context/price + last probe |

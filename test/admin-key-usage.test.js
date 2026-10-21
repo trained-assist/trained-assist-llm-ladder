@@ -41,6 +41,18 @@ test('admin usage attributes calls to keys and suspend/resume blocks only that k
       { ok: true, model: 'opencode-go/space-bunny-free', attempts: [], data: { usage: { prompt_tokens: 30, completion_tokens: 5 } } }, Date.now());
     const req = (path, token = 'admin', method = 'GET') => handle(new Request(`https://ladder.test${path}`,
       { method, headers: { authorization: `Bearer ${token}` } }), env);
+    const adminPage = await handle(new Request('https://ladder.test/admin'), env);
+    assert.equal(adminPage.status, 200);
+    assert.match(await adminPage.text(), /Расход по ключам/);
+    assert.equal((await handle(new Request('https://ladder.test/admin/api/keys'), env)).status, 401);
+    const connected = await handle(new Request('https://ladder.test/admin/connect', {
+      method: 'POST', headers: { origin: 'https://ladder.test', 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'key=admin',
+    }), env);
+    assert.equal(connected.status, 303);
+    assert.match(connected.headers.get('set-cookie'), /HttpOnly; Secure; SameSite=Strict/);
+    const cookie = connected.headers.get('set-cookie').split(';')[0];
+    assert.equal((await handle(new Request('https://ladder.test/admin/api/keys', { headers: { cookie } }), env)).status, 200);
     const usage = await req('/v1/admin/key-usage?period=15m');
     assert.equal(usage.status, 200);
     const row = (await usage.json()).rows[0];

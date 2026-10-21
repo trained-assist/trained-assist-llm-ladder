@@ -6,6 +6,7 @@ import { run, readPool, fetchGoUsage, fetchOrUsage, DEFAULT_LADDER, sanitizeAppS
 import { safeAttemptDiagnostics } from './diagnostics.js';
 import { makeTrace, logCall, beginStreamCall, settleStreamCall } from './trace.js';
 import { settleStream } from './stream-settlement.js';
+import { adminUi } from './admin-ui.js';
 import { createProgressRecorder, progressEventsResponse, validCallId } from './progress.js';
 import { collectFreeModels, readFreeModels, readFreeModelAvailability, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
@@ -530,6 +531,9 @@ async function poolTrigger(request, env, fetchImpl) {
 
 export async function handle(request, env, { store, fetchImpl = fetch, events, waitUntil } = {}) {
   const url = new URL(request.url);
+  if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+    return adminUi.fetch(request, (internalRequest) => handle(internalRequest, env, { store, fetchImpl, events, waitUntil }));
+  }
   if (request.method === 'GET' && url.pathname === '/health') {
     return json(200, { ok: true, ladders: Object.keys(config.ladders), build: env.BUILD_SHA || null });
   }
