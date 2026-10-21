@@ -61,8 +61,8 @@ export async function beginStreamCall(env, trace, ladder, r, started) {
       : attempt);
   try {
     const result = await db.prepare(TRACE_SQL).bind(
-      Date.now(), trace.traceId, trace.runId, trace.userId, trace.chatId,
-      trace.sessionId, ladder, 0, r.model || null, Date.now() - started,
+      Date.now(), trace.traceId ?? null, trace.runId ?? null, trace.userId ?? null, trace.chatId ?? null,
+      trace.sessionId ?? null, ladder, 0, r.model || null, Date.now() - started,
       JSON.stringify(attempts), null, null, null, null, trace.app ?? null, trace.keyHash ?? null,
     ).run();
     const rowId = result?.meta?.last_row_id;
@@ -107,7 +107,7 @@ export async function logCall(env, trace, ladder, r, started, { events, retryabl
     if (db) {
       await db.prepare(TRACE_SQL).bind(
         Date.now(),
-        trace.traceId, trace.runId, trace.userId, trace.chatId, trace.sessionId,
+        trace.traceId ?? null, trace.runId ?? null, trace.userId ?? null, trace.chatId ?? null, trace.sessionId ?? null,
         ladder, r.ok ? 1 : 0, r.model || null, Date.now() - started,
         JSON.stringify(r.attempts || []),
         ...usageValues(r),
