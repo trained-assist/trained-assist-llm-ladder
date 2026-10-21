@@ -357,6 +357,7 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 | [docs/api-guide-for-consumers.md](docs/api-guide-for-consumers.md) | с чего начать: как вызвать, какую лестницу выбрать, что делать с каждой ошибкой |
 | [docs/free-tier-limits.md](docs/free-tier-limits.md) | бесплатные потолки: зен, Go, OpenRouter `:free` |
 | [docs/go-key-management.md](docs/go-key-management.md) | ключи Go: пул, парковка, ротация, `/v1/go-usage` |
+| [docs/runner-sandbox-key.md](docs/runner-sandbox-key.md) | постоянный ключ Runner sandbox: выдать, привязать к Worker secret, перезапустить OpenCode-сервис, проверить атрибуцию |
 
 **Размеры и большой контекст**
 
