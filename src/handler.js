@@ -222,7 +222,7 @@ async function authenticate(request, env) {
     env.LADDER_TRACE_DB.prepare(
       'UPDATE identity_api_keys SET last_used_at = ?1 WHERE key_hash = ?2'
     ).bind(Date.now(), keyHash).run().catch(() => {});
-    return { userId: user.user_id, role: user.role, email: user.email, tokenKind: 'personal' };
+    return { userId: user.user_id, role: user.role, email: user.email, keyHash, tokenKind: 'personal' };
   } catch {
     return null;
   }
@@ -243,6 +243,88 @@ async function hashPersonalKey(token) {
 
 function isAdmin(auth) {
   return auth.tokenKind === 'admin' || auth.role === 'admin' || auth.role === 'owner';
+}
+
+const USAGE_WINDOWS = { '15m': 15 * 60_000, '1h': 60 * 60_000, '4h': 4 * 60 * 60_000, '24h': 24 * 60 * 60_000, all: null };
+
+async function adminKeyUsage(request, env, auth) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+  const period = new URL(request.url).searchParams.get('period') || '1h';
+  if (!Object.hasOwn(USAGE_WINDOWS, period)) return oaError(400, 'invalid period', 'invalid_request_error');
+  const until = Date.now();
+  const since = USAGE_WINDOWS[period] === null ? 0 : until - USAGE_WINDOWS[period];
+  try {
+    const result = await db.prepare(`SELECT c.key_hash, c.user_id, c.app, c.model,
+      COUNT(*) AS calls, SUM(c.ok) AS successful,
+      SUM(CASE WHEN c.ok = 0 AND NOT (${PENDING_STREAM_SQL}) THEN 1 ELSE 0 END) AS failed,
+      SUM(${PENDING_STREAM_SQL}) AS pending,
+      SUM(COALESCE(c.tokens_in, 0)) AS tokens_in,
+      SUM(COALESCE(c.tokens_cached, 0)) AS tokens_cached,
+      SUM(COALESCE(c.tokens_out, 0)) AS tokens_out,
+      SUM(CASE WHEN c.tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage,
+      k.label AS key_label, k.status AS key_status
+      FROM ladder_calls c LEFT JOIN identity_api_keys k ON k.key_hash = c.key_hash
+      WHERE c.ts >= ?1 AND c.ts <= ?2
+      GROUP BY c.key_hash, c.user_id, c.app, c.model, k.label, k.status
+      ORDER BY calls DESC`).bind(since, until).all();
+    const num = (value) => Number(value) || 0;
+    const rows = (result.results || []).map((r) => {
+      const category = categoryOf(r.model);
+      const tier = ['go_free', 'or_free', 'zen'].includes(category) || String(r.model || '').startsWith('zen-rings/') ? 'free'
+        : ['go_sub', 'or_paid'].includes(category) ? 'paid' : 'unknown';
+      const tokensIn = num(r.tokens_in), tokensCached = num(r.tokens_cached), tokensOut = num(r.tokens_out);
+      return { key_id: r.key_hash ? r.key_hash.slice(0, 16) : null,
+        key_label: r.key_label || null, key_status: r.key_status || null,
+        user_id: r.user_id || null, app: r.app || null, model: r.model || null, tier,
+        calls: num(r.calls), successful: num(r.successful), failed: num(r.failed), pending: num(r.pending),
+        tokens_in: tokensIn, tokens_cached: tokensCached, tokens_out: tokensOut, no_usage: num(r.no_usage),
+        cost_usd: tier === 'free' ? 0 : tier === 'paid' && category !== 'go_sub' ? costUsd(r.model, tokensIn, tokensCached, tokensOut) : null };
+    });
+    return json(200, { period, since, until, rows });
+  } catch {
+    return oaError(503, 'usage database unavailable', 'unavailable');
+  }
+}
+
+async function adminKeyStatus(env, auth, keyId, action) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'identity database not configured', 'unavailable');
+  try {
+    const found = await db.prepare('SELECT key_hash, user_id, status, revoked_at FROM identity_api_keys WHERE substr(key_hash, 1, 16) = ?1')
+      .bind(keyId).all();
+    if ((found.results || []).length !== 1) return oaError(404, 'key not found', 'invalid_request_error');
+    const key = found.results[0];
+    if (key.revoked_at !== null) return oaError(409, 'key is revoked', 'conflict_error');
+    const status = action === 'suspend' ? 'suspended' : action === 'resume' ? 'active' : 'revoked';
+    const now = Date.now();
+    await db.batch([
+      db.prepare('UPDATE identity_api_keys SET status = ?1, revoked_at = ?2 WHERE key_hash = ?3 AND revoked_at IS NULL')
+        .bind(status, action === 'revoke' ? now : null, key.key_hash),
+      db.prepare('INSERT INTO identity_key_events (ts, actor_user_id, key_hash, key_user_id, action, previous_status, new_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
+        .bind(now, auth.userId || 'legacy-admin', key.key_hash, key.user_id, action, key.status, status),
+    ]);
+    return json(200, { key_id: keyId, status });
+  } catch {
+    return oaError(503, 'identity database unavailable', 'unavailable');
+  }
+}
+
+async function adminKeys(env, auth) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'identity database not configured', 'unavailable');
+  try {
+    const result = await db.prepare(`SELECT substr(k.key_hash, 1, 16) AS key_id,
+      k.user_id, u.email, k.label, k.status, k.created_at, k.last_used_at, k.expires_at, k.revoked_at
+      FROM identity_api_keys k JOIN identity_users u ON u.user_id = k.user_id
+      ORDER BY k.created_at DESC`).all();
+    return json(200, { keys: result.results || [] });
+  } catch {
+    return oaError(503, 'identity database unavailable', 'unavailable');
+  }
 }
 
 async function adminUsersRoute(request, env, auth, pathname) {
@@ -487,6 +569,17 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   if (auth.tokenKind === 'identity-provisioner'
       && !(request.method === 'POST' && url.pathname === '/v1/admin/users')) {
     return oaError(403, 'endpoint is not available to the identity provisioner', 'permission_error');
+  }
+
+  if (request.method === 'GET' && url.pathname === '/v1/admin/key-usage') {
+    return adminKeyUsage(request, env, auth);
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/admin/keys') {
+    return adminKeys(env, auth);
+  }
+  const keyStatusRoute = /^\/v1\/admin\/keys\/([0-9a-f]{16})\/(suspend|resume|revoke)$/.exec(url.pathname);
+  if (request.method === 'POST' && keyStatusRoute) {
+    return adminKeyStatus(env, auth, keyStatusRoute[1], keyStatusRoute[2]);
   }
 
   if (url.pathname === '/v1/admin/users' || url.pathname.startsWith('/v1/admin/users/')
@@ -948,7 +1041,10 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     const trace = makeTrace(request);
     // A personal key is authoritative for attribution; callers cannot bill another user
     // by supplying x-ladder-user. Legacy service tokens retain their existing header behavior.
-    if (auth.tokenKind === 'personal') trace.userId = auth.userId;
+    if (auth.tokenKind === 'personal') {
+      trace.userId = auth.userId;
+      trace.keyHash = auth.keyHash;
+    }
     // The D1 row carries the SAME slug as the OpenRouter "Application" cut (#107) — the sanitised
     // value, not the raw header, so the two views of one call can never disagree.
     //
@@ -959,8 +1055,9 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     // Null keeps "unknown caller" unknown; /v1/analytics reports those rows as `no_app` so the
     // coverage is visible instead of silently missing.
     trace.app = sanitizeAppSlugOrNull(appRaw);
+    const publicTrace = { ...trace, keyHash: undefined };
     if (!r.ok) {
-      console.log(JSON.stringify({ ladder: chat.model, ok: false, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: diagnosticResult.attempts, trace }));
+      console.log(JSON.stringify({ ladder: chat.model, ok: false, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: diagnosticResult.attempts, trace: publicTrace }));
       const traceWrite = logCall(env, trace, chat.model, diagnosticResult, started, { events });
       if (waitUntil) waitUntil(traceWrite);
       else await traceWrite;
@@ -988,7 +1085,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
               ? { ...attempt, outcome: 'stream_incomplete' }
               : attempt),
         };
-        console.log(JSON.stringify({ ladder: chat.model, ok: complete, model: r.model || null, app: appSlug, ms: Date.now() - started, usage, stream_end: reason, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: final.attempts, trace }));
+        console.log(JSON.stringify({ ladder: chat.model, ok: complete, model: r.model || null, app: appSlug, ms: Date.now() - started, usage, stream_end: reason, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: final.attempts, trace: publicTrace }));
         const traceWrite = settleStreamCall(env, pendingRowId, trace, chat.model, final, started, { events, retryable: false });
         if (waitUntil) waitUntil(traceWrite);
         else await traceWrite;
@@ -1003,7 +1100,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         ...cacheHeaders,
       } });
     }
-    console.log(JSON.stringify({ ladder: chat.model, ok: true, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: diagnosticResult.attempts, trace }));
+    console.log(JSON.stringify({ ladder: chat.model, ok: true, model: r.model || null, app: appSlug, ms: Date.now() - started, usage: (r.data && r.data.usage) || null, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: diagnosticResult.attempts, trace: publicTrace }));
     const traceWrite = logCall(env, trace, chat.model, diagnosticResult, started, { events });
     if (waitUntil) waitUntil(traceWrite);
     else await traceWrite;

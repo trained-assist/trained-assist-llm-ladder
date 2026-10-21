@@ -29,8 +29,8 @@ export function makeTrace(request) {
 }
 
 const TRACE_SQL = `INSERT INTO ladder_calls
-  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, tokens_cache_write, app)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`;
+  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, tokens_cache_write, app, key_hash)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`;
 
 const SETTLE_STREAM_SQL = `UPDATE ladder_calls SET ok = ?1, ms = ?2, attempts = ?3,
   tokens_in = ?4, tokens_out = ?5, tokens_cached = ?6, tokens_cache_write = ?7 WHERE rowid = ?8`;
@@ -63,7 +63,7 @@ export async function beginStreamCall(env, trace, ladder, r, started) {
     const result = await db.prepare(TRACE_SQL).bind(
       Date.now(), trace.traceId, trace.runId, trace.userId, trace.chatId,
       trace.sessionId, ladder, 0, r.model || null, Date.now() - started,
-      JSON.stringify(attempts), null, null, null, null, trace.app ?? null,
+      JSON.stringify(attempts), null, null, null, null, trace.app ?? null, trace.keyHash ?? null,
     ).run();
     const rowId = result?.meta?.last_row_id;
     return result?.success && Number.isSafeInteger(rowId) && rowId > 0 ? rowId : null;
@@ -111,7 +111,7 @@ export async function logCall(env, trace, ladder, r, started, { events, retryabl
         ladder, r.ok ? 1 : 0, r.model || null, Date.now() - started,
         JSON.stringify(r.attempts || []),
         ...usageValues(r),
-        trace.app ?? null,
+        trace.app ?? null, trace.keyHash ?? null,
       ).run();
     }
   } catch (e) {

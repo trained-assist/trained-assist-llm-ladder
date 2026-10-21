@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS ladder_calls (
   tokens_in INTEGER,
   tokens_out INTEGER,
   tokens_cached INTEGER,
-  tokens_cache_write INTEGER
+  tokens_cache_write INTEGER,
+  key_hash TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_ladder_calls_trace ON ladder_calls (trace_id, ts);
