@@ -4,7 +4,7 @@ import { run } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore } from '../src/state.js';
 
-const free = 'opencode-go/longcat-2.5-preview-free';
+const free = 'opencode-go/beam-free';
 const paid = 'opencode-go/mimo-v2.6-flash';
 const fallback = 'openrouter/example/fallback:free';
 const config = { ladders: { service: { build: [free, paid, fallback] } } };

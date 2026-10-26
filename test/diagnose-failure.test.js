@@ -15,7 +15,7 @@ test('байтовый отказ зена: байты против лимита
 });
 
 test('потолок Go: токены против потолка ранга', () => {
-  const c = classify({ model: 'opencode-go/longcat-2.5-preview-free', outcome: 'skipped', error: 'input ~128948t above the rung ceiling' });
+  const c = classify({ model: 'opencode-go/beam-free', outcome: 'skipped', error: 'input ~128948t above the rung ceiling' });
   assert.equal(c.code, 'TOKEN_CEILING');
   assert.match(c.fact, /128 ?948 токенов/);
 });
@@ -45,7 +45,7 @@ test('кольцо, таймаут и пустой ответ — свои ко�
 
 test('payloadFacts вытаскивает байты и токены из ПОПЫТОК, а не из фантазии', () => {
   const p = payloadFacts([
-    { model: 'opencode-go/longcat-2.5-preview-free', error: 'input ~128948t above the rung ceiling' },
+    { model: 'opencode-go/beam-free', error: 'input ~128948t above the rung ceiling' },
     { model: 'zen-rings/nemotron-3-ultra-free', error: 'input is too long for the free tier: 559830 bytes, limit 50000' },
     { model: 'ling', error: 'maximum context length is 262144 tokens. However, you requested about 1693039 tokens' },
   ]);

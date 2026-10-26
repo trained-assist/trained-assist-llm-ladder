@@ -10,7 +10,7 @@
   "ladders": {
     "service": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -24,7 +24,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "plan": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -38,7 +38,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "explore": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -52,7 +52,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "general": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -66,7 +66,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "review": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -80,7 +80,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "classify": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -94,7 +94,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "summarize": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -108,7 +108,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "format": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -122,7 +122,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "route": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -136,7 +136,7 @@
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ],
       "gate": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -152,7 +152,7 @@
     },
     "doctor": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -162,7 +162,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "plan": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -172,7 +172,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "explore": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -182,7 +182,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "general": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -192,7 +192,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "review": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -204,7 +204,7 @@
     },
     "research": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -213,7 +213,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "plan": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -222,7 +222,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "general": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -231,7 +231,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "review": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -240,7 +240,7 @@
         "openrouter/dots-studio/dots-3-note-preview:free"
       ],
       "explore": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -250,7 +250,7 @@
     },
     "conversation": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -260,7 +260,7 @@
     },
     "build": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -271,7 +271,7 @@
     },
     "plan": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -281,7 +281,7 @@
     },
     "explore": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -291,7 +291,7 @@
     },
     "general": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -301,7 +301,7 @@
     },
     "review": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -311,7 +311,7 @@
     },
     "build advanced": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "opencode-go/mimo-v2.6-flash",
@@ -333,7 +333,7 @@
     },
     "standard": {
       "build": [
-        "opencode-go/longcat-2.5-preview-free",
+        "opencode-go/beam-free",
         "zen-rings/nemotron-3-ultra-free",
         "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",

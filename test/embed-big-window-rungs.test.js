@@ -10,25 +10,25 @@ const CATALOG = [
   row('openrouter/dots-studio/dots-3-note-preview:free', 512_000, { probe_status: 'ok' }),
   row('openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 1_000_000),
   row('openrouter/inclusionai/ling-3.0-flash-sante:free', 262_144, { probe_status: 'ok' }),
-  row('opencode-go/longcat-2.5-preview-free', null),
+  row('opencode-go/beam-free', null),
 ];
 const MAP = asMap(CATALOG);
 
 test('contextOf: каталог важнее своего замера, неизвестно — это null', () => {
   assert.deepEqual(contextOf('openrouter/dots-studio/dots-3-note-preview:free', MAP, { 'openrouter/dots-studio/dots-3-note-preview:free': { context: 1 } }),
     { context: 512_000, source: 'catalog' }, 'каталог не перетирается локальным замером');
-  assert.deepEqual(contextOf('opencode-go/longcat-2.5-preview-free', MAP, { 'opencode-go/longcat-2.5-preview-free': { context: 131_072 } }),
+  assert.deepEqual(contextOf('opencode-go/beam-free', MAP, { 'opencode-go/beam-free': { context: 131_072 } }),
     { context: 131_072, source: 'probe' }, 'нет в каталоге → берём свой замер');
-  assert.deepEqual(contextOf('opencode-go/longcat-2.5-preview-free', MAP), { context: null, source: null }, 'нет нигде → null');
+  assert.deepEqual(contextOf('opencode-go/beam-free', MAP), { context: null, source: null }, 'нет нигде → null');
 });
 
 test('bigWindows: неизвестный контекст не считается большим окном', () => {
-  const rungs = ['opencode-go/longcat-2.5-preview-free', 'openrouter/inclusionai/ling-3.0-flash-sante:free',
+  const rungs = ['opencode-go/beam-free', 'openrouter/inclusionai/ling-3.0-flash-sante:free',
     'openrouter/dots-studio/dots-3-note-preview:free'];
   assert.deepEqual(bigWindows(rungs, MAP, {}, 300_000), ['openrouter/dots-studio/dots-3-note-preview:free'],
     '262K < 300K не проходит, unknown — тем более');
-  assert.deepEqual(bigWindows(rungs, MAP, { 'opencode-go/longcat-2.5-preview-free': { context: 400_000 } }, 300_000),
-    ['opencode-go/longcat-2.5-preview-free', 'openrouter/dots-studio/dots-3-note-preview:free'],
+  assert.deepEqual(bigWindows(rungs, MAP, { 'opencode-go/beam-free': { context: 400_000 } }, 300_000),
+    ['opencode-go/beam-free', 'openrouter/dots-studio/dots-3-note-preview:free'],
     'собственный замер делает ранг полноценным окном');
 });
 
@@ -39,7 +39,7 @@ test('pickCandidates: только бесплатные и доступные, �
     row('openrouter/inclusionai/ling-3.0-flash-sante:free', 262_144),   // контекст ниже порога
     { ...row('openrouter/x/paid:free', 1_000_000), price_out: 0.5 },      // платная
     { ...row('openrouter/x/gone:free', 1_000_000), available: 0 },        // недоступная
-    row('opencode-go/longcat-2.5-preview-free', null),                     // без инфы — остаётся кандидатом
+    row('opencode-go/beam-free', null),                     // без инфы — остаётся кандидатом
   ];
   const picked = pickCandidates(rows, ['openrouter/dots-studio/dots-3-note-preview:free'], { threshold: 300_000 });
   const ids = picked.map((r) => r.model_id);
@@ -49,7 +49,7 @@ test('pickCandidates: только бесплатные и доступные, �
   assert.ok(!ids.includes('openrouter/inclusionai/ling-3.0-flash-sante:free'), 'контекст ниже порога отбрасывается');
   assert.deepEqual(ids[0], 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     '1M из каталога идёт первым — надёжнее всего');
-  assert.ok(ids.includes('opencode-go/longcat-2.5-preview-free'), 'без инфы кандидат остаётся: решит --verify');
+  assert.ok(ids.includes('opencode-go/beam-free'), 'без инфы кандидат остаётся: решит --verify');
 });
 
 test('insertAt: вставляем сразу после последнего большого окна, а не в голову', () => {

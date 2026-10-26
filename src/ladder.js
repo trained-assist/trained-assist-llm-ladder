@@ -54,7 +54,7 @@ export const REASONING_MODELS = [
   'openrouter/inclusionai/ling-3.0-flash',
   'openrouter/xiaomi/mimo-v2.6-flash',
   'opencode-go/deepseek-v4-flash',
-  'opencode-go/longcat-2.5-preview-free',
+  'opencode-go/beam-free',
   'opencode-go/qwen3.8-flash',
   'opencode-go/deepseek-flash',
   'opencode-go/glm-5.3-flash',

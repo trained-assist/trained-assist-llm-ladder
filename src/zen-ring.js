@@ -64,7 +64,7 @@ export const ZEN_RACE_MODELS = Object.freeze([
   // Два новичка без своих замеров в жирной полосе — их и добавляем ради разнообразия: отказы
   // скоррелированы по ВХОДУ, но модели всё-таки расходятся (батч 628 619 байт: lightning упал,
   // три ответили). Копим данные по ним через `raced` в ответе кольца.
-  'longcat-2.5-preview-free',
+  'beam-free',
   'ling-3.1-flash-free',
 ]);
 export const ZEN_RACE_MAX = 6;
@@ -84,7 +84,7 @@ export const ZEN_MODEL_CONTEXTS = Object.freeze({
   'mimo-v2.6-flash-free': 250_000,
   'big-pickle': 250_000,
   'nemotron-3.5-lightning-free': 250_000,
-  // longcat-2.5-preview-free и ling-3.1-flash-free в карте НЕТ: окна неизвестны, поэтому их
+  // beam-free и ling-3.1-flash-free в карте НЕТ: окна неизвестны, поэтому их
   // не отбрасываем — неизвестность не должна выкидывать модель из гонки.
 });
 

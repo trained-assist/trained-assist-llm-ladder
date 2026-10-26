@@ -22,7 +22,7 @@ function row(model_id, p50_ms, { correct = 2, context = 128_000, out_tokens = 24
 }
 
 const LADDER = [
-  'opencode-go/longcat-2.5-preview-free',
+  'opencode-go/beam-free',
   'zen-rings/nemotron-3-ultra-free',
   'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
   'openrouter/cohere/north-mini-code:free',
@@ -36,7 +36,7 @@ test('orderOpenrouterRungs: the free block is ordered by the measured answer tim
     row('openrouter/cohere/north-mini-code:free', 1_600),
   ];
   assert.deepEqual(orderOpenrouterRungs(rungs, rows, 500), [
-    'opencode-go/longcat-2.5-preview-free',
+    'opencode-go/beam-free',
     'zen-rings/nemotron-3-ultra-free',
     'openrouter/cohere/north-mini-code:free',   // the fastest measured model leads the block
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
@@ -136,7 +136,7 @@ test('orderBenchmarkedRungs: the Go block rules still apply and the OpenRouter b
 });
 
 test('orderBenchmarkedRungs: a ladder without an OpenRouter free block is untouched', () => {
-  const rungs = ['opencode-go/longcat-2.5-preview-free', 'opencode-go/mimo-v2.6-flash'];
+  const rungs = ['opencode-go/beam-free', 'opencode-go/mimo-v2.6-flash'];
   assert.deepEqual(orderBenchmarkedRungs(rungs, [row('openrouter/a:free', 100)], 500), rungs);
 });
 

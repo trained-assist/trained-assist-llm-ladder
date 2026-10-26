@@ -1190,14 +1190,14 @@ test('raceModelsFor: запрошенная первой, env переопред
 test('фильтр по окну: модель с известным меньшим контекстом вылетает, неизвестная — остаётся', () => {
   assert.equal(zenContextOf({}, 'nemotron-3-ultra-free'), ZEN_MODEL_CONTEXTS['nemotron-3-ultra-free'],
     'подтверждённая нижняя граница читается из карты');
-  assert.equal(zenContextOf({}, 'longcat-2.5-preview-free'), null, 'окно неизвестно — null');
+  assert.equal(zenContextOf({}, 'beam-free'), null, 'окно неизвестно — null');
   assert.equal(zenContextOf({ ZEN_MODEL_CONTEXTS: '{"exo-free": 131072}' }, 'exo-free'), 131_072, 'env переопределяет');
   assert.equal(zenContextOf({ ZEN_MODEL_CONTEXTS: '{сломанный json}' }, 'exo-free'), null, 'битый env не роняет вызов');
 
   // 1 МБ ≈ 250K токенов: все четыре «старичка» как раз на границе, новички без окна — не трогаем
   const wide = raceModelsFor({}, 'nemotron-3-ultra-free', 250_000);
   assert.ok(wide.includes('nemotron-3-ultra-free'), '250K токенов — ровно на границе, остаётся');
-  assert.ok(wide.includes('longcat-2.5-preview-free'), 'неизвестное окно не выкидывает модель');
+  assert.ok(wide.includes('beam-free'), 'неизвестное окно не выкидывает модель');
 
   // а теперь у其中一个 модели окно меньше входа
   const withSmall = { ZEN_MODEL_CONTEXTS: JSON.stringify({ ...ZEN_MODEL_CONTEXTS, 'big-pickle': 32_000 }) };

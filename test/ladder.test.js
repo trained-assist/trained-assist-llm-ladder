@@ -46,7 +46,7 @@ for (const [name, roles] of Object.entries(config.ladders)) {
 // именно он сжигает ключи и паркуется. В продовых лестницах с 2026-10-07 голова — бесплатный
 // Go (longcat), который надбавку не ест, поэтому такие тесты получают свой порядок, а не
 // привязку к тому, что стоит в конфиге сегодня.
-const PAID_GO_HEAD = ['opencode-go/mimo-v2.6-flash', 'opencode-go/longcat-2.5-preview-free',
+const PAID_GO_HEAD = ['opencode-go/mimo-v2.6-flash', 'opencode-go/beam-free',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free'];
 const PAID_FIRST = { ...GOCFG, ladders: { ...GOCFG.ladders, service: { ...GOCFG.ladders.service, build: PAID_GO_HEAD } } };
 const GOLADDER = GOCFG.ladders.service.build;
@@ -97,7 +97,7 @@ const DOTS = 'openrouter/dots-studio/dots-3-note-preview:free';
 
 test('config: #67 — zen ring opens, mimo = первая платная Go, платный сегмент по цене, бесплатный хвост (#36/#42 + owner 2026-10-08)', () => {
   assert.deepEqual(LADDER, [
-    'opencode-go/longcat-2.5-preview-free',
+    'opencode-go/beam-free',
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
@@ -147,7 +147,7 @@ test('config: #67 — zen ring opens, mimo = первая платная Go, п�
   // идёт платный Go, потом $0-хвост OpenRouter — и только потом платный хвост. Инвариант, ради
   // которого тест и писался, сохранён: пока бесплатный тир не кончился, платный хвост не трогают.
   const freeTail = LADDER.filter(m => !m.startsWith('zen-rings/'));
-  assert.equal(freeTail[0], 'opencode-go/longcat-2.5-preview-free', 'бесплатный Go — первый вне zen');
+  assert.equal(freeTail[0], 'opencode-go/beam-free', 'бесплатный Go — первый вне zen');
   assert.ok(LADDER.indexOf(MIMO) < LADDER.findIndex(m => m.startsWith('openrouter/') && m.endsWith(':free')),
     'платный сегмент стоит перед бесплатным хвостом OpenRouter');
 });
@@ -484,16 +484,16 @@ test('every key limited → paid Go rungs parked, free Go rungs keep serving (#6
   const r = await run(msg, { env, config: PAID_FIRST, store, fetchImpl: fakeFetch(beh, calls) });
   // платный Go в голове жжёт оба ключа → паркуется,
   // yet the free Go rung right behind it answers in the SAME call
-  assert.equal(r.model, 'opencode-go/longcat-2.5-preview-free', 'free Go serves while every key is limited');
+  assert.equal(r.model, 'opencode-go/beam-free', 'free Go serves while every key is limited');
   assert.ok(store.state.health['opencode-go/mimo-v2.6-flash'], 'paid Go rung is parked');
-  assert.equal(store.state.health['opencode-go/longcat-2.5-preview-free'], undefined, 'free Go rung is never parked');
+  assert.equal(store.state.health['opencode-go/beam-free'], undefined, 'free Go rung is never parked');
   assert.deepEqual(calls.filter(c => c.url.includes('opencode.ai')).map(c => c.model),
-    ['mimo-v2.6-flash', 'mimo-v2.6-flash', 'longcat-2.5-preview-free'],
+    ['mimo-v2.6-flash', 'mimo-v2.6-flash', 'beam-free'],
     'paid rung once per key, then the free rung on the last key');
   // next call: paid Go still parked → the free rung is the head that answers
   const calls2 = [];
   const r2 = await run(msg, { env, config: PAID_FIRST, store, fetchImpl: fakeFetch({}, calls2) });
-  assert.equal(r2.model, 'opencode-go/longcat-2.5-preview-free');
+  assert.equal(r2.model, 'opencode-go/beam-free');
   // окно истекло → платный Go снова в голове, без ручных шагов
   for (const m of Object.keys(store.state.health)) store.state.health[m].skipUntil = Date.now() - 1;
   for (const k of Object.keys(store.state.keys.exhausted)) store.state.keys.exhausted[k] = Date.now() - 1;
@@ -680,7 +680,7 @@ async function readAll(stream) {
 
 test('free-headed ladder rotates Go keys round-robin across calls (#81)', async () => {
   resetFreeGoKeyCursor();
-  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/longcat-2.5-preview-free'] } } };
+  const cfg = { ...config, ladders: { ...config.ladders, free: { build: ['opencode-go/beam-free'] } } };
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push(init.headers.Authorization);
@@ -780,16 +780,16 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
 });
 
 test('zen_ring: switched off — the ring rungs are not attempted at all', async () => {
-  const cfg = { ...GOCFG, zen_ring: false, ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free', 'opencode-go/longcat-2.5-preview-free'] } } };
+  const cfg = { ...GOCFG, zen_ring: false, ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free', 'opencode-go/beam-free'] } } };
   const calls = [];
   const r = await run(msg, { env, config: cfg, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
   assert.equal(r.ok, true);
-  assert.equal(r.model, 'opencode-go/longcat-2.5-preview-free');
+  assert.equal(r.model, 'opencode-go/beam-free');
   assert.ok(!JSON.stringify(r.attempts).includes('zen-rings/'), 'the ring rung is not even attempted');
 });
 
 test('zen_ring: the flag on — the ring rungs stay in the walk', async () => {
-  const cfg = { ...GOCFG, zen_ring: true, ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free', 'opencode-go/longcat-2.5-preview-free'] } } };
+  const cfg = { ...GOCFG, zen_ring: true, ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free', 'opencode-go/beam-free'] } } };
   const r = await run(msg, { env, config: cfg, store: memoryStore(2), fetchImpl: fakeFetch({}, []) });
   assert.ok(JSON.stringify(r.attempts).includes('zen-rings/'), 'the ring rung is attempted');
 });
@@ -801,14 +801,14 @@ test('config: the zen ring is switched off until its runners are back', () => {
 });
 
 test('config: doctor = Go MiMo first, then stronger Go models, cheapest Go last (owner 2026-09-28 / 2026-10-08)', () => {
-  const expected = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
+  const expected = ['opencode-go/beam-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
     'opencode-go/deepseek-v4-pro', BIG, DOTS];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
 test('config: research is split by role — Go reads first, 1M-free tail, cheapest Go last (owner 2026-09-30 / 2026-10-08)', () => {
-  const reader = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', BIG, DOTS];
-  const thinker = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', BIG, DOTS];
+  const reader = ['opencode-go/beam-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', BIG, DOTS];
+  const thinker = ['opencode-go/beam-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash', BIG, DOTS];
   assert.deepEqual(config.ladders.research.explore, reader);
   for (const role of ['build', 'plan', 'general', 'review']) assert.deepEqual(config.ladders.research[role], thinker, role);
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
@@ -817,7 +817,7 @@ test('config: research is split by role — Go reads first, 1M-free tail, cheape
 
 test('config: conversation = hh-skill writing — mimo первой платной Go, платный только на Go (owner 2026-10-01 / 2026-10-08)', () => {
   const expected = [
-    'opencode-go/longcat-2.5-preview-free',
+    'opencode-go/beam-free',
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
@@ -836,12 +836,12 @@ test('config: conversation = hh-skill writing — mimo первой платно
 // (service/conversations — как есть) и сборка из четырёх лестниц для opencode (профили
 // free / master / advanced).
 test('config: tier ladders — build=base, build advanced=mimo, picture gemini, free $0 (#71)', () => {
-  const FG = 'opencode-go/longcat-2.5-preview-free';
+  const FG = 'opencode-go/beam-free';
   // Владелец 2026-10-08: «на OR нет денег — платный должен быть на Go». Платный OR-хвост
   // убран из всех не-фри лестниц (каждый такой вызов = 402), платный сегмент теперь только Go.
   const paid = [];
   const base = [
-    'opencode-go/longcat-2.5-preview-free',
+    'opencode-go/beam-free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
   ];
   const advanced = [MIMO, BIG, DOTS, ...paid];
@@ -897,7 +897,7 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.equal(config.ladders.service.build[4], 'zen-rings/big-pickle', 'кольцевые бесплатные — перед блоком openrouter/*:free');
   assert.equal(config.ladders.service.build[5], 'zen-rings/nemotron-3.5-lightning-free', '…и обе');
   assert.equal(config.ladders.service.build[6], 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'платный сегмент один — mimo — и сразу бесплатный хвост OpenRouter');
-  assert.equal(config.ladders.service.build[0], 'opencode-go/longcat-2.5-preview-free', 'бесплатный Go открывает лестницу');
+  assert.equal(config.ladders.service.build[0], 'opencode-go/beam-free', 'бесплатный Go открывает лестницу');
   assert.deepEqual(config.ladders.service.build.slice(1, 3),
     ['zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free'], 'за ним пара zen-rings');
 });
@@ -1087,7 +1087,7 @@ test('zen upstreamRequest: relay URL + relay token, no OpenRouter attribution, m
 // contains a zen rung. The relay mechanics below are what matter here — pin them to an explicit
 // config (the DIAG_CFG pattern) instead of to GOLADDER[0]/GOLADDER[1].
 const ZEN_WALK = [
-  'opencode-go/longcat-2.5-preview-free',
+  'opencode-go/beam-free',
   'opencode-zen/mimo-v2.6-flash-free',
   'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
 ];
@@ -1158,7 +1158,7 @@ test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forward
 // models ahead of every paid rung on every text ladder. A rename or a reordering here silently sends
 // traffic back to the paid tail, so the exact shape is pinned rather than derived.
 test('CONFIG CONTRACT: the zen-rings head is nemotron-3-ultra-free → mimo-2.6-flash-free, everywhere it fits', () => {
-  const FREE_GO = 'opencode-go/longcat-2.5-preview-free';
+  const FREE_GO = 'opencode-go/beam-free';
   // Голова с 2026-10-07: бесплатный Go, затем пара zen-rings. Go замерен быстрее зена на том же
   // промпте (3.9 с против 19.8 с на 74 КБ) и не имеет ни холодного старта, ни дневного бюджета.
   const ZEN_HEAD = [FREE_GO, 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free'];
