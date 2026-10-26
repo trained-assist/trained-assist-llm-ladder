@@ -235,12 +235,15 @@ test('benchmarkOpenrouterModel: a paid model is not measured', async () => {
 const isOpenrouterFree = (m) => m.startsWith('openrouter/') && m.endsWith(':free');
 const isFree = (m) => isOpenrouterFree(m)
   || ((m.startsWith('opencode-go/') || m.startsWith('zen-rings/')) && m.endsWith('-free'));
+// The zen ring tail (owner 2026-10-09) rides the ring behind every working free rung — it is the
+// deliberate dead-head fallback, so it sits AFTER the OpenRouter free block, not before it.
+const isZenTail = (m) => m === 'zen-rings/nemotron-3.5-lightning-free' || m === 'zen-rings/big-pickle';
 
 test('every ladder: the OpenRouter free block comes after the free rungs of the other providers', () => {
   for (const [name, roles] of Object.entries(config.ladders)) {
     for (const [role, rungs] of Object.entries(roles)) {
       const block = rungs.filter(isOpenrouterFree);
-      const others = rungs.filter((m) => isFree(m) && !isOpenrouterFree(m));
+      const others = rungs.filter((m) => isFree(m) && !isOpenrouterFree(m) && !isZenTail(m));
       if (!block.length) continue;
       const lastOther = rungs.lastIndexOf(others[others.length - 1]);
       const firstBlock = rungs.indexOf(block[0]);
@@ -249,6 +252,12 @@ test('every ladder: the OpenRouter free block comes after the free rungs of the 
       // the block is contiguous — the fast lane reorders it as one piece
       const indexes = rungs.map((m, i) => (isOpenrouterFree(m) ? i : -1)).filter((i) => i >= 0);
       assert.deepEqual(indexes, indexes.map((_, k) => indexes[0] + k), `${name}.${role}: the free OpenRouter block is split`);
+      // the zen ring tail rides behind the whole working free segment (owner 2026-10-09)
+      const tail = rungs.filter(isZenTail);
+      if (tail.length) {
+        assert.ok(rungs.indexOf(tail[0]) > indexes[indexes.length - 1],
+          `${name}.${role}: the zen ring tail sits behind the OpenRouter free block`);
+      }
     }
   }
 });

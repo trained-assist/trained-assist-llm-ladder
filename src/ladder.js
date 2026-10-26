@@ -78,6 +78,27 @@ export function minTokensFor(model) {
   return REASONING.has(model) ? REASONING_MIN_TOKENS : MIN_TOKENS;
 }
 
+// Context window for Go models (used in the ladder to skip rungs that cannot fit the input)
+// These are the measured context windows for opencode-go models that are part of the ladder:
+export const GO_CONTEXT = {
+  'opencode-go/beam-free': 100_000,
+  'opencode-go/mimo-v2.6-flash': 100_000,
+  'opencode-go/qwen3.8-flash': 100_000,
+  'opencode-go/deepseek-v4-pro': 100_000,
+  'opencode-go/mimo-v2.6-flash-free': 100_000,
+  'opencode-go/mimo-v2.5-free': 100_000,
+  'opencode-go/qwen3.7-plus': 100_000,
+  'opencode-go/deepseek-v4.1-flash': 100_000,
+  'opencode-go/glm-5.3-flash': 100_000,
+  'opencode-go/space-bunny-free': 100_000,
+};
+
+// Check if the model can handle the given number of tokens based on its context window
+export function canFitTokens(model, tokens) {
+  if (!model.startsWith('opencode-go/')) return true; // non-GO models have no context window constraint here
+  return tokens <= (GO_CONTEXT[model] || 100_000);
+}
+
 export const DEFAULT_LADDER = 'service'; // legacy alias 'deepseek' resolves here (issue #49)
 const DEFAULT_ROLE = 'build';
 // OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
@@ -880,6 +901,18 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       continue;
     }
     const rungInputTokens = estimateTokens(body);
+    // #38: a rung whose measured context window cannot fit the input is skipped BEFORE the
+    // attempt — measured 2026-10-07: opencode-go takes ~98K tokens, and at ~123K answers
+    // `429 Endpoint is unavailable` while rotating through every key — 48 s and three keys for
+    // no answer. Refusing before the attempt is the whole point, and refusing must NOT poison
+    // the rung's health: the request is wrong for it, the model is fine (same rule as a context
+    // overflow). The skip is recorded as `above the rung ceiling` so the diag can tell a real
+    // context-class failure from a skipped-by-size gate.
+    if (!canFitTokens(model, rungInputTokens)) {
+      attempts.push({ model, outcome: 'skipped',
+        error: `input ~${rungInputTokens}t above the rung ceiling` });
+      continue;
+    }
     const isFreeGo = isGo && model.endsWith('-free');
     const plan = hedgePlan(rungInputTokens);
     const rungBudget = Math.min(timeoutMs, left);

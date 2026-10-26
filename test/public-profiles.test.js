@@ -54,7 +54,11 @@ test('free is fail-closed at $0; standard is free-first with a paid reserve; fas
   const fast = config.ladders.fast.build;
   assert.ok(freeRungs.length > 1);
   assert.ok(freeRungs.every(free));
-  assert.ok(freeRungs.every((model) => model.startsWith('zen-rings/') || model.startsWith('openrouter/')));
+  // The free ladder opens with the free Go rung (owner 2026-10-07): every rung is $0, and the
+  // working rungs are zen-rings or OpenRouter. The Go rung is the deliberate head.
+  assert.equal(freeRungs[0], 'opencode-go/beam-free', 'the free ladder opens with the free Go rung');
+  assert.ok(freeRungs.slice(1).every((model) => model.startsWith('zen-rings/') || model.startsWith('openrouter/')),
+    'every free rung after the Go head is zen-rings or OpenRouter');
   assert.ok(freeRungs.every((model) => !prices[model] || prices[model].every((amount) => amount === 0)));
   assert.ok(standard.slice(0, 5).every(free));
   assert.ok(standard.slice(5).every((model) => !free(model) && prices[model]?.[0] > 0 && prices[model]?.[1] > 0));
