@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Integration test for context-optimizer: simulates various failure scenarios
-// Run: node scripts/test-context-optimizer.mjs
+// Integration test for chunker: simulates various failure scenarios
+// Run: node scripts/test-chunker.mjs
 
-import { optimizeContext } from '../src/context-optimizer.js';
+import { chunkAndSummarize } from '../src/chunker.js';
 
 const scenarios = [
   {
@@ -92,7 +92,7 @@ for (const scenario of scenarios) {
   const attempt = (env, model, bodyArg, keyIndex, opts) => scenario.attempt(env, model, bodyArg, keyIndex, opts, callCount);
 
   try {
-    const result = await optimizeContext(
+    const result = await chunkAndSummarize(
       body, {}, async () => {}, 'opencode-go/beam-free', attempt, 100
     );
 

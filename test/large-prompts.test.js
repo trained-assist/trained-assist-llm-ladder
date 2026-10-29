@@ -84,7 +84,7 @@ test('oversized history is summarized before the first rung, and the reduced pro
   const question = 'what did we decide about the cache?';
   // ~100 assistant turns of 4 KB each ≈ 400 KB ≈ 100K tokens of history.
   // Force optimizer with a small limit via env override (staging mode).
-  const testEnv = { ...env, LADDER_CONTEXT_OPTIMIZER_LIMIT: '20000' };
+  const testEnv = { ...env, LADDER_CHUNKER_LIMIT: '20000' };
   const history = Array.from({ length: 100 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(4000)}` }));
   const input = { model: 'service', messages: [
     { role: 'system', content: 'be concise' },
