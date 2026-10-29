@@ -156,6 +156,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0018_monitoring_automation.sql --remote || true
+      - name: Apply benchmark quality history schema (#337)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        # CREATE TABLE / INDEX IF NOT EXISTS — additive, idempotent. The ALTER (quality_summary)
+        # is not idempotent in SQLite; a duplicate-column error means it is already applied.
+        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0019_benchmark_quality_history.sql --remote || true
       - name: Provision D1 zen database
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
