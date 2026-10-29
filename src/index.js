@@ -50,9 +50,8 @@ export default {
   // Every 2 min (wrangler.toml [triggers]): grow the ring if the queue is waiting, bury dead
   // tasks, re-check quarantined models. Bounded by ZEN_SWEEP_MAX and by the same 50/500 budget as
   // an ordinary /zen/run; both halves are idempotent, so a missed or duplicated tick is harmless.
-  // Every 2 h: one free-model collection pass (catalog + probe + diff). Every 6 h: benchmark the
-  // top free models. Cloudflare dispatches all crons through this single handler — the cron
-  // expression arrives in event.cron.
+  // Every 2 h: one free-model collection pass (catalog + probe + diff + bench). Cloudflare
+  // dispatches all crons through this single handler — the cron expression arrives in event.cron.
   scheduled(event, env, ctx) {
     const cron = event?.cron;
     if (cron === '0 */2 * * *') {

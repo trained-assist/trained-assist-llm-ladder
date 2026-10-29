@@ -360,6 +360,10 @@ const GOOD_GO_FETCH = async (_url, init) => {
   if (prompt.includes('one short word')) {
     return new Response(JSON.stringify({ choices: [{ message: { content: 'Hello' } }] }), { status: 200 });
   }
+  // longform: 50-70 words. Automated testing earns its keep by catching regressions before users do, letting teams ship changes with confidence and far less manual effort. A fast, reliable test suite shortens feedback loops, documents expected behaviour, and makes refactoring safer. Teams that test well spend less time debugging and more time building features.
+  if (prompt.includes('50 to 70 word paragraph')) {
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Automated testing earns its keep by catching regressions before users do, letting teams ship changes with confidence and far less manual effort. A fast, reliable test suite shortens feedback loops, documents expected behaviour, and makes refactoring safer. Teams that test well spend less time debugging and more time building features.' } }] }), { status: 200 });
+  }
   return new Response(JSON.stringify({ choices: [{ message: { content: 'ready' } }] }), { status: 200 });
 };
 
@@ -368,7 +372,7 @@ test('benchmarkGoModel: withTasks runs the standard tasks and records a full qua
     fetchImpl: GOOD_GO_FETCH, withTasks: true,
   });
   assert.equal(result.status, 'ready');
-  assert.deepEqual(Object.keys(result.benchmark.tasks).sort(), ['arithmetic', 'json', 'short']);
+  assert.deepEqual(Object.keys(result.benchmark.tasks).sort(), ['arithmetic', 'json', 'longform', 'short']);
   assert.equal(result.benchmark.tasks.json.passed, 2);
   assert.equal(result.benchmark.tasks.arithmetic.passed, 2);
   assert.equal(result.benchmark.tasks.short.passed, 2);
@@ -422,7 +426,7 @@ test('benchmarkOpenrouterModel: withTasks produces the same quality shape as the
     key: 'sk-or-test-key', fetchImpl: GOOD_GO_FETCH, withTasks: true,
   });
   assert.equal(result.status, 'ready');
-  assert.deepEqual(Object.keys(result.benchmark.tasks).sort(), ['arithmetic', 'json', 'short']);
+  assert.deepEqual(Object.keys(result.benchmark.tasks).sort(), ['arithmetic', 'json', 'longform', 'short']);
   const q = result.quality_summary;
   assert.equal(q.json_valid, 1);
   assert.equal(q.task_pass, 1);
@@ -615,9 +619,9 @@ test('collectFreeModels: probe budget is respected', async () => {
 
 test('collectFreeModels: benchmarks an unseen Go free model and persists results automatically', async () => {
   const db = fakeD1();
-  const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, now: 5000 });
+  const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, benchmarkZen: false, now: 5000 });
   // The pass measures the free models of BOTH providers: the Go rung and the OpenRouter free
-  // model of the catalog.
+  // model (Zen is excluded with benchmarkZen: false for this test).
   assert.equal(run.benchmarks.length, 2);
   assert.equal(run.benchmarks[0].model_id, 'opencode-go/space-bunny-free');
   assert.equal(run.benchmarks[0].status, 'ready');
