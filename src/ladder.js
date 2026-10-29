@@ -21,7 +21,7 @@ import { estimateTokens, estimateInputTokens, hedgePlan, ttfbFactor, GO_CONTEXT,
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
 import { resolveProviderPool } from './provider-credentials.js';
-import { optimizeContext } from './context-optimizer.js';
+import { chunkAndSummarize } from './chunker.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -1003,39 +1003,43 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     rungs = live.length ? live : keyed;
   }
 
-  // ── Pre-Ladder Context Optimization (#331) ───────────────────────────────────────────
-  // If the input exceeds the first free rung's context window, split the history into
-  // chunks, ask that rung to summarize each chunk's relevance, and replace the prompt
-  // with a compact version. This keeps the free tier from dying on oversized contexts
-  // (measured: 21 of 28 `no first token in time` refusals were on payloads ≥ 100 KB).
-  // Fail-open: if the optimizer throws or returns nothing, the original body is used.
-  // Env override `LADDER_CONTEXT_OPTIMIZER_LIMIT` forces a specific limit (for staging/tests).
+  // ── Pre-Ladder chunking (#331) ────────────────────────────────────────────────────
+  // If the input exceeds the first free rung's context window, the HISTORY is split
+  // into chunks, each chunk is summarized for relevance on that same free rung (map),
+  // and the summaries are merged with the verbatim question into a compact prompt
+  // (reduce). This keeps the free tier from dying on oversized contexts (measured:
+  // 21 of 28 `no first token in time` refusals were on payloads ≥ 100 KB).
+  // The threshold is DYNAMIC: contextOf(firstFreeRung) × 0.85 — when the free tier's
+  // window shrinks (900K → ~100K), the trigger point follows it down; the old fixed
+  // 80K floor was a guess and did not track the rung.
+  // Fail-open: if chunking throws or every map call fails, the original body is used.
+  // Env override `LADDER_CHUNKER_LIMIT` forces a specific limit (for staging/tests).
   const initialTokens = estimateTokens(body);
   const firstFreeRung = rungs.find(m => m.startsWith('opencode-go/') && m.endsWith('-free'));
   if (firstFreeRung) {
     const rungContext = contextOf(firstFreeRung, orContextCatalog);
     // Safety margin: keep 15% headroom for response tokens and tokenizer variance.
     const effectiveLimit = rungContext ? Math.floor(rungContext * 0.85) : Infinity;
-    // Env override: if set, use it instead (e.g., LADDER_CONTEXT_OPTIMIZER_LIMIT=20000 for staging).
-    const forcedLimit = env?.LADDER_CONTEXT_OPTIMIZER_LIMIT
-      ? Number(env.LADDER_CONTEXT_OPTIMIZER_LIMIT)
+    // Env override: if set, use it instead (e.g., LADDER_CHUNKER_LIMIT=20000 for staging).
+    const forcedLimit = env?.LADDER_CHUNKER_LIMIT
+      ? Number(env.LADDER_CHUNKER_LIMIT)
       : null;
     const threshold = forcedLimit && forcedLimit > 0 ? forcedLimit : effectiveLimit;
 
     if (threshold !== Infinity && initialTokens > threshold) {
       try {
-        const optimized = await optimizeContext(
+        const optimized = await chunkAndSummarize(
           body, env, fetchImpl, firstFreeRung, attempt, threshold
         );
         if (optimized !== body) {
           body = optimized;
-          reportProgress(onProgress, { type: 'context_optimized', rung: firstFreeRung,
+          reportProgress(onProgress, { type: 'chunked', rung: firstFreeRung,
             tokens_before: initialTokens, tokens_after: estimateTokens(optimized),
             threshold, rung_context: rungContext });
         }
       } catch (e) {
         // Optimization is a best-effort pre-step: a failure here must not poison the request.
-        console.error('[context-optimizer] failed, proceeding with original:', e && e.message);
+        console.error('[chunker] failed, proceeding with original:', e && e.message);
       }
       // Re-measure after optimization: the race band, ttfb factor and the logged
       // input size must describe what we actually SEND, not what the client sent.

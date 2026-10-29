@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// validate-context-optimizer.mjs — replay the context optimizer over real
+// validate-chunker.mjs — replay the context optimizer over real
 // historical fat sessions WITHOUT live LLM calls (deterministic mock map).
 //
 // Prints only sizes, chunk/summary counts and compression ratios — never the
 // content of the private session prompts (same rule as fat-session-bench.mjs).
 //
 // Usage:
-//   node scripts/validate-context-optimizer.mjs            # threshold 80000
-//   node scripts/validate-context-optimizer.mjs --limit 20000
-//   node scripts/validate-context-optimizer.mjs --fail every    # all maps fail
-//   node scripts/validate-context-optimizer.mjs --fail every2   # every 2nd fails
+//   node scripts/validate-chunker.mjs            # threshold 80000
+//   node scripts/validate-chunker.mjs --limit 20000
+//   node scripts/validate-chunker.mjs --fail every    # all maps fail
+//   node scripts/validate-chunker.mjs --fail every2   # every 2nd fails
 //
 // Exit code 0 = no crash (fail-open holds). Failures are EXPECTED for the
 // --fail modes; the script just proves the schema does not break.
@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
-import { optimizeContext, getLastUserQuestion } from '../src/context-optimizer.js';
+import { chunkAndSummarize, getLastUserQuestion } from '../src/chunker.js';
 import { estimateInputTokens } from '../src/size-policy.js';
 
 const arg = (name, def) => {
@@ -71,7 +71,7 @@ async function run() {
     let out;
     let err = null;
     try {
-      out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', (e, r, b, k, o) => mockAttempt(state, e, r, b, k, o), LIMIT);
+      out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', (e, r, b, k, o) => mockAttempt(state, e, r, b, k, o), LIMIT);
     } catch (e) { err = e.message; }
     const optimized = out !== body;
     const outTok = optimized ? estimateInputTokens(out) : inTok;

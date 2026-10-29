@@ -1,9 +1,10 @@
-// context-optimizer.js — Pre-Ladder Processing for oversized inputs.
+// chunker.js — Pre-Ladder chunking + summarization.
 //
-// Splits conversation history (everything except the last user question) into chunks
-// of ≤ CHUNK_TOKEN_LIMIT tokens, asks the first free Go rung to summarize each chunk's
-// relevance, and rebuilds a compact prompt for the ladder's first step.
-//
+// Splits conversation history (everything before the LAST user question) into
+// chunks, asks the first free Go rung to summarize each chunk's relevance
+// (map), then merges the summaries into a compact prompt for the ladder's
+// first step (reduce). Fail-open at every level: a failed chunk is dropped,
+// all-fail falls back to the original body.
 // Dependency-free of the Workerd runtime: runs in plain `node --test` (imports nothing
 // from ladder.js at module load — the attempt() callback is injected by the caller).
 
@@ -107,9 +108,9 @@ export async function mapChunk(rung, chunk, userQuestion, env, fetchImpl, attemp
     // Not ok: skip, guard, empty pool, HTTP failure — keep the reason visible so
     // a drop is never silent in the logs (review #4).
     const reason = (result && (result.reason_code || result.error)) || (result ? 'empty answer' : 'attempt returned nothing');
-    console.warn(`[context-optimizer] chunk dropped on ${rung}: ${reason}`);
+    console.warn(`[chunker] chunk dropped on ${rung}: ${reason}`);
   } catch (e) {
-    console.warn(`[context-optimizer] chunk map threw on ${rung}: ${e && e.message}`);
+    console.warn(`[chunker] chunk map threw on ${rung}: ${e && e.message}`);
   }
   return null;
 }
@@ -134,7 +135,7 @@ export function reduceMessages(originalMessages, userQuestion, summaries) {
 // Returns the optimized body, or the original body if optimization is not applicable
 // (single chunk, no free rung, or all chunks failed).
 // `chunkLimit` is injectable so tests can exercise the split path with a small limit.
-export async function optimizeContext(body, env, fetchImpl, firstFreeRung, attempt, chunkLimit = CHUNK_TOKEN_LIMIT) {
+export async function chunkAndSummarize(body, env, fetchImpl, firstFreeRung, attempt, chunkLimit = CHUNK_TOKEN_LIMIT) {
   const messages = body.messages;
   // History = everything except the LAST user turn. Earlier user turns are part of
   // the conversation (clarifications, answers, follow-ups) and must be chunked,

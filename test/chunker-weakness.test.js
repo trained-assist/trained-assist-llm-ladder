@@ -22,8 +22,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  optimizeContext, chunkMessages, getLastUserQuestion, MAP_SYSTEM, buildMapPrompt,
-} from '../src/context-optimizer.js';
+  chunkAndSummarize, chunkMessages, getLastUserQuestion, MAP_SYSTEM, buildMapPrompt,
+} from '../src/chunker.js';
 
 const LIMIT = 100;
 
@@ -39,7 +39,7 @@ test('order: summaries are emitted in chunk order (chronology survives reduce)',
     const marker = (b.messages[0].content.match(/turn (\d+)/) || [])[1];
     return { ok: true, content: `SUMMARY from chunk starting at turn ${marker}` };
   };
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
   assert.ok(out !== body);
   const summaryMsg = out.messages.find(m => m.content.includes('Relevant context summaries'));
   const positions = [...summaryMsg.content.matchAll(/turn (\d+)/g)].map(m => Number(m[1]));
@@ -55,7 +55,7 @@ test('recency: the summaries block sits immediately adjacent to the question in 
     const marker = (b.messages[0].content.match(/turn (\d+)/) || [])[1];
     return { ok: true, content: `SUMMARY turn ${marker}` };
   };
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
   const summaryIdx = out.messages.findIndex(m => m.content.includes('Relevant context summaries'));
   const userIdx = out.messages.findIndex(m => m.role === 'user');
   assert.ok(summaryIdx === userIdx - 1 || summaryIdx === userIdx + 1,
@@ -75,7 +75,7 @@ test('cross-chunk: the user question is present in EVERY map prompt', async () =
     prompts.push(b.messages[0].content);
     return { ok: true, content: 'SUMMARY: cache decision' };
   };
-  await optimizeContext({ messages }, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
+  await chunkAndSummarize({ messages }, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
   assert.ok(prompts.length >= 2, `expected multiple map prompts, got ${prompts.length}`);
   for (const p of prompts) {
     assert.ok(p.includes(question), 'each chunk must be judged against the SAME question');
@@ -107,7 +107,7 @@ test('history: earlier user turns are kept as chunked history, only the LAST is 
     prompts.push(b.messages[0].content);
     return { ok: true, content: 'SUMMARY: kept' };
   };
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
   assert.ok(out !== body, 'optimization ran');
   const allPrompts = prompts.join('\n');
   assert.ok(allPrompts.includes('clarification 0'), 'early user turns reach the map phase');
@@ -160,7 +160,7 @@ test('oversize: the over-limit chunk fails its map call, but the rest still opti
     }
     return { ok: true, content: 'SUMMARY: normal chunk survived' };
   };
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', attempt, 100);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', attempt, 100);
   assert.ok(out !== body, 'optimization proceeds despite the over-limit chunk failing');
   const summaryMsg = out.messages.find(m => m.content.includes('Relevant context summaries'));
   assert.ok(summaryMsg.content.includes('SUMMARY: normal chunk survived'));
@@ -211,7 +211,7 @@ test('fidelity: each summary is passed through as-is (bounded by the map max_tok
     seen.push(b);
     return { ok: true, content: 'SUMMARY: short and checkable' };
   };
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', attempt, LIMIT);
   assert.ok(out !== body);
   for (const b of seen) {
     assert.ok(b.max_tokens <= 1500, `map budget must stay small, got ${b.max_tokens}`);
