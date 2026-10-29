@@ -34,6 +34,33 @@ test('orderBenchmarkedGoRungs: context-specific speed chooses first model and re
   assert.deepEqual(orderBenchmarkedGoRungs(rungs, rows, 20_000), ['opencode-go/incumbent-free', 'opencode-go/new-free', 'openrouter/free']);
 });
 
+// When the incumbent has no valid benchmark for the tier, it must NOT block
+// promotion of measured candidates. Treat unmeasured incumbent as infinitely
+// slow ("нет бенчмарка → считать неизмеренным и пропускать").
+test('orderBenchmarkedGoRungs: unmeasured incumbent does not block promotion of measured candidates', () => {
+  const rungs = ['opencode-go/incumbent-free', 'openrouter/free'];
+  const rows = [
+    // incumbent: no benchmark (bench_status pending, no tier data)
+    { model_id: 'opencode-go/incumbent-free', available: 1, bench_status: 'pending', benchmark: null },
+    // new model: measured and fast
+    { model_id: 'opencode-go/new-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 2, p50_ms: 200 }, large: { attempts: 2, successes: 2, p50_ms: 900 } } } },
+    // flaky model: not eligible (successes < 2)
+    { model_id: 'opencode-go/flaky-free', available: 1, bench_status: 'ready', benchmark: { tiers: { small: { attempts: 2, successes: 1, p50_ms: 100 } } } },
+  ];
+  // The measured new model should be promoted before the unmeasured incumbent.
+  assert.deepEqual(orderBenchmarkedGoRungs(rungs, rows, 500), ['opencode-go/new-free', 'opencode-go/incumbent-free', 'openrouter/free']);
+});
+
+// When ALL models are unmeasured, the ladder is unchanged.
+test('orderBenchmarkedGoRungs: all-unmeasured leaves ladder untouched', () => {
+  const rungs = ['opencode-go/incumbent-free', 'openrouter/free'];
+  const rows = [
+    { model_id: 'opencode-go/incumbent-free', available: 1, bench_status: 'pending', benchmark: null },
+    { model_id: 'opencode-go/new-free', available: 1, bench_status: 'pending', benchmark: null },
+  ];
+  assert.deepEqual(orderBenchmarkedGoRungs(rungs, rows, 500), rungs);
+});
+
 // Behaviour tests run against a config with the zen-rings head removed: those rungs are cold in
 // tests (no D1 rows, no workers), so every call would failover — and the GOLADDER[0]/GOFREE[0]
 // indexes below address Go/OpenRouter rungs. Config-assertion tests keep the real `config`.
