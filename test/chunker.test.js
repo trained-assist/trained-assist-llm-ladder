@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, chunkMessages, getLastUserQuestion, optimizeContext } from '../src/context-optimizer.js';
+import { estimateTokens, chunkMessages, getLastUserQuestion, chunkAndSummarize } from '../src/chunker.js';
 
 function completion(content) {
   return { id: 'test-id', object: 'chat.completion', created: 1,
@@ -47,19 +47,19 @@ test('estimateTokens: bytes/4, and it grows with message count', () => {
   assert.ok(estimateTokens(two) > estimateTokens(one));
 });
 
-test('optimizeContext: small input passes through unchanged', async () => {
+test('chunkAndSummarize: small input passes through unchanged', async () => {
   const body = { messages: [{ role: 'user', content: 'hi' }] };
-  const out = await optimizeContext(body, {}, async () => {}, null, summaryAttempt([]));
+  const out = await chunkAndSummarize(body, {}, async () => {}, null, summaryAttempt([]));
   assert.equal(out, body, 'single-chunk input must be returned unchanged (fail-open)');
 });
 
-test('optimizeContext: oversized history is split, summarized and rebuilt', async () => {
+test('chunkAndSummarize: oversized history is split, summarized and rebuilt', async () => {
   const userQuestion = 'the actual question';
   const history = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(120)}` }));
   const body = { model: 'service', messages: [{ role: 'system', content: 'be brief' }, ...history, { role: 'user', content: userQuestion }] };
   const records = [];
   // Small injectable chunk limit so the test splits without building a 320 KB fixture.
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', summaryAttempt(records), 100);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', summaryAttempt(records), 100);
 
   assert.ok(out !== body, 'optimization should return a new body');
   assert.ok(records.length > 1, `expected multiple map calls, got ${records.length}`);
@@ -76,11 +76,11 @@ test('optimizeContext: oversized history is split, summarized and rebuilt', asyn
   assert.ok(estimateTokens(out) < estimateTokens(body));
 });
 
-test('optimizeContext: every chunk failing → fail-open to original body', async () => {
+test('chunkAndSummarize: every chunk failing → fail-open to original body', async () => {
   const history = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(120)}` }));
   const body = { messages: [...history, { role: 'user', content: 'q' }] };
   // attempt always fails.
   const failAttempt = async () => ({ ok: false, error: 'timeout' });
-  const out = await optimizeContext(body, {}, async () => {}, 'opencode-go/beam-free', failAttempt, 100);
+  const out = await chunkAndSummarize(body, {}, async () => {}, 'opencode-go/beam-free', failAttempt, 100);
   assert.equal(out, body, 'all-failed map must return the original body');
 });

@@ -14,7 +14,7 @@ function completion(content) {
 
 // Scenario 1: Optimizer succeeds (all map calls return summaries)
 test('staging: optimizer succeeds → reduced prompt reaches ladder', async () => {
-  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CONTEXT_OPTIMIZER_LIMIT: '5000' };
+  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CHUNKER_LIMIT: '5000' };
   const question = 'what about caching?';
   const history = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(700)}` }));
   const input = { model: 'service', messages: [{ role: 'system', content: 'brief' }, ...history, { role: 'user', content: question }] };
@@ -44,8 +44,8 @@ test('staging: optimizer succeeds → reduced prompt reaches ladder', async () =
   assert.ok(finalCalls[0].messages.some(m => m.content?.includes('SUMMARY')));
   assert.ok(finalCalls[0].messages.some(m => m.content === question), 'question preserved');
 
-  const optEvent = progressEvents.find(e => e.type === 'context_optimized');
-  assert.ok(optEvent, 'context_optimized progress event emitted');
+  const optEvent = progressEvents.find(e => e.type === 'chunked');
+  assert.ok(optEvent, 'chunked progress event emitted');
   assert.equal(optEvent.rung, free);
   assert.ok(optEvent.tokens_before > 5000, 'tokens_before reflects original size');
   assert.ok(optEvent.tokens_after < optEvent.tokens_before, 'tokens_after is smaller');
@@ -60,7 +60,7 @@ test('staging: optimizer succeeds → reduced prompt reaches ladder', async () =
 
 // Scenario 2: All map calls fail → fail-open to original
 test('staging: all map calls fail → fail-open to original body', async () => {
-  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CONTEXT_OPTIMIZER_LIMIT: '5000' };
+  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CHUNKER_LIMIT: '5000' };
   const history = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(700)}` }));
   const input = { model: 'service', messages: [{ role: 'system', content: 'brief' }, ...history, { role: 'user', content: 'q?' }] };
   const seen = [];
@@ -87,12 +87,12 @@ test('staging: all map calls fail → fail-open to original body', async () => {
   const finalCall = seen.find(b => !b.messages[0]?.content?.includes('context filter'));
   assert.ok(finalCall, 'final call happened');
   assert.ok(finalCall.messages.length >= input.messages.length - 1, 'original body preserved (or close)');
-  assert.ok(!progressEvents.find(e => e.type === 'context_optimized'), 'no progress event on fail-open');
+  assert.ok(!progressEvents.find(e => e.type === 'chunked'), 'no progress event on fail-open');
 });
 
 // Scenario 3: Some map calls fail → optimization succeeds with partial summaries
 test('staging: partial map failure → optimization succeeds', async () => {
-  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CONTEXT_OPTIMIZER_LIMIT: '5000' };
+  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CHUNKER_LIMIT: '5000' };
   const history = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(700)}` }));
   const input = { model: 'service', messages: [{ role: 'system', content: 'brief' }, ...history, { role: 'user', content: 'q?' }] };
   const seen = [];
@@ -121,7 +121,7 @@ test('staging: partial map failure → optimization succeeds', async () => {
 
 // Scenario 4: Input under threshold → no optimization
 test('staging: input under threshold → no optimizer triggered', async () => {
-  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CONTEXT_OPTIMIZER_LIMIT: '100000' };
+  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CHUNKER_LIMIT: '100000' };
   const history = Array.from({ length: 3 }, (_, i) => ({ role: 'assistant', content: `turn ${i}` }));
   const input = { model: 'service', messages: [{ role: 'system', content: 'brief' }, ...history, { role: 'user', content: 'q?' }] };
   const seen = [];
@@ -142,7 +142,7 @@ test('staging: input under threshold → no optimizer triggered', async () => {
 
 // Scenario 5: No free rung available → no optimization attempt
 test('staging: no free Go rung in ladder → optimizer skipped', async () => {
-  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CONTEXT_OPTIMIZER_LIMIT: '1000' };
+  const env = { OPENCODE_GO_API_KEYS: 'key1', LADDER_CHUNKER_LIMIT: '1000' };
   const noFreeConfig = { ladders: { service: { build: [paid] } } };
   const history = Array.from({ length: 30 }, (_, i) => ({ role: 'assistant', content: `turn ${i}: ${'x'.repeat(500)}` }));
   const input = { model: 'service', messages: [{ role: 'system', content: 'brief' }, ...history, { role: 'user', content: 'q?' }] };

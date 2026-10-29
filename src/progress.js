@@ -3,7 +3,7 @@
 const CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_EVENTS = 128;
 const TTL_MS = 60 * 60 * 1000;
-const EVENT_TYPES = new Set(['started', 'rung_selected', 'retrying', 'failover', 'context_optimized', 'completed', 'failed']);
+const EVENT_TYPES = new Set(['started', 'rung_selected', 'retrying', 'failover', 'chunked', 'completed', 'failed']);
 
 async function sha256(value) {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
