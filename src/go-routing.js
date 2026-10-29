@@ -23,13 +23,19 @@ export function orderBenchmarkedGoRungs(rungs, rows, tokens) {
   if (first < 0) return rungs;
   const existing = new Set(rungs);
   const base = benchTierResult(rows.find((r) => r.model_id === rungs[first]), tier);
+  // Fallback: when the incumbent has no valid benchmark for this tier, treat it as
+  // "unmeasured" (infinite slowness) so measured candidates are still promoted
+  // ahead of it instead of being blocked. The incumbent stays in the ladder as a
+  // fallback (it is never removed here) — only its anchor strength is dropped.
+  // See issue review: "нет бенчмарка → считать неизмеренным и пропускать".
+  const baseP50 = base ? base.p50_ms : Infinity;
   const candidates = rows
     .filter((r) => !existing.has(r.model_id) && r.model_id.startsWith('opencode-go/') && r.model_id.endsWith('-free'))
     .map((r) => ({ id: r.model_id, score: benchTierResult(r, tier) }))
     .filter((r) => r.score)
     .sort((a, b) => a.score.p50_ms - b.score.p50_ms || a.id.localeCompare(b.id));
   const before = [], after = [];
-  for (const c of candidates) (base && c.score.p50_ms < base.p50_ms ? before : after).push(c.id);
+  for (const c of candidates) (c.score.p50_ms < baseP50 ? before : after).push(c.id);
   return [...rungs.slice(0, first), ...before, rungs[first], ...after, ...rungs.slice(first + 1)];
 }
 
