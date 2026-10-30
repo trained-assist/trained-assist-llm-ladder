@@ -85,8 +85,6 @@ export function park(state, models, untilMs, now = Date.now()) {
 // parked the HEALTHY key 1 for 6h and took Go down for the whole fleet with a working key in the
 // pool. The failed key is what gets parked; if another call already moved `active` onto a usable
 // key, that counts as rotated.
-// Park the key that FAILED (`failedIndex`, default: the active one) for ttlMs and move to the next
-// usable one. → { rotated: true, fromIndex, toIndex } | { rotated: false, retryAt }
 //
 // `scope` decides BOTH where the park is recorded and which parks this caller still respects (#341):
 //
@@ -98,12 +96,6 @@ export function park(state, models, untilMs, now = Date.now()) {
 //     ещё и ключ без платного парка, так что хвост не садится на только что упавший ключ.
 //     Бесплатный ранг эту карту не читает: лимит платного тира ему ничего не говорит (см. шапку
 //     модуля, инцидент 2026-10-28).
-//
-// Concurrency (incident 2026-09-29): calls A and B both start on key 0; A hits the weekly limit and
-// rotates to key 1; B then hits the same limit on key 0. Parking "the active key" at that point
-// parked the HEALTHY key 1 for 6h and took Go down for the whole fleet with a working key in the
-// pool. The failed key is what gets parked; if another call already moved `active` onto a usable
-// key, that counts as rotated.
 export function rotateKey(state, poolSize, ttlMs, now = Date.now(), failedIndex = null, scope = 'account') {
   const exhausted = state.keys.exhausted || {};
   const paid = state.keys.paid || {};
