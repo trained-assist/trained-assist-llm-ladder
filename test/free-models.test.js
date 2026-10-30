@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   collectCatalogs, planProbes, probeRows, diffRows, collectFreeModels,
   upsertStatement, goneStatement, readFreeModels, markdownReport, summarizeRun, PROVIDERS,
-  benchmarkGoModel, goBenchEligible, goBenchOrder,
+  benchmarkGoModel, benchmarkOpenrouterModel, goBenchEligible, goBenchOrder,
+  loadModelQuality,
   probeHistoryStatements, readFreeModelAvailability,
 } from '../src/free-models.js';
 import { readPool } from '../src/ladder.js';
@@ -342,6 +343,116 @@ test('goBenchOrder: only ready, available candidates with two successes in the s
   assert.deepEqual(goBenchOrder(rows, 'large'), ['opencode-go/incumbent-free']);
 });
 
+// ── Quality & standard tasks (issue #337) ────────────────────────────────────────────
+// A model that answers the size tiers but cannot emit valid JSON / solve a trivial problem is
+// NOT selectable — the tasks are a hard gate, and their pass/fail is folded into quality_summary.
+
+const GOOD_GO_FETCH = async (_url, init) => {
+  const messages = JSON.parse(init.body).messages;
+  const prompt = messages[messages.length - 1].content;
+  // The size tiers ask for "ready"; the tasks ask for JSON / a product / a greeting.
+  if (prompt.includes('{"answer"')) {
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"answer": 42, "ok": true}' } }] }), { status: 200 });
+  }
+  if (prompt.includes('multiplied')) {
+    return new Response(JSON.stringify({ choices: [{ message: { content: '221' } }] }), { status: 200 });
+  }
+  if (prompt.includes('one short word')) {
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Hello' } }] }), { status: 200 });
+  }
+  // longform: 50-70 words. Automated testing earns its keep by catching regressions before users do, letting teams ship changes with confidence and far less manual effort. A fast, reliable test suite shortens feedback loops, documents expected behaviour, and makes refactoring safer. Teams that test well spend less time debugging and more time building features.
+  if (prompt.includes('50 to 70 word paragraph')) {
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Automated testing earns its keep by catching regressions before users do, letting teams ship changes with confidence and far less manual effort. A fast, reliable test suite shortens feedback loops, documents expected behaviour, and makes refactoring safer. Teams that test well spend less time debugging and more time building features.' } }] }), { status: 200 });
+  }
+  return new Response(JSON.stringify({ choices: [{ message: { content: 'ready' } }] }), { status: 200 });
+};
+
+test('benchmarkGoModel: withTasks runs the standard tasks and records a full quality summary', async () => {
+  const result = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/space-bunny-free' }, ENV, {
+    fetchImpl: GOOD_GO_FETCH, withTasks: true,
+  });
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(Object.keys(result.benchmark.tasks).sort(), ['arithmetic', 'json', 'longform', 'short']);
+  assert.equal(result.benchmark.tasks.json.passed, 2);
+  assert.equal(result.benchmark.tasks.arithmetic.passed, 2);
+  assert.equal(result.benchmark.tasks.short.passed, 2);
+  const q = result.quality_summary;
+  assert.equal(q.json_valid, 1);
+  assert.equal(q.task_pass, 1);
+  assert.equal(q.correct_rate, 1);
+  assert.equal(q.quality, 1);
+});
+
+test('benchmarkGoModel: external quality (model-quality.json) is merged by bare name as provenance', async () => {
+  // collectFreeModels loads the file once and hands it to every bench; the file is keyed by the
+  // bare model name, so `opencode-go/space-bunny-free` resolves to the `space-bunny-free` entry.
+  const quality = await loadModelQuality();
+  assert.equal(quality['space-bunny-free']?.quality, 'high', 'the fixture file is readable in node');
+  const result = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/space-bunny-free' }, ENV, {
+    fetchImpl: GOOD_GO_FETCH, withTasks: true, quality,
+  });
+  assert.equal(result.quality_summary.external?.quality, 'high');
+  assert.ok(result.quality_summary.external?.evidence?.length, 'the evidence string rides along');
+  assert.equal(result.quality_summary.quality, 1, 'external evidence never overrides the measurement');
+  // An unknown model simply has no external entry — it costs nothing.
+  const unknown = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/nobody-free' }, ENV, {
+    fetchImpl: GOOD_GO_FETCH, withTasks: true, quality,
+  });
+  assert.equal(unknown.quality_summary.external, null);
+});
+
+test('benchmarkGoModel: a model that cannot answer the tasks fails the gate even when the tiers pass', async () => {
+  const result = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/jabber-free' }, ENV, {
+    fetchImpl: async (_url, init) => {
+      const messages = JSON.parse(init.body).messages;
+      const prompt = messages[messages.length - 1].content;
+      // Tiers answer "ready"; the tasks all fail (wrong JSON, wrong number, empty).
+      if (prompt.includes('Reply with exactly')) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'ready' } }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'I refuse.' } }] }), { status: 200 });
+    },
+    withTasks: true,
+  });
+  assert.equal(result.status, 'ready', 'the size tiers still measure fine');
+  const q = result.quality_summary;
+  assert.equal(q.json_valid, 0, 'invalid JSON fails the gate');
+  assert.equal(q.task_pass, 0, 'not all tasks passed');
+  assert.ok(q.quality < 1, 'a gate failure drags the quality scalar below a clean run');
+});
+
+test('benchmarkOpenrouterModel: withTasks produces the same quality shape as the Go bench', async () => {
+  const result = await benchmarkOpenrouterModel({ provider: 'openrouter', model_id: 'openrouter/acme/fast:free' }, ENV, {
+    key: 'sk-or-test-key', fetchImpl: GOOD_GO_FETCH, withTasks: true,
+  });
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(Object.keys(result.benchmark.tasks).sort(), ['arithmetic', 'json', 'longform', 'short']);
+  const q = result.quality_summary;
+  assert.equal(q.json_valid, 1);
+  assert.equal(q.task_pass, 1);
+  assert.equal(q.quality, 1);
+});
+
+test('benchmarkOpenrouterModel: every key throttled surfaces the real http_429, not a generic code', async () => {
+  const result = await benchmarkOpenrouterModel({ provider: 'openrouter', model_id: 'openrouter/acme/fast:free' }, ENV, {
+    keys: ['sk-a', 'sk-b'],
+    fetchImpl: async () => new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 }),
+  });
+  assert.equal(result.benchmark.tiers.small.last_error, 'http_429');
+});
+
+test('buildQuality: with no tasks run, the tier-only quality is measured (json/task null)', async () => {
+  const result = await benchmarkGoModel({ provider: 'opencode-go', model_id: 'opencode-go/space-bunny-free' }, ENV, {
+    fetchImpl: GOOD_GO_FETCH, withTasks: false,
+  });
+  const q = result.quality_summary;
+  assert.equal(q.json_valid, null);
+  assert.equal(q.task_pass, null);
+  assert.equal(q.correct_rate, 1);
+  assert.equal(q.quality, 1, 'tier-only quality is still a valid scalar');
+  assert.deepEqual(result.benchmark.tasks, {}, 'no tasks measured when withTasks is off');
+});
+
 // ── Diff ──────────────────────────────────────────────────────────────────────────
 
 const ROW = (over) => ({
@@ -508,9 +619,9 @@ test('collectFreeModels: probe budget is respected', async () => {
 
 test('collectFreeModels: benchmarks an unseen Go free model and persists results automatically', async () => {
   const db = fakeD1();
-  const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, now: 5000 });
+  const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, benchmarkZen: false, now: 5000 });
   // The pass measures the free models of BOTH providers: the Go rung and the OpenRouter free
-  // model of the catalog.
+  // model (Zen is excluded with benchmarkZen: false for this test).
   assert.equal(run.benchmarks.length, 2);
   assert.equal(run.benchmarks[0].model_id, 'opencode-go/space-bunny-free');
   assert.equal(run.benchmarks[0].status, 'ready');
