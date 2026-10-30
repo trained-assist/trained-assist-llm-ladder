@@ -950,6 +950,14 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   const keyed = all.filter(hasKey);
   if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [], estimated_tokens_in: estimatedTokensIn };
 
+  // Before attempting any rungs, verify there are viable free models available.
+  // This prevents errors from trying to use rungs that have no available free models.
+  // Free models are critical for service rungs; if none are available, we must skip them early.
+  const viableFreeModels = keyed.filter(m => (m.startsWith('opencode-go/') && m.endsWith('-free')) ||
+                                           (m.startsWith('opencode-zen/') && m.endsWith('-free')) ||
+                                           (m.startsWith('openrouter/') && m.endsWith(':free')));
+  const hasViableFree = viableFreeModels.length > 0;
+
   // OpenRouter context windows — the catalog's `context` column (256K / 512K / 1M per
   // model, or null when the provider has not published one). Loaded once per call so the
   // pre-filter below can refuse a rung whose window is smaller than the request BEFORE the
@@ -1003,6 +1011,24 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     rungs = [pinned.rung, ...(rest.length ? rest : keyed.filter(m => m !== pinned.rung))];
   } else {
     rungs = live.length ? live : keyed;
+  }
+
+  // Skip free rungs if there are no viable free models available to serve requests.
+  // This prevents errors when free models that were previously available have disappeared.
+  if (!hasViableFree) {
+    // Identify free rungs that would be attempted
+    const freeRungs = rungs.filter(m => (m.startsWith('opencode-go/') && m.endsWith('-free')) ||
+                                        (m.startsWith('opencode-zen/') && m.endsWith('-free')) ||
+                                        (m.startsWith('openrouter/') && m.endsWith(':free')));
+    // If there are free rungs but no viable free models, skip them
+    if (freeRungs.length > 0) {
+      for (const freeRung of freeRungs) {
+        attempts.push({ model: freeRung, outcome: 'skipped', error: 'no viable free model available' });
+        reportProgress(onProgress, { type: 'rung_skipped', rung: freeRung, reason: 'no_viable_free' });
+      }
+      // Remove free rungs from the rungs list so they're not attempted
+      rungs = rungs.filter(m => !freeRungs.includes(m));
+    }
   }
 
   // ── Pre-Ladder chunking (#331) ────────────────────────────────────────────────────
