@@ -101,12 +101,12 @@
     },
     "doctor": {
       "build": [
-        "opencode-go/deepseek-v4-pro",
-        "opencode-go/qwen3.7-plus",
+        "opencode-go/beam-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/beam-free"
+        "opencode-go/qwen3.7-plus",
+        "opencode-go/deepseek-v4-pro"
       ],
       "plan": [
         "opencode-go/beam-free",
@@ -143,12 +143,11 @@
     },
     "research": {
       "build": [
-        "opencode-go/deepseek-v4-pro",
-        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/beam-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
-        "opencode-go/beam-free"
+        "opencode-go/deepseek-v4.1-flash"
       ],
       "plan": [
         "opencode-go/beam-free",
@@ -248,12 +247,12 @@
     },
     "standard": {
       "build": [
-        "opencode-go/deepseek-v4-pro",
-        "openrouter/google/gemini-3.1-flash-lite-preview",
-        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/beam-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "opencode-go/beam-free"
+        "opencode-go/mimo-v2.6-flash",
+        "openrouter/google/gemini-3.1-flash-lite-preview",
+        "opencode-go/deepseek-v4-pro"
       ],
       "plan": [
         "opencode-go/mimo-v2.6-flash",
