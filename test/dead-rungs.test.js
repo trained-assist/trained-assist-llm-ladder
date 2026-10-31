@@ -139,7 +139,7 @@ test('deadRungs: a failed fetch rethrows with no cache and falls back to the sta
 const DEAD = 'opencode-go/dead-free';
 const LIVE1 = 'opencode-go/live-one';
 const LIVE2 = 'opencode-go/live-two';
-const CFG = { ...config, ladders: { service: { build: [DEAD, LIVE1, LIVE2] } } };
+const CFG = { ...config, ladders: { service: { build: [DEAD, LIVE1, LIVE2] } }, providers: {} };
 const msg = { model: 'service', messages: [{ role: 'user', content: 'hi' }] };
 const baseEnv = { OPENCODE_GO_API_KEYS: 'oc_a,oc_b' };
 
